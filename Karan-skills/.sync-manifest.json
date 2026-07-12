@@ -266,7 +266,7 @@
       "name": "github-operations",
       "path": "github/github-operations",
       "files": 32,
-      "sha256": "5d866607779283235f19d19f00262761a20384c6113cb70bd4d4d651e49bdb81"
+      "sha256": "a511a8bf5cf3393fd8cf8eb901280725f512d19b922c2fd5d7d9550420d5368c"
     },
     {
       "name": "godmode",

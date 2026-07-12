@@ -69,6 +69,16 @@ When the user asks to add an external skill or framework as a **repo-local skill
 4. Update the repo-local manifest/index so future agents know the skill exists and when to read it. Make explicit that it is advisory local context only, not an installed Hermes profile/global skill.
 5. Run the repo validators and skill audit, inspect the diff, commit, push, and verify the remote branch SHA matches local `HEAD` before reporting success.
 
+### Hermes local-skill repository snapshots
+When a user asks to back up or version their **custom Hermes skills** in a GitHub repository:
+1. Classify the source set exactly as Hermes does: include skills whose provenance is `local`; exclude bundled and hub-installed skills. Do not blindly copy the whole `~/.hermes/skills/` tree, because it can contain protected/builtin and hub-managed content as well as caches.
+2. Preserve each selected skill bundle's `SKILL.md`, `references/`, `templates/`, `scripts/`, and assets. Exclude VCS metadata, virtual environments, interpreter caches, and secret-bearing files such as `.env`, private keys, and certificate bundles.
+3. Commit a deterministic manifest containing the selected local skill names, source-relative paths, file counts, and content hashes. Do not put a generation timestamp in it: an unchanged snapshot must produce no Git diff or weekly commit.
+4. Git cannot retain a truly empty directory. Use a documented `.gitkeep` placeholder if the user asks for a reserved empty skill folder.
+5. Version the actual sync implementation in the target repository. For a Hermes no-agent cron, use a small executable wrapper under `~/.hermes/scripts/`, because cron script paths must be relative to that directory; the wrapper may invoke the versioned repository script.
+6. The sync script must refuse to overwrite a dirty or diverged worktree, fast-forward clean `main` before syncing, commit only changed snapshot files, push only when changes exist, and verify local `HEAD` equals the remote branch SHA afterward. A quiet no-change run is the expected healthy result.
+7. Validate the sync script (Python/shell syntax as applicable), re-run it to prove deterministic output, verify every manifest entry resolves to `SKILL.md`, and confirm the folders through the GitHub Contents API after the initial push. Do not require `git diff --check` over a byte-faithful skill snapshot if inherited reference files contain existing trailing whitespace; scope whitespace validation to sync-controlled files and keep source bytes intact.
+
 ### Scheduled direct-to-main sprint commits
 When running as a scheduled cron/sprint in a personal infrastructure repo and the prompt explicitly authorizes repo-local commits/pushes to `main`, use a tighter direct-commit loop instead of opening a PR:
 1. Start with `git status --short --branch`, `git remote -v`, and repo identity checks; stop if the worktree has unknown unrelated edits.
