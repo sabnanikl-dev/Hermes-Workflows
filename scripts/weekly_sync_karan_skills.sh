@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Weekly no-agent cron entry point for the Karan-skills snapshot.
+# Weekly no-agent cron entry point for the rolling 60-day Karan-skills snapshot.
 # It intentionally refuses to overwrite a dirty or diverged main worktree.
 set -euo pipefail
 
@@ -41,4 +41,4 @@ LOCAL_SHA="$(git rev-parse HEAD)"
 REMOTE_SHA="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
 [[ "$LOCAL_SHA" == "$REMOTE_SHA" ]] || { printf 'Karan skills sync failed: remote main verification mismatch\n' >&2; exit 1; }
 
-printf 'Karan skills sync: pushed %s local skills (%s).\n' "$SKILL_COUNT" "$LOCAL_SHA"
+printf 'Karan skills sync: pushed %s recently used local skills from the rolling 60-day window (%s).\n' "$SKILL_COUNT" "$LOCAL_SHA"

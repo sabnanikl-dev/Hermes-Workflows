@@ -1,8 +1,13 @@
 {
-  "schema_version": 1,
-  "selection": "Hermes skills classified as local; hub-installed and bundled skills are excluded.",
+  "schema_version": 2,
+  "selection": "Hermes skills classified as local with recorded use during the rolling last 60 days; hub-installed and bundled skills are excluded.",
+  "usage_window_days": 60,
+  "usage_evidence": [
+    "successful skill_view results in default and specialist-profile session databases",
+    "skills attached to cron jobs whose last_run_at falls within the usage window"
+  ],
   "source": "~/.hermes/skills",
-  "skill_count": 100,
+  "skill_count": 60,
   "skills": [
     {
       "name": "adversarial-product-prd-tournament",
@@ -35,22 +40,10 @@
       "sha256": "c9e354546613b9837ab9520df3e99a49f6f9c41aafd0748958d9743c0a67be95"
     },
     {
-      "name": "baoyu-visual-storytelling",
-      "path": "creative/baoyu-visual-storytelling",
-      "files": 115,
-      "sha256": "3f829dbc1aecc2190caf2cc3d7febf0bc62a9e3d6affc4733485e9458bb37f83"
-    },
-    {
       "name": "brand-website-from-inspiration",
       "path": "brand-website-from-inspiration",
       "files": 2,
       "sha256": "845ad0a11e34e79cf2f6f78b22429568254fb1943e525965df306ab5f4b00283"
-    },
-    {
-      "name": "bulk-email-outreach",
-      "path": "productivity/bulk-email-outreach",
-      "files": 1,
-      "sha256": "73fae65aa32cb793671f08c62776ff4436c576a74d63d60d8c8c7c5c3f6a33fa"
     },
     {
       "name": "client-automation-workflow-scaffolding",
@@ -65,12 +58,6 @@
       "sha256": "c8cfdb634df2e9edfbe05649218e88b81b428b1e31a6291fce30ac24723c3014"
     },
     {
-      "name": "clip",
-      "path": "mlops/models/clip",
-      "files": 2,
-      "sha256": "02c811d69ee859707bf859a3283b070cbfec183fdfd8a97f592059d11d71823e"
-    },
-    {
       "name": "closeout-dream-report-prototype",
       "path": "productivity/closeout-dream-report-prototype",
       "files": 5,
@@ -81,12 +68,6 @@
       "path": "software-development/code-review",
       "files": 4,
       "sha256": "01069065f3e0e75f432dade103d1e1a7e7055322f35707c0b4cce60533e5cfdb"
-    },
-    {
-      "name": "codex-linear-consulting-operations",
-      "path": "productivity/codex-linear-consulting-operations",
-      "files": 3,
-      "sha256": "4e8385ca6126b063d24ff50ba9dc76951849b19f70a40f9a822c3308e6de385a"
     },
     {
       "name": "context7-cli",
@@ -113,18 +94,6 @@
       "sha256": "97960e5464e52c9ee12a4807d208b9f94a808daedfdbb4e6a4f01f9f49b37081"
     },
     {
-      "name": "debugging-hermes-tui-commands",
-      "path": "software-development/debugging-hermes-tui-commands",
-      "files": 1,
-      "sha256": "2ba1e1b975f76ebebafff0e51447566bb0fabcd44852dc2a63161d1cde844567"
-    },
-    {
-      "name": "design-mode-toolkit",
-      "path": "devops/design-mode-toolkit",
-      "files": 2,
-      "sha256": "50efe15769752094b7d10721add5898e02fc25d16a2bdad9a38e125104e1d3e8"
-    },
-    {
       "name": "email-action-workflow",
       "path": "productivity/email-action-workflow",
       "files": 2,
@@ -137,52 +106,10 @@
       "sha256": "d43bb1987e3ebcf02b3409f7404f467f5b939e03db8cfbb6194c1c9eabf89be7"
     },
     {
-      "name": "find-nearby",
-      "path": "leisure/find-nearby",
-      "files": 2,
-      "sha256": "fb0cdfa33eba828038e851f51fe44e4ab6d0b9c3d63c496980ce883331c6bd4a"
-    },
-    {
-      "name": "fine-tuning-with-trl",
-      "path": "mlops/training/trl-fine-tuning",
-      "files": 7,
-      "sha256": "ab3d3f80a1584688a71e7b35472bdb14e8626fff6584236745a858424561f47e"
-    },
-    {
       "name": "firecrawl",
       "path": "firecrawl",
       "files": 3,
       "sha256": "431dec4fc3118809e74396a00e29df61ad395bd7f77f290268ccb3827a0637e2"
-    },
-    {
-      "name": "firecrawl-agent",
-      "path": "firecrawl-agent",
-      "files": 1,
-      "sha256": "3f4f17b7917c1337c5237ec3443d7151d73e93d16ed4bd7e041bbaaab3598689"
-    },
-    {
-      "name": "firecrawl-build-interact",
-      "path": "firecrawl-build-interact",
-      "files": 1,
-      "sha256": "a09400f8b21db440b4ca7ec859398acd6e2c519f014d0db7586b0e0b9cd9c79f"
-    },
-    {
-      "name": "firecrawl-build-onboarding",
-      "path": "firecrawl-build-onboarding",
-      "files": 4,
-      "sha256": "fd30eba4c7fded8e280d3926d209c32ba4ea2dd76d1115e396b19d9ce85641b6"
-    },
-    {
-      "name": "firecrawl-build-scrape",
-      "path": "firecrawl-build-scrape",
-      "files": 1,
-      "sha256": "742381702d535c60133d82e4537302c963c811f8a7c2e046ee49a8128cdf1144"
-    },
-    {
-      "name": "firecrawl-build-search",
-      "path": "firecrawl-build-search",
-      "files": 1,
-      "sha256": "3d64f419969e337cb4fb4a9d1a2352eacbf2ce8f72815db0d3891f5bef1bc482"
     },
     {
       "name": "firecrawl-crawl",
@@ -191,28 +118,10 @@
       "sha256": "8ca47eed996e9111b6e25619ebae30516620f43f60bb44528fcc7002d7c9ea98"
     },
     {
-      "name": "firecrawl-download",
-      "path": "firecrawl-download",
-      "files": 1,
-      "sha256": "e7f488561784e3caa62709ae131b588fb6a76827deca3698c125c46f54b86ad8"
-    },
-    {
       "name": "firecrawl-interact",
       "path": "firecrawl-interact",
       "files": 1,
       "sha256": "4ae6137e9407124143100e8740e5a3d90034945213e5838ca3a5c4bc7fe71306"
-    },
-    {
-      "name": "firecrawl-map",
-      "path": "firecrawl-map",
-      "files": 1,
-      "sha256": "f74cd3b7c1a176b2a1cfd54d97ab592a5043750cc626d7cf3a17db512b04593d"
-    },
-    {
-      "name": "firecrawl-parse",
-      "path": "firecrawl-parse",
-      "files": 1,
-      "sha256": "ed60be6f42b1c5c7d4aa43ac2d917804a3a75eff3d7fc7347bdaf7913c128326"
     },
     {
       "name": "firecrawl-scrape",
@@ -233,28 +142,10 @@
       "sha256": "caf56e07ff6cb0e8bf3852165c0dba6cc94e286ad42db9a769bfa0352f42b618"
     },
     {
-      "name": "gaming-automation-and-servers",
-      "path": "gaming/gaming-automation-and-servers",
-      "files": 4,
-      "sha256": "20e411b5a3f11f90d0b984abe16315dae252998ffe3a4d6c94a073476a64d1ec"
-    },
-    {
       "name": "gateway-troubleshooting",
       "path": "devops/gateway-troubleshooting",
       "files": 5,
       "sha256": "9c4daaf32f8e9806f7d47db746be2ae03e39b246e4630dcbf207440e0a38f160"
-    },
-    {
-      "name": "generative-media-production",
-      "path": "creative/generative-media-production",
-      "files": 74,
-      "sha256": "2d853da93e9251c4b5b50a4dca1c416b03335f57238dd7435f591a670af78eaf"
-    },
-    {
-      "name": "gguf-quantization",
-      "path": "mlops/inference/gguf",
-      "files": 3,
-      "sha256": "e82c6e54829a03524fe3958103b77b73ce70e2ea9a71d61234c0cb3664d5b413"
     },
     {
       "name": "github-issue-specs",
@@ -293,28 +184,10 @@
       "sha256": "26593ec072ea94cfc5a8694e54464f7592c6e6957c5b5bb3f8257a2cd49e6554"
     },
     {
-      "name": "grpo-rl-training",
-      "path": "mlops/training/grpo-rl-training",
-      "files": 3,
-      "sha256": "0aa62f35da3d467a1289498b89acae7b1ee809a3eb73138411d71b55617eab6d"
-    },
-    {
-      "name": "guidance",
-      "path": "mlops/inference/guidance",
-      "files": 4,
-      "sha256": "125056d471ad831be0e8eb32ab62f2354923b75b88fa74dfbb299286c14ae57b"
-    },
-    {
       "name": "hermes-brain-wiki",
       "path": "note-taking/hermes-brain-wiki",
       "files": 1,
       "sha256": "732aa51bd0bd903bb1609b0a025fb1ada933f95a0f960ccd635486a94cf2b900"
-    },
-    {
-      "name": "hermes-s6-container-supervision",
-      "path": "software-development/hermes-s6-container-supervision",
-      "files": 1,
-      "sha256": "d69b3c0c99d88e7e95f55caa0df467bd958e90678d73420f7d902070b9120534"
     },
     {
       "name": "ideation",
@@ -323,28 +196,10 @@
       "sha256": "ac853cd491c8624f5a7db234822240707785e2f1f8b4d1c03070bd45681edd79"
     },
     {
-      "name": "inquiry-form-formspree",
-      "path": "inquiry-form-formspree",
-      "files": 1,
-      "sha256": "7c11240435a91f09c1e11671edabade6f8fa1a4a119d98a8d462fd2f59de17ba"
-    },
-    {
-      "name": "interactive-python-workflows",
-      "path": "data-science/interactive-python-workflows",
-      "files": 1,
-      "sha256": "eb4d573d01d30547073ac26d00423bc2b2ba7f4a6a727fee6f04a14700fda220"
-    },
-    {
       "name": "jmd-menswear",
       "path": "branding/jmd-menswear",
       "files": 16,
       "sha256": "af01c5c080e6f8534556b3d994a10581bd197b7a6c5b9d558f9dc4b4b044cd0d"
-    },
-    {
-      "name": "kanban-codex-lane",
-      "path": "autonomous-ai-agents/kanban-codex-lane",
-      "files": 2,
-      "sha256": "bc029017ade22cf9eb634ed755f4120d1820d153f3c9185ba5671ba66fd54e35"
     },
     {
       "name": "knowledge-memory-workflows",
@@ -365,18 +220,6 @@
       "sha256": "27065ecd3a720524eb4c819fe2d4206b88a1cd86fbb5045037dcc05705966fbb"
     },
     {
-      "name": "llm-inference-and-structured-output",
-      "path": "mlops/llm-inference-and-structured-output",
-      "files": 20,
-      "sha256": "6864a1cb0de3e80db84ec7c50d69e2399f418d76636d74d48bff728719a5519f"
-    },
-    {
-      "name": "llm-training-workflows",
-      "path": "mlops/llm-training-workflows",
-      "files": 11,
-      "sha256": "6837448f3f942e9c3302826dceab2b0a587d59fa4dfb748f20d86f2e2e41d293"
-    },
-    {
       "name": "local-seo-visibility-ops",
       "path": "productivity/local-seo-visibility-ops",
       "files": 23,
@@ -387,18 +230,6 @@
       "path": "devops/local-web-preview",
       "files": 5,
       "sha256": "1df41bca90783d3678db90a57b7f65230676d08128ce3d55efa7358a441ecc07"
-    },
-    {
-      "name": "marta-tracker-api",
-      "path": "reverse-engineering/marta-tracker-api",
-      "files": 2,
-      "sha256": "b55a2d4e034809957e9a757dc29b41c9135adffbf5bfdff9ca4e90ce8588fe4c"
-    },
-    {
-      "name": "mcporter",
-      "path": "mcp/mcporter",
-      "files": 2,
-      "sha256": "409bade0c279f4bcb4b8d4deb2f563dde322a5e6dfc96513ebf1713e7160139f"
     },
     {
       "name": "media-content-workflows",
@@ -419,34 +250,16 @@
       "sha256": "1a84fe172540dadedd091459b2015a667c25446fefec949dcdcdbf22751cf830"
     },
     {
-      "name": "modal-serverless-gpu",
-      "path": "mlops/cloud/modal",
-      "files": 3,
-      "sha256": "91c0baaaf36edf265810bc165425d748161fff175bd0c27dbc938e24d6a73918"
-    },
-    {
       "name": "multi-agent-dev-workflow",
       "path": "multi-agent-dev-workflow",
       "files": 36,
       "sha256": "09ef792edce129895b2a4c8f9d4bb7c3cdec1073a9115b20c51a699f6d6366b5"
     },
     {
-      "name": "multimodal-ml-workflows",
-      "path": "mlops/multimodal-ml-workflows",
-      "files": 9,
-      "sha256": "63af507b356b5bcea5bbdefb36aa5166ac9698912fb45e265ce5e4886f76da8b"
-    },
-    {
       "name": "native-mcp",
       "path": "mcp/native-mcp",
       "files": 4,
       "sha256": "e9a54a3394578c111c96d9e6d7f61049ca0e00fb30b42c9ce7756697491da0e6"
-    },
-    {
-      "name": "next-eslint-flat-config-migration",
-      "path": "software-development/next-eslint-flat-config-migration",
-      "files": 1,
-      "sha256": "c47fc9e70950b8c96eac20c434487249649b056eec83d6bfb0d7a0a2f36e846b"
     },
     {
       "name": "notebooklm-to-github-issues",
@@ -479,18 +292,6 @@
       "sha256": "f3e97f2d0838178743998f4e727cc20c667852ad287c30ce911331367285da2f"
     },
     {
-      "name": "osp-methodology",
-      "path": "productivity/osp-methodology",
-      "files": 5,
-      "sha256": "7584c350a3ca8ee7ba5bcbb0b05a90e5c198a9e95f199fccf5ec582be165d498"
-    },
-    {
-      "name": "peft-fine-tuning",
-      "path": "mlops/training/peft",
-      "files": 3,
-      "sha256": "9290f63a1a30b83db6c1a9c5b91d6119fecab330f981eb1d07abbfb3947d6d0e"
-    },
-    {
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
       "files": 80,
@@ -501,12 +302,6 @@
       "path": "devops/project-kickoff",
       "files": 6,
       "sha256": "519a2b0cdc303f6df8b5a64bb2bccbae6530e054bf1777dcca894d0c5671fbf6"
-    },
-    {
-      "name": "pytorch-fsdp",
-      "path": "mlops/training/pytorch-fsdp",
-      "files": 3,
-      "sha256": "41d0b2e56fcf40b90f1e485efd8f1ba4d8d1921202a3793dd7a278fe0e9c5b3f"
     },
     {
       "name": "research-intelligence-workflows",
@@ -533,28 +328,10 @@
       "sha256": "ae7e5f9bcf2f2a2836cfbf20f6eae9d36a55e9e87dc55bf22663721883445084"
     },
     {
-      "name": "smart-home-lighting-control",
-      "path": "smart-home/smart-home-lighting-control",
-      "files": 1,
-      "sha256": "5a0a80719420b8e8d70f83bbbfc33301fe045532fca09bf7b2a3b2edfb0d8917"
-    },
-    {
       "name": "software-development-lifecycle",
       "path": "software-development/software-development-lifecycle",
       "files": 17,
       "sha256": "c28f8f61b7f56206e3639eca40b26c6f61f9603248a32eb5561aa512aea89d98"
-    },
-    {
-      "name": "spotify",
-      "path": "media/spotify",
-      "files": 1,
-      "sha256": "c72fc64f946601d40cb10295cd9a95fa823075155c968f104aa2e837db4c80bb"
-    },
-    {
-      "name": "stable-diffusion-image-generation",
-      "path": "mlops/models/stable-diffusion",
-      "files": 3,
-      "sha256": "852804819c9815b1b7ee45123b5066c5896e6b5309d1c6effc1061fb804aaae8"
     },
     {
       "name": "subagent-driven-development",
@@ -567,18 +344,6 @@
       "path": "software-development/web-application-qa",
       "files": 9,
       "sha256": "b86f8c119f0a070e74a7f2f9d2eff036415f52288583033f68d9cea536ff271e"
-    },
-    {
-      "name": "webhook-subscriptions",
-      "path": "devops/webhook-subscriptions",
-      "files": 1,
-      "sha256": "7ef378b1c093a2ac4f66b0e9d08d5f2e3881f4e7b750d65771ab2bb4b9a2b5af"
-    },
-    {
-      "name": "whisper",
-      "path": "mlops/models/whisper",
-      "files": 2,
-      "sha256": "9f7af8d1a8ec49f22bd0069e0f19a186aa21c2d336ba9b38684fdfa7808415f4"
     },
     {
       "name": "wiki-health-check",
