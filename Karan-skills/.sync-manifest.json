@@ -1,0 +1,608 @@
+{
+  "schema_version": 1,
+  "selection": "Hermes skills classified as local; hub-installed and bundled skills are excluded.",
+  "source": "~/.hermes/skills",
+  "skill_count": 100,
+  "skills": [
+    {
+      "name": "adversarial-product-prd-tournament",
+      "path": "product-strategy/adversarial-product-prd-tournament",
+      "files": 1,
+      "sha256": "01be93d0cf572f57d6de2cf2037cd4711daff1b8270964e92f8901d104c59f57"
+    },
+    {
+      "name": "agent-workflow-orchestration",
+      "path": "devops/agent-workflow-orchestration",
+      "files": 22,
+      "sha256": "ff7dd5c8f028481c58975ce6221f04971fb22320ce6e5ecb11f4c47409019cd9"
+    },
+    {
+      "name": "apple-macos-automation",
+      "path": "apple/apple-macos-automation",
+      "files": 7,
+      "sha256": "68e20fea1ae5c7925043f4d181b85c7718fa4d2c7b129de7b20fce5b2d02ebe9"
+    },
+    {
+      "name": "autonomous-coding-agents",
+      "path": "autonomous-ai-agents/autonomous-coding-agents",
+      "files": 9,
+      "sha256": "cf96a86f2f94a435716fa4f7b8b1e07e6f934cd3e1237dc1252fccc07cbcb873"
+    },
+    {
+      "name": "autonomous-pr-prover",
+      "path": "software-development/autonomous-pr-prover",
+      "files": 10,
+      "sha256": "c9e354546613b9837ab9520df3e99a49f6f9c41aafd0748958d9743c0a67be95"
+    },
+    {
+      "name": "baoyu-visual-storytelling",
+      "path": "creative/baoyu-visual-storytelling",
+      "files": 115,
+      "sha256": "3f829dbc1aecc2190caf2cc3d7febf0bc62a9e3d6affc4733485e9458bb37f83"
+    },
+    {
+      "name": "brand-website-from-inspiration",
+      "path": "brand-website-from-inspiration",
+      "files": 2,
+      "sha256": "845ad0a11e34e79cf2f6f78b22429568254fb1943e525965df306ab5f4b00283"
+    },
+    {
+      "name": "bulk-email-outreach",
+      "path": "productivity/bulk-email-outreach",
+      "files": 1,
+      "sha256": "73fae65aa32cb793671f08c62776ff4436c576a74d63d60d8c8c7c5c3f6a33fa"
+    },
+    {
+      "name": "client-automation-workflow-scaffolding",
+      "path": "devops/client-automation-workflow-scaffolding",
+      "files": 4,
+      "sha256": "06f1578fddc27dc5c2726b39ab3432aa8ad7ca1ccb074d0198302c717b52c82b"
+    },
+    {
+      "name": "client-ontology-architecture",
+      "path": "software-development/client-ontology-architecture",
+      "files": 7,
+      "sha256": "c8cfdb634df2e9edfbe05649218e88b81b428b1e31a6291fce30ac24723c3014"
+    },
+    {
+      "name": "clip",
+      "path": "mlops/models/clip",
+      "files": 2,
+      "sha256": "02c811d69ee859707bf859a3283b070cbfec183fdfd8a97f592059d11d71823e"
+    },
+    {
+      "name": "closeout-dream-report-prototype",
+      "path": "productivity/closeout-dream-report-prototype",
+      "files": 5,
+      "sha256": "dd52d92067006f8a416c5d2158826bd81003bbf5e0830f626ba6be63d7527124"
+    },
+    {
+      "name": "code-review",
+      "path": "software-development/code-review",
+      "files": 4,
+      "sha256": "01069065f3e0e75f432dade103d1e1a7e7055322f35707c0b4cce60533e5cfdb"
+    },
+    {
+      "name": "codex-linear-consulting-operations",
+      "path": "productivity/codex-linear-consulting-operations",
+      "files": 3,
+      "sha256": "4e8385ca6126b063d24ff50ba9dc76951849b19f70a40f9a822c3308e6de385a"
+    },
+    {
+      "name": "context7-cli",
+      "path": "software-development/context7-cli",
+      "files": 1,
+      "sha256": "dacfd39421ab6e79873eb42ae2e6414171b61892fa8895ed91a1fd49d17255ff"
+    },
+    {
+      "name": "cpanel-wordpress-domain-triage",
+      "path": "devops/cpanel-wordpress-domain-triage",
+      "files": 3,
+      "sha256": "f88226bfd91f8ee7a59455bcfe1009352985668a151792ee85de20ce2e219784"
+    },
+    {
+      "name": "creative-html-visual-artifacts",
+      "path": "creative/creative-html-visual-artifacts",
+      "files": 93,
+      "sha256": "850762f868da104e0324f5ebed4288dcac083b04a2a337451cce8446b6867240"
+    },
+    {
+      "name": "daily-log",
+      "path": "productivity/daily-log",
+      "files": 9,
+      "sha256": "97960e5464e52c9ee12a4807d208b9f94a808daedfdbb4e6a4f01f9f49b37081"
+    },
+    {
+      "name": "debugging-hermes-tui-commands",
+      "path": "software-development/debugging-hermes-tui-commands",
+      "files": 1,
+      "sha256": "2ba1e1b975f76ebebafff0e51447566bb0fabcd44852dc2a63161d1cde844567"
+    },
+    {
+      "name": "design-mode-toolkit",
+      "path": "devops/design-mode-toolkit",
+      "files": 2,
+      "sha256": "50efe15769752094b7d10721add5898e02fc25d16a2bdad9a38e125104e1d3e8"
+    },
+    {
+      "name": "email-action-workflow",
+      "path": "productivity/email-action-workflow",
+      "files": 2,
+      "sha256": "785dfdb26b829c9b0cee6e2335b164525115ca03e1d872b5de5e84efc8a844fb"
+    },
+    {
+      "name": "femme-events-design",
+      "path": "branding/femme-events-design",
+      "files": 8,
+      "sha256": "d43bb1987e3ebcf02b3409f7404f467f5b939e03db8cfbb6194c1c9eabf89be7"
+    },
+    {
+      "name": "find-nearby",
+      "path": "leisure/find-nearby",
+      "files": 2,
+      "sha256": "fb0cdfa33eba828038e851f51fe44e4ab6d0b9c3d63c496980ce883331c6bd4a"
+    },
+    {
+      "name": "fine-tuning-with-trl",
+      "path": "mlops/training/trl-fine-tuning",
+      "files": 7,
+      "sha256": "ab3d3f80a1584688a71e7b35472bdb14e8626fff6584236745a858424561f47e"
+    },
+    {
+      "name": "firecrawl",
+      "path": "firecrawl",
+      "files": 3,
+      "sha256": "431dec4fc3118809e74396a00e29df61ad395bd7f77f290268ccb3827a0637e2"
+    },
+    {
+      "name": "firecrawl-agent",
+      "path": "firecrawl-agent",
+      "files": 1,
+      "sha256": "3f4f17b7917c1337c5237ec3443d7151d73e93d16ed4bd7e041bbaaab3598689"
+    },
+    {
+      "name": "firecrawl-build-interact",
+      "path": "firecrawl-build-interact",
+      "files": 1,
+      "sha256": "a09400f8b21db440b4ca7ec859398acd6e2c519f014d0db7586b0e0b9cd9c79f"
+    },
+    {
+      "name": "firecrawl-build-onboarding",
+      "path": "firecrawl-build-onboarding",
+      "files": 4,
+      "sha256": "fd30eba4c7fded8e280d3926d209c32ba4ea2dd76d1115e396b19d9ce85641b6"
+    },
+    {
+      "name": "firecrawl-build-scrape",
+      "path": "firecrawl-build-scrape",
+      "files": 1,
+      "sha256": "742381702d535c60133d82e4537302c963c811f8a7c2e046ee49a8128cdf1144"
+    },
+    {
+      "name": "firecrawl-build-search",
+      "path": "firecrawl-build-search",
+      "files": 1,
+      "sha256": "3d64f419969e337cb4fb4a9d1a2352eacbf2ce8f72815db0d3891f5bef1bc482"
+    },
+    {
+      "name": "firecrawl-crawl",
+      "path": "firecrawl-crawl",
+      "files": 1,
+      "sha256": "8ca47eed996e9111b6e25619ebae30516620f43f60bb44528fcc7002d7c9ea98"
+    },
+    {
+      "name": "firecrawl-download",
+      "path": "firecrawl-download",
+      "files": 1,
+      "sha256": "e7f488561784e3caa62709ae131b588fb6a76827deca3698c125c46f54b86ad8"
+    },
+    {
+      "name": "firecrawl-interact",
+      "path": "firecrawl-interact",
+      "files": 1,
+      "sha256": "4ae6137e9407124143100e8740e5a3d90034945213e5838ca3a5c4bc7fe71306"
+    },
+    {
+      "name": "firecrawl-map",
+      "path": "firecrawl-map",
+      "files": 1,
+      "sha256": "f74cd3b7c1a176b2a1cfd54d97ab592a5043750cc626d7cf3a17db512b04593d"
+    },
+    {
+      "name": "firecrawl-parse",
+      "path": "firecrawl-parse",
+      "files": 1,
+      "sha256": "ed60be6f42b1c5c7d4aa43ac2d917804a3a75eff3d7fc7347bdaf7913c128326"
+    },
+    {
+      "name": "firecrawl-scrape",
+      "path": "firecrawl-scrape",
+      "files": 1,
+      "sha256": "a4e4537bf5301c35f0448499959c3bb57d0080576221d181e1093c9931bf4658"
+    },
+    {
+      "name": "firecrawl-search",
+      "path": "firecrawl-search",
+      "files": 1,
+      "sha256": "137e42ec992894541b22884d41d000bdf6f695e160695256a36b854c624bfa3d"
+    },
+    {
+      "name": "frontier-gowild-watcher",
+      "path": "travel/frontier-gowild-watcher",
+      "files": 8,
+      "sha256": "caf56e07ff6cb0e8bf3852165c0dba6cc94e286ad42db9a769bfa0352f42b618"
+    },
+    {
+      "name": "gaming-automation-and-servers",
+      "path": "gaming/gaming-automation-and-servers",
+      "files": 4,
+      "sha256": "20e411b5a3f11f90d0b984abe16315dae252998ffe3a4d6c94a073476a64d1ec"
+    },
+    {
+      "name": "gateway-troubleshooting",
+      "path": "devops/gateway-troubleshooting",
+      "files": 5,
+      "sha256": "9c4daaf32f8e9806f7d47db746be2ae03e39b246e4630dcbf207440e0a38f160"
+    },
+    {
+      "name": "generative-media-production",
+      "path": "creative/generative-media-production",
+      "files": 74,
+      "sha256": "2d853da93e9251c4b5b50a4dca1c416b03335f57238dd7435f591a670af78eaf"
+    },
+    {
+      "name": "gguf-quantization",
+      "path": "mlops/inference/gguf",
+      "files": 3,
+      "sha256": "e82c6e54829a03524fe3958103b77b73ce70e2ea9a71d61234c0cb3664d5b413"
+    },
+    {
+      "name": "github-issue-specs",
+      "path": "github/github-issue-specs",
+      "files": 1,
+      "sha256": "04a8031ef2b9c3257d79adfb6b241b31254635252d67952dcc4af7f9583a9cc3"
+    },
+    {
+      "name": "github-operations",
+      "path": "github/github-operations",
+      "files": 32,
+      "sha256": "5d866607779283235f19d19f00262761a20384c6113cb70bd4d4d651e49bdb81"
+    },
+    {
+      "name": "godmode",
+      "path": "red-teaming/godmode",
+      "files": 9,
+      "sha256": "aefc4e16fea9df5707de6c839a962843f3603d8a586f5d99db13d15fd6d71e7b"
+    },
+    {
+      "name": "godmode-harness-creation",
+      "path": "devops/godmode-harness-creation",
+      "files": 6,
+      "sha256": "ebe8e785c8b2a9080e94ee1ea14fd09b7c334f81d65536c10cbfc74faf85cfd2"
+    },
+    {
+      "name": "google-business-profile-api-access",
+      "path": "productivity/google-business-profile-api-access",
+      "files": 3,
+      "sha256": "9e3282a583d1afdee97955535bddffa6b07a16224484be13eee90ad8663134ce"
+    },
+    {
+      "name": "google-search-console",
+      "path": "productivity/google-search-console",
+      "files": 4,
+      "sha256": "26593ec072ea94cfc5a8694e54464f7592c6e6957c5b5bb3f8257a2cd49e6554"
+    },
+    {
+      "name": "grpo-rl-training",
+      "path": "mlops/training/grpo-rl-training",
+      "files": 3,
+      "sha256": "0aa62f35da3d467a1289498b89acae7b1ee809a3eb73138411d71b55617eab6d"
+    },
+    {
+      "name": "guidance",
+      "path": "mlops/inference/guidance",
+      "files": 4,
+      "sha256": "125056d471ad831be0e8eb32ab62f2354923b75b88fa74dfbb299286c14ae57b"
+    },
+    {
+      "name": "hermes-brain-wiki",
+      "path": "note-taking/hermes-brain-wiki",
+      "files": 1,
+      "sha256": "732aa51bd0bd903bb1609b0a025fb1ada933f95a0f960ccd635486a94cf2b900"
+    },
+    {
+      "name": "hermes-s6-container-supervision",
+      "path": "software-development/hermes-s6-container-supervision",
+      "files": 1,
+      "sha256": "d69b3c0c99d88e7e95f55caa0df467bd958e90678d73420f7d902070b9120534"
+    },
+    {
+      "name": "ideation",
+      "path": "creative/creative-ideation",
+      "files": 2,
+      "sha256": "ac853cd491c8624f5a7db234822240707785e2f1f8b4d1c03070bd45681edd79"
+    },
+    {
+      "name": "inquiry-form-formspree",
+      "path": "inquiry-form-formspree",
+      "files": 1,
+      "sha256": "7c11240435a91f09c1e11671edabade6f8fa1a4a119d98a8d462fd2f59de17ba"
+    },
+    {
+      "name": "interactive-python-workflows",
+      "path": "data-science/interactive-python-workflows",
+      "files": 1,
+      "sha256": "eb4d573d01d30547073ac26d00423bc2b2ba7f4a6a727fee6f04a14700fda220"
+    },
+    {
+      "name": "jmd-menswear",
+      "path": "branding/jmd-menswear",
+      "files": 16,
+      "sha256": "af01c5c080e6f8534556b3d994a10581bd197b7a6c5b9d558f9dc4b4b044cd0d"
+    },
+    {
+      "name": "kanban-codex-lane",
+      "path": "autonomous-ai-agents/kanban-codex-lane",
+      "files": 2,
+      "sha256": "bc029017ade22cf9eb634ed755f4120d1820d153f3c9185ba5671ba66fd54e35"
+    },
+    {
+      "name": "knowledge-memory-workflows",
+      "path": "note-taking/knowledge-memory-workflows",
+      "files": 8,
+      "sha256": "75618f659e5c5a33be56ae714349b7666923b502294749d2623feb34457c9fc2"
+    },
+    {
+      "name": "kroger-grocery",
+      "path": "productivity/kroger-grocery",
+      "files": 3,
+      "sha256": "15e25085d62f9f0680a70c6594788e12f14075fef8d643ba06ee6f3b1733e763"
+    },
+    {
+      "name": "linear",
+      "path": "productivity/linear",
+      "files": 2,
+      "sha256": "27065ecd3a720524eb4c819fe2d4206b88a1cd86fbb5045037dcc05705966fbb"
+    },
+    {
+      "name": "llm-inference-and-structured-output",
+      "path": "mlops/llm-inference-and-structured-output",
+      "files": 20,
+      "sha256": "6864a1cb0de3e80db84ec7c50d69e2399f418d76636d74d48bff728719a5519f"
+    },
+    {
+      "name": "llm-training-workflows",
+      "path": "mlops/llm-training-workflows",
+      "files": 11,
+      "sha256": "6837448f3f942e9c3302826dceab2b0a587d59fa4dfb748f20d86f2e2e41d293"
+    },
+    {
+      "name": "local-seo-visibility-ops",
+      "path": "productivity/local-seo-visibility-ops",
+      "files": 23,
+      "sha256": "fb47fe772f1852c2a0308cf3faa4695f9bc928643a8238ecb8772930dbdd4952"
+    },
+    {
+      "name": "local-web-preview",
+      "path": "devops/local-web-preview",
+      "files": 5,
+      "sha256": "1df41bca90783d3678db90a57b7f65230676d08128ce3d55efa7358a441ecc07"
+    },
+    {
+      "name": "marta-tracker-api",
+      "path": "reverse-engineering/marta-tracker-api",
+      "files": 2,
+      "sha256": "b55a2d4e034809957e9a757dc29b41c9135adffbf5bfdff9ca4e90ce8588fe4c"
+    },
+    {
+      "name": "mcporter",
+      "path": "mcp/mcporter",
+      "files": 2,
+      "sha256": "409bade0c279f4bcb4b8d4deb2f563dde322a5e6dfc96513ebf1713e7160139f"
+    },
+    {
+      "name": "media-content-workflows",
+      "path": "media/media-content-workflows",
+      "files": 11,
+      "sha256": "0780d6e6117885f12059ee884511d90f0eb31b3e4a7c3c54bd5c5be5e45bacb6"
+    },
+    {
+      "name": "memory-provider-setup",
+      "path": "memory-provider-setup",
+      "files": 3,
+      "sha256": "777023f04f4205ed8d77d84afee18d961ea356dfe7e1fc8fe846dbcd62d87b01"
+    },
+    {
+      "name": "messaging-platform-operations",
+      "path": "social-media/messaging-platform-operations",
+      "files": 1,
+      "sha256": "1a84fe172540dadedd091459b2015a667c25446fefec949dcdcdbf22751cf830"
+    },
+    {
+      "name": "modal-serverless-gpu",
+      "path": "mlops/cloud/modal",
+      "files": 3,
+      "sha256": "91c0baaaf36edf265810bc165425d748161fff175bd0c27dbc938e24d6a73918"
+    },
+    {
+      "name": "multi-agent-dev-workflow",
+      "path": "multi-agent-dev-workflow",
+      "files": 36,
+      "sha256": "09ef792edce129895b2a4c8f9d4bb7c3cdec1073a9115b20c51a699f6d6366b5"
+    },
+    {
+      "name": "multimodal-ml-workflows",
+      "path": "mlops/multimodal-ml-workflows",
+      "files": 9,
+      "sha256": "63af507b356b5bcea5bbdefb36aa5166ac9698912fb45e265ce5e4886f76da8b"
+    },
+    {
+      "name": "native-mcp",
+      "path": "mcp/native-mcp",
+      "files": 4,
+      "sha256": "e9a54a3394578c111c96d9e6d7f61049ca0e00fb30b42c9ce7756697491da0e6"
+    },
+    {
+      "name": "next-eslint-flat-config-migration",
+      "path": "software-development/next-eslint-flat-config-migration",
+      "files": 1,
+      "sha256": "c47fc9e70950b8c96eac20c434487249649b056eec83d6bfb0d7a0a2f36e846b"
+    },
+    {
+      "name": "notebooklm-to-github-issues",
+      "path": "github/notebooklm-to-github-issues",
+      "files": 27,
+      "sha256": "e9e7e0d3c5b7f784f18a4566fe69a6f800895358b10eb90d99217962f7e095de"
+    },
+    {
+      "name": "notebooklm-to-obsidian-synthesis",
+      "path": "note-taking/notebooklm-to-obsidian-synthesis",
+      "files": 13,
+      "sha256": "30a50c68d053326521efeccd0318f9b17c3a9e7b2a6250260d489ed9d3242643"
+    },
+    {
+      "name": "obsidian-wiki-maintenance",
+      "path": "obsidian-wiki-maintenance",
+      "files": 3,
+      "sha256": "14b9754e050cba55e660f1567e1073e40c9a82fad0c9f803f87bcbdddca66d9b"
+    },
+    {
+      "name": "openrouter-image-analysis",
+      "path": "media/openrouter-image-analysis",
+      "files": 1,
+      "sha256": "6e47a70b4363ebeef254bf5ed8ab7efd2c67c303d306c5bf6f53da1dbd923a9d"
+    },
+    {
+      "name": "ops-execution-harness",
+      "path": "productivity/ops-execution-harness",
+      "files": 4,
+      "sha256": "f3e97f2d0838178743998f4e727cc20c667852ad287c30ce911331367285da2f"
+    },
+    {
+      "name": "osp-methodology",
+      "path": "productivity/osp-methodology",
+      "files": 5,
+      "sha256": "7584c350a3ca8ee7ba5bcbb0b05a90e5c198a9e95f199fccf5ec582be165d498"
+    },
+    {
+      "name": "peft-fine-tuning",
+      "path": "mlops/training/peft",
+      "files": 3,
+      "sha256": "9290f63a1a30b83db6c1a9c5b91d6119fecab330f981eb1d07abbfb3947d6d0e"
+    },
+    {
+      "name": "productivity-integrations",
+      "path": "productivity/productivity-integrations",
+      "files": 80,
+      "sha256": "a59e89b7262b9c012b1e48b803f8548963c071e5fe94dffae037533bfe76e426"
+    },
+    {
+      "name": "project-kickoff",
+      "path": "devops/project-kickoff",
+      "files": 6,
+      "sha256": "519a2b0cdc303f6df8b5a64bb2bccbae6530e054bf1777dcca894d0c5671fbf6"
+    },
+    {
+      "name": "pytorch-fsdp",
+      "path": "mlops/training/pytorch-fsdp",
+      "files": 3,
+      "sha256": "41d0b2e56fcf40b90f1e485efd8f1ba4d8d1921202a3793dd7a278fe0e9c5b3f"
+    },
+    {
+      "name": "research-intelligence-workflows",
+      "path": "research/research-intelligence-workflows",
+      "files": 64,
+      "sha256": "f0924c8cf8c6a15795c83903fed25abc7f073d8691f59bb8ba446c493fa489f7"
+    },
+    {
+      "name": "research-workflow",
+      "path": "research/research-workflow",
+      "files": 16,
+      "sha256": "f9df684ca2adce1b02d23025b5bd4d2fd6a51c49208480f8e43f6ed2c6c10572"
+    },
+    {
+      "name": "resume-tailoring",
+      "path": "productivity/resume-tailoring",
+      "files": 8,
+      "sha256": "80b8765b547b6902c0359be796052df659084ba124486fec2f172f540c6b68b9"
+    },
+    {
+      "name": "sanity-studio-deploy",
+      "path": "devops/sanity-studio-deploy",
+      "files": 4,
+      "sha256": "ae7e5f9bcf2f2a2836cfbf20f6eae9d36a55e9e87dc55bf22663721883445084"
+    },
+    {
+      "name": "smart-home-lighting-control",
+      "path": "smart-home/smart-home-lighting-control",
+      "files": 1,
+      "sha256": "5a0a80719420b8e8d70f83bbbfc33301fe045532fca09bf7b2a3b2edfb0d8917"
+    },
+    {
+      "name": "software-development-lifecycle",
+      "path": "software-development/software-development-lifecycle",
+      "files": 17,
+      "sha256": "c28f8f61b7f56206e3639eca40b26c6f61f9603248a32eb5561aa512aea89d98"
+    },
+    {
+      "name": "spotify",
+      "path": "media/spotify",
+      "files": 1,
+      "sha256": "c72fc64f946601d40cb10295cd9a95fa823075155c968f104aa2e837db4c80bb"
+    },
+    {
+      "name": "stable-diffusion-image-generation",
+      "path": "mlops/models/stable-diffusion",
+      "files": 3,
+      "sha256": "852804819c9815b1b7ee45123b5066c5896e6b5309d1c6effc1061fb804aaae8"
+    },
+    {
+      "name": "subagent-driven-development",
+      "path": "software-development/subagent-driven-development",
+      "files": 3,
+      "sha256": "94f298aea3533b9102f904f066aadca199d39bed49ef3e3459a83498e4fa3e0b"
+    },
+    {
+      "name": "web-application-qa",
+      "path": "software-development/web-application-qa",
+      "files": 9,
+      "sha256": "b86f8c119f0a070e74a7f2f9d2eff036415f52288583033f68d9cea536ff271e"
+    },
+    {
+      "name": "webhook-subscriptions",
+      "path": "devops/webhook-subscriptions",
+      "files": 1,
+      "sha256": "7ef378b1c093a2ac4f66b0e9d08d5f2e3881f4e7b750d65771ab2bb4b9a2b5af"
+    },
+    {
+      "name": "whisper",
+      "path": "mlops/models/whisper",
+      "files": 2,
+      "sha256": "9f7af8d1a8ec49f22bd0069e0f19a186aa21c2d336ba9b38684fdfa7808415f4"
+    },
+    {
+      "name": "wiki-health-check",
+      "path": "obsidian-wiki-maintenance/wiki-health-check",
+      "files": 1,
+      "sha256": "e05071c1edb80801ce2a099ac0048272bcabbbe046b724a733820896c49266a1"
+    },
+    {
+      "name": "writing-humanization-and-voice-editing",
+      "path": "creative/writing-humanization-and-voice-editing",
+      "files": 3,
+      "sha256": "895b7c5b665ee574be39082049bbe681740f8229b375f27ff7ee48254527efad"
+    },
+    {
+      "name": "writing-plans",
+      "path": "software-development/writing-plans",
+      "files": 1,
+      "sha256": "10f90617ee2ab1a78f157a48b9006d15a82761e2316bf6b360857c14a748a0d5"
+    },
+    {
+      "name": "xitter",
+      "path": "social-media/xitter",
+      "files": 2,
+      "sha256": "b2eaffd242853edc404f0fcbba47b0c9bd2c35db39a4866a07371ae806d232fa"
+    }
+  ]
+}
