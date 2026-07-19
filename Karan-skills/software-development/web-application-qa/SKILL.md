@@ -89,10 +89,17 @@ Use `templates/dogfood-report-template.md` for a complete report. If the user re
 - `references/mobile-carousel-load-gate.md` — diagnose carousels that appear stuck on static/no-JS fallback because loaders wait for a full image feed before mounting.
 - `references/mobile-carousel-smooth-scroll-controls.md` — reproduction and evidence pattern for mobile carousel prev/next buttons swallowing rapid taps during smooth scroll.
 - `references/no-js-progressive-enhancement-smoke.md` — sandboxed iframe pattern for no-JS/degraded-path QA on static/progressive-enhancement changes.
+- `references/large-catalog-dialog-test-design.md` — exact offline/browser assertion design for bounded catalogs, deferred image requests, accessible dialogs, URL history, responsive geometry, progressive fallback, and fail-closed action fixtures.
+- `references/async-canvas-readiness-and-identity.md` — diagnose false negatives in slow canvas/WebGL apps using bounded readiness predicates, visible-state gates, exact deep-link identity binding, and fatal-vs-noisy network triage.
+- `references/responsive-paired-action-layout-qa.md` — enforce a human-required two-action row across mobile/desktop with shrink-safe CSS, real geometry assertions, overflow/tap-target checks, mutation testing, and exact-head screenshots.
+- `references/stale-deployment-alias-vs-ui-regression.md` — distinguish absent/clipped UI from a stale public alias by comparing live assets, fetched default-branch artifacts, deployment state, and final mobile geometry.
 - `templates/dogfood-report-template.md` — final QA report template.
 
 ## Pitfalls
 
+- For asynchronous canvas/WebGL applications, do not classify from a short fixed sleep or treat the presence of WebGL as a failure. Wait for a bounded visible readiness/terminal-state predicate and bind identity through the approved URL/token tuple plus rendered state; see `references/async-canvas-readiness-and-identity.md`.
+- When the human contract requires a paired action row to remain side by side, do not trust wrapping flex CSS or one desktop screenshot. Use shrink-safe two-column layout plus real 375/768/1440 geometry assertions for aligned rows, non-overlap, tap targets, container bounds, and zero page overflow; see `references/responsive-paired-action-layout-qa.md`.
+- When merged UI is missing from a stable preview/non-production URL, compare the fetched default-branch artifact, deployment status, and public-alias asset before editing code. Missing DOM controls plus fallback copy often means stale deployment state, not clipping; fetch remote refs first and finish verification on the public alias. See `references/stale-deployment-alias-vs-ui-regression.md`.
 - Do not mutate production app data, CMS content, deployment settings, or code during a read-only audit.
 - Do not call a route healthy just because it returns HTTP 200; verify title, canonical/OG metadata, visible state, CTAs, and console health.
 - Do not rely on screenshots alone; pair each issue with steps and actual/expected behavior.

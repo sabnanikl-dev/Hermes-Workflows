@@ -47,7 +47,8 @@ Use the absorbed Google Workspace helper scripts for read-only checks:
 - `references/absorbed/google-workspace/scripts/setup.py` for auth validation
 - `references/absorbed/google-workspace/scripts/google_api.py` for Gmail search/get calls
 - `references/absorbed/google-workspace/scripts/gws_hermes.sh` for advanced Gmail API endpoints when the Python wrapper does not expose a needed method (for example, `users.threads.get` to verify replies)
-- See `references/gmail-triage-notes.md` for the canonical unread/sent/reply-check queries, reply-verification workflow, and thread-search pitfalls.
+- See `references/gmail-triage-notes.md` for the canonical unread/sent/reply-check queries and thread-search pitfalls.
+- See `references/gmail-reply-verification.md` for the thread-level reply check workflow and the sent-message metadata pitfall.
 
 ### Google Sheets shopping-list workflow
 

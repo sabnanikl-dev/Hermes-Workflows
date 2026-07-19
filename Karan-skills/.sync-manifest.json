@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 60,
+  "skill_count": 61,
   "skills": [
     {
       "name": "adversarial-product-prd-tournament",
@@ -36,8 +36,8 @@
     {
       "name": "autonomous-pr-prover",
       "path": "software-development/autonomous-pr-prover",
-      "files": 10,
-      "sha256": "c9e354546613b9837ab9520df3e99a49f6f9c41aafd0748958d9743c0a67be95"
+      "files": 15,
+      "sha256": "3061a49297242c0f3b92fef0019212a53319d6ff8e50fd28bcb8937157010c61"
     },
     {
       "name": "brand-website-from-inspiration",
@@ -54,8 +54,8 @@
     {
       "name": "client-ontology-architecture",
       "path": "software-development/client-ontology-architecture",
-      "files": 7,
-      "sha256": "c8cfdb634df2e9edfbe05649218e88b81b428b1e31a6291fce30ac24723c3014"
+      "files": 9,
+      "sha256": "af26bfa556d179a9c11f0bd5044bcebb1f794cfb4f440963c195d218b58c85e8"
     },
     {
       "name": "closeout-dream-report-prototype",
@@ -66,8 +66,8 @@
     {
       "name": "code-review",
       "path": "software-development/code-review",
-      "files": 4,
-      "sha256": "01069065f3e0e75f432dade103d1e1a7e7055322f35707c0b4cce60533e5cfdb"
+      "files": 5,
+      "sha256": "8dac0f52d1f50966e0ce420258b8a9aee1bec8fa45aad028922117bbeb2b01ce"
     },
     {
       "name": "context7-cli",
@@ -96,14 +96,20 @@
     {
       "name": "email-action-workflow",
       "path": "productivity/email-action-workflow",
-      "files": 2,
-      "sha256": "785dfdb26b829c9b0cee6e2335b164525115ca03e1d872b5de5e84efc8a844fb"
+      "files": 3,
+      "sha256": "f59a6cefcc6a0f055ef9c46c04b6507e20bc97d04cc89e7439f66a67bdaf5616"
     },
     {
       "name": "femme-events-design",
       "path": "branding/femme-events-design",
       "files": 8,
       "sha256": "d43bb1987e3ebcf02b3409f7404f467f5b939e03db8cfbb6194c1c9eabf89be7"
+    },
+    {
+      "name": "find-nearby",
+      "path": "leisure/find-nearby",
+      "files": 2,
+      "sha256": "fb0cdfa33eba828038e851f51fe44e4ab6d0b9c3d63c496980ce883331c6bd4a"
     },
     {
       "name": "firecrawl",
@@ -150,14 +156,14 @@
     {
       "name": "github-issue-specs",
       "path": "github/github-issue-specs",
-      "files": 1,
-      "sha256": "04a8031ef2b9c3257d79adfb6b241b31254635252d67952dcc4af7f9583a9cc3"
+      "files": 4,
+      "sha256": "6a1e0261d49e31c6c6456e224b55dcfaa9222bbb9ff533c7e3309994c1f49da2"
     },
     {
       "name": "github-operations",
       "path": "github/github-operations",
       "files": 32,
-      "sha256": "42d7b723cb430e008e99266e15b989d4da852b872ead5b0f092807c0a2598605"
+      "sha256": "b61cb9fa97c6b9f237ca61101fe5ce2dd2009307ca5068d09dadd7db67984f6e"
     },
     {
       "name": "godmode",
@@ -181,13 +187,13 @@
       "name": "google-search-console",
       "path": "productivity/google-search-console",
       "files": 4,
-      "sha256": "26593ec072ea94cfc5a8694e54464f7592c6e6957c5b5bb3f8257a2cd49e6554"
+      "sha256": "f79c9be613d87115e85fc15a336328bf3965c620a6b70f0704ae6d812ceeb63e"
     },
     {
       "name": "hermes-brain-wiki",
       "path": "note-taking/hermes-brain-wiki",
       "files": 1,
-      "sha256": "732aa51bd0bd903bb1609b0a025fb1ada933f95a0f960ccd635486a94cf2b900"
+      "sha256": "cad1d7775e17882fd3bcd8593057bcd62e029c114088010836736df8fe17be73"
     },
     {
       "name": "ideation",
@@ -198,8 +204,8 @@
     {
       "name": "jmd-menswear",
       "path": "branding/jmd-menswear",
-      "files": 16,
-      "sha256": "af01c5c080e6f8534556b3d994a10581bd197b7a6c5b9d558f9dc4b4b044cd0d"
+      "files": 20,
+      "sha256": "8c68490a055bce58b8d7ee973a6ee54acbc28d0f6270e43f210f4ffc841debf3"
     },
     {
       "name": "knowledge-memory-workflows",
@@ -217,7 +223,7 @@
       "name": "linear",
       "path": "productivity/linear",
       "files": 2,
-      "sha256": "27065ecd3a720524eb4c819fe2d4206b88a1cd86fbb5045037dcc05705966fbb"
+      "sha256": "b21ba844e64e9f2a0c616b4b5b1e65ea5e84fb5ba510b15184f4882b6b858bdd"
     },
     {
       "name": "local-seo-visibility-ops",
@@ -228,8 +234,8 @@
     {
       "name": "local-web-preview",
       "path": "devops/local-web-preview",
-      "files": 5,
-      "sha256": "1df41bca90783d3678db90a57b7f65230676d08128ce3d55efa7358a441ecc07"
+      "files": 6,
+      "sha256": "3ec0b4878db33d6e0c979df18a69fb7cb841064b4b273ab7523445a21c0e3c3b"
     },
     {
       "name": "media-content-workflows",
@@ -252,8 +258,8 @@
     {
       "name": "multi-agent-dev-workflow",
       "path": "multi-agent-dev-workflow",
-      "files": 36,
-      "sha256": "09ef792edce129895b2a4c8f9d4bb7c3cdec1073a9115b20c51a699f6d6366b5"
+      "files": 47,
+      "sha256": "a099e71d93eefd3cda4004730a462bbe68208c1b86d6ac4ab2f19b6a5ce7c4ea"
     },
     {
       "name": "native-mcp",
@@ -265,19 +271,19 @@
       "name": "notebooklm-to-github-issues",
       "path": "github/notebooklm-to-github-issues",
       "files": 27,
-      "sha256": "e9e7e0d3c5b7f784f18a4566fe69a6f800895358b10eb90d99217962f7e095de"
+      "sha256": "d05941630599ca9ff2177e6a05280e25dcb5cade13a5c9487af7b36c2ad163dc"
     },
     {
       "name": "notebooklm-to-obsidian-synthesis",
       "path": "note-taking/notebooklm-to-obsidian-synthesis",
-      "files": 13,
-      "sha256": "30a50c68d053326521efeccd0318f9b17c3a9e7b2a6250260d489ed9d3242643"
+      "files": 14,
+      "sha256": "63590493cb57ff42723e4f48ad82c7580987c54c5aa6951378f1750521d268a0"
     },
     {
       "name": "obsidian-wiki-maintenance",
       "path": "obsidian-wiki-maintenance",
       "files": 3,
-      "sha256": "14b9754e050cba55e660f1567e1073e40c9a82fad0c9f803f87bcbdddca66d9b"
+      "sha256": "40f12b38b3457b4207bcac11282edd7c173500aa6ee3b91cb709e6c0c2a56a6f"
     },
     {
       "name": "openrouter-image-analysis",
@@ -294,8 +300,8 @@
     {
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
-      "files": 80,
-      "sha256": "a59e89b7262b9c012b1e48b803f8548963c071e5fe94dffae037533bfe76e426"
+      "files": 81,
+      "sha256": "e51832c370ee19d85021f48656480e3b2a92f914158f7f942817a41151b78c84"
     },
     {
       "name": "project-kickoff",
@@ -312,8 +318,8 @@
     {
       "name": "research-workflow",
       "path": "research/research-workflow",
-      "files": 16,
-      "sha256": "f9df684ca2adce1b02d23025b5bd4d2fd6a51c49208480f8e43f6ed2c6c10572"
+      "files": 17,
+      "sha256": "2f1408334576d074b2489ed0507ea62e73a5808746ac87891026f23dd397187e"
     },
     {
       "name": "resume-tailoring",
@@ -342,8 +348,8 @@
     {
       "name": "web-application-qa",
       "path": "software-development/web-application-qa",
-      "files": 9,
-      "sha256": "b86f8c119f0a070e74a7f2f9d2eff036415f52288583033f68d9cea536ff271e"
+      "files": 14,
+      "sha256": "38ee720fc5a2fc906975d9490939acfe247465a4a4199a46181d494f3540a691"
     },
     {
       "name": "wiki-health-check",

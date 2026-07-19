@@ -378,7 +378,7 @@ Combine filters with `or: [...]` for OR logic (default is AND within a filter ob
 - If `stateId` is omitted when creating issues, Linear defaults to the first backlog state
 - The `description` field supports Markdown
 - Use `python3 -m json.tool` or `jq` to format JSON responses for readability
-- Linear label groups can be mutually exclusive: applying two child labels from the same group in `labelIds` can fail with `labelIds not exclusive child labels` (for example `website` + `content`). Retry with one label from that group plus any non-conflicting labels, then verify the created issue's label list.
+- Linear label groups can be mutually exclusive: applying two child labels from the same group in `labelIds` can fail with `labelIds not exclusive child labels` (for example `website` + `content`, or `analytics` + `ops` in the current workspace). For batch creation, assume earlier mutations may have succeeded before a later item failed: re-read the parent and rerun the duplicate search before retrying, then create only the missing issues with one label from each exclusive group plus non-conflicting labels. Verify every created issue's parent, project, state, and final label list.
 
 ## Verification / comment closeout pitfalls
 

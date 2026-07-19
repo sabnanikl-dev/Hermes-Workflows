@@ -18,6 +18,18 @@ A human PR review comment is new source-of-truth input, not a casual note and no
 5. Rerun A/B reviewers on the new `headRefOid`. Prior approvals on the old head do not prove the new design/fix.
 6. Read back current-head review objects and review threads before reporting merge readiness.
 
+## Entry-point copy correction pattern
+
+When the human removes a negative operational caveat from a teaser, feature block, card, or homepage entry point:
+
+1. Preserve the approved positive proposition and CTA instead of replacing the removed caveat with a synonym. For example, keep “made to order” while removing stock/availability language entirely when that is the direction.
+2. Scope the change to the named entry surface. Do not silently rewrite the destination page, catalog, FAQ, historical issue context, or another surface where fuller operational detail remains accurate.
+3. Sweep all **present-tense current-state claims** that describe the changed surface: implementation, durable spec/docs, PR body, acceptance-criteria checklist, and signed fix summary. Do not leave metadata claiming the visible copy still contains the removed statement.
+4. Preserve historical provenance only when clearly labeled as history; otherwise rewrite it as the new current state. Avoid repeating the unwanted customer-facing phrase in the visible implementation merely to explain its absence.
+5. Add a focused rendered-text/DOM assertion for the exact entry surface: required positive wording present, CTA/destination intact, and the whole banned semantic family absent (for example stock, inventory, in-store availability, inspection). This is stronger than checking one exact deleted sentence.
+6. Re-run responsive visual QA because shorter copy can change vertical balance, CTA spacing, and media alignment even when HTML/CSS are unchanged.
+7. Push through current-head A/B re-review. Old approvals are stale after even a copy-only human design correction.
+
 ## Visual inspiration adaptation guardrails
 
 When Karan references a visual inspiration component:

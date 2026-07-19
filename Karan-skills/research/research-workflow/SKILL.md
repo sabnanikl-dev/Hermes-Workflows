@@ -21,6 +21,7 @@ This is the class-level skill for external-information workflows. Narrow researc
 
 Absorbed subsections:
 - **Local business research**: verify local vendors/businesses with multiple sources and avoid search-result hallucinations.
+- **Georgia small-business registration research**: separate entity formation, federal/state tax registration, and location-dependent city/county licensing; distinguish mailing, registered-agent, and physical operating addresses; treat entity-name searches as preliminary only. See `references/georgia-small-business-registration.md`.
 - **Restaurant reservation research**: for date/time/party-size/ambiance constraints, check reservation platforms before generic search.
 - **Resume-to-role research**: extract resume facts first, build search queries from candidate profile, prioritize direct employer pages, and verify role details.
 - **Productized service reports**: combine tools/vendors, competitor analysis, economics, ICPs, GTM, and risks into an HTML business brief.

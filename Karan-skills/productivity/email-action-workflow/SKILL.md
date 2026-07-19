@@ -47,11 +47,29 @@ When an email describes a website, automation, integration, dashboard, or repo-b
 - If it's a follow-up, reference the specific timing ("2 days since the pitch") from the source email
 - If the user corrects the draft as under-informed, re-check the repo/source of truth and rewrite from verified state rather than defending or lightly editing the first draft
 
-### 5. Present the Draft to the User Before Sending
+### 5. Stakeholder-gate outreach (new email, not a reply)
+
+When the email is meant to close approvals for a repo-backed client decision:
+1. Inspect the live/repo state first. Translate technical facts into plain language, but do not hide material reliability findings.
+2. Prefill decisions the user has already made. Ask the stakeholder only for unresolved, decision-shaped answers; use short reply fields or Yes/No/Not-yet options.
+3. Separate the actual site behavior from external systems precisely. Describe a third-party configurator as an external handoff rather than calling it a site redirect or checkout unless the evidence proves that behavior.
+4. If an external embed is proposed, make it a separate QA/approval choice. Do not imply that an iframe is safe merely because a URL returns HTTP 200; require browser/mobile verification of the real customer flow.
+5. State what will *not* happen without approval (for example: no cart, checkout, price, inventory, deployment, or public publication) so stakeholders can answer confidently.
+
+### 5.5 Fillable stakeholder-intake formatting
+When an outreach email asks a stakeholder to supply facts or approvals:
+- Make it reply-ready: put a short bracketed response field immediately beneath every question, using `[Answer: ]` or a specific variant such as `[Answer or corrections: ]`.
+- For confirmation statements, ask the stakeholder to write `Correct` or replace the text in the same bracketed field.
+- Do not use underscore lines, large blank writing areas, or prose telling the recipient where to answer when bracketed fields will do. Karan prefers compact `[Answer: ]` placeholders so the stakeholder can reply inline without reformatting the email.
+- Prefill verified details and ask only for confirmation/correction rather than making the stakeholder restate them.
+- Keep the approval boundary explicit: stakeholder answers become source material for a draft and do not publish, deploy, or mutate live systems by themselves.
+- Reusable starter: `templates/stakeholder-intake-email.txt`.
+
+### 6. Present the Draft to the User Before Sending
 - Always get approval before sending emails on the user's behalf
 - Include the recipient list and subject line so the user can verify
 
-### 6. Send + Verify When Approved
+### 7. Send + Verify When Approved
 - Once the user explicitly approves sending, send the email and then verify the sent message from Gmail, not just the CLI return text.
 - Verify recipient, subject, `SENT` label when available, and key body strings/links.
 - If `gws` can read Gmail but sending fails with insufficient scopes, see `references/gmail-send-gws-scope-fallback.md` for the Python-helper fallback that hides `gws` from `PATH` and uses the Hermes OAuth token directly.

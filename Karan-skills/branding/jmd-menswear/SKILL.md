@@ -33,6 +33,7 @@ triggers:
 - NO AI-generated content. Everything must sound like Lucky.
 - Danny cautious about e-commerce. Online = showroom, not warehouse.
 - Real photos only. No stock images. No AI images.
+- Karan confirms Lucky’s answers are sufficient stakeholder approval for JMD website copy and commerce-adjacent made-to-order handoff details.
 - Lucky approval required before any content goes out.
 - Client-facing reports/presentations for JMD should speak directly to Lucky and Danny, not read like a generic agency audit. Lead with what is working, then exact fixes, then owner-specific approvals. Tie recommendations to calls, directions, store visits, trust, and customer confidence.
 
@@ -61,6 +62,7 @@ Full 12-week plan at: ~/projects/consultancy/JMD-Menswear/plans/
 ## Wiki Pages
 - ~/obsidian-vault/hermes-brain/wiki/consultancy/clients/JMD/Client JMD Menswear.md
 - ~/obsidian-vault/hermes-brain/wiki/consultancy/research/JMD Competitor Landscape.md
+- JMD Visibility issue closeout rule: `references/jmd-visibility-durable-knowledge-closeout.md`. Every active/future JMD Visibility issue must either promote source-backed durable JMD knowledge to the canonical client/topic wiki with exact path + readback evidence in Linear, or explicitly state that no durable knowledge was produced; never mirror task state or transient metrics into Obsidian.
 
 ## Week 1 (starts 2026-04-28)
 - GBP audit + claim
@@ -124,6 +126,10 @@ Full 12-week plan at: ~/projects/consultancy/JMD-Menswear/plans/
 - Avoid AI-generated/avatar-video tools as the core workflow because JMD requires real footage only. AI is acceptable for assistive transcription, caption drafts, clip suggestions, titles/hooks, and file routing when reviewed.
 - CapCut CLI is a useful human-review bridge into CapCut drafts, but treat it as optional and backup-sensitive because it relies on CapCut/JianYing draft schema behavior.
 
+## GA4 Analytics + Hosting Cutover
+- Detailed reference: `references/ga4-cutover-operations.md`.
+- JMD analytics direction is GA4 via the direct Google tag (`gtag.js`), with Google Tag Manager deferred until multiple approved destinations justify it. Keep coding in GitHub and non-coding account/privacy/legacy-Ads/cutover/monitoring work in the JMD Visibility Linear project. Never silently migrate or remove the live legacy Ads/phone-conversion configuration; verify ownership/activity and record an owner-approved preserve/replace/retire decision first.
+
 ## Canonical URL + Social Metadata
 - Detailed reference: `references/canonical-social-metadata.md`
 - For repo SEO/social metadata, current evidence supports HTTPS apex canonical: `https://jmdmenswear.com/`; `www` redirects to apex. Verify live redirect behavior again before changing canonical fields.
@@ -133,7 +139,9 @@ Full 12-week plan at: ~/projects/consultancy/JMD-Menswear/plans/
 ## Website GitHub Issue Creation / UI Polish
 - Post-merge owner approval gate pattern: `references/post-merge-copy-approval-gates.md`. Use it when a merged JMD website PR lands draft customer-facing copy but owner/Karan approval is still required before public/client-facing use; create and verify a Linear approval issue, then comment the boundary back on the merged PR. If Karan narrows routing to one owner (for example “forget Danny, ask Lucky”), respect that exactly: send the approval request only to the named owner, ask only for the approval class they own, and structure the reply fields so the response can be copied back into Linear/repo docs as approval evidence.
 - Service/event landing page implementation guidance: `references/service-event-landing-pages.md`. Use it when adding crawlable local/event-intent pages such as prom formalwear, wedding tuxedo rentals, quinceañera formalwear, or similar high-intent JMD pages. Keep paths descriptive and hyphenated; add unique metadata, self-canonicals, sitemap entries, visible breadcrumbs if using BreadcrumbList, and standard internal links from homepage/About/blog. Preserve the showroom-first/no-ecommerce boundary and the tuxedo-rentals-only public rental constraint unless separately approved.
-- Custom-shoes WordPress→static migration guidance: `references/custom-shoes-wordpress-to-static-migration.md`. Use it for JMD shoes/custom-shoe catalog migration work: source packet first, then `/custom-shoes-conyers-ga/`, fold legacy shoe URL coverage into existing redirect/preflight issues, and keep made-to-order/ecommerce claims approval-gated.
+- Cross-page public-copy regression gate: `references/cross-page-copy-regression-gate.md`. Before opening any new public JMD page PR, audit the new diff against durable site-wide owner/team corrections—not only the task issue's local facts. In particular, issue #132 / PR #154 requires Cornell to be included (or neutral team-safe wording used) whenever new JMD-authored customer copy names Danny and Lucky together; preserve owner/tenure role accuracy and do not rewrite verbatim testimonials.
+- Custom-shoes WordPress→static migration guidance: `references/custom-shoes-wordpress-to-static-migration.md`. Use it for JMD shoes/custom-shoe catalog migration work: source packet first, then `/custom-shoes-conyers-ga/`, fold legacy shoe URL coverage into existing redirect/preflight issues, and keep made-to-order/ecommerce claims source-backed.
+- Two-phase custom-shoes rollout: `references/custom-shoes-two-phase-rollout.md`. Phase 1 is a crawlable **Made-to-Order inspiration/handoff page**, not an in-store sample/showroom page: the six featured shoes are not stocked at JMD, and copy must not invite visitors to come see them or discuss their leathers/lasts in-store. The exact approved collection URL is the sole page-specific conversion destination, intentionally repeatable in hero/carousel handoff/closing; no page-specific Call/Directions/visit alternatives (global nav/footer boilerplate may remain). Move model-level Customize/Order buttons into a separate real-browser-QA/allowlist follow-up, and treat that as an explicit contract change across source packet, allowlist, validator/self-tests, page copy, and PR body. Lucky's answers are sufficient stakeholder approval for this JMD work; Karan still controls public launch.
 - When Karan asks to create a JMD website issue, use the website repo `sabnanikl-dev/jmd-6-holding-page-harness` unless he names another repo. Before creating, search open issues first, then broader all-state matches for overlapping wording (`navbar`, `logo`, `showroom`, `lightbox`, `modal`, etc.). Use existing labels only; `enhancement` is the safe default for small UI polish.
 - For small visual polish issues, keep scope narrow and implementation-ready: state what should change, explicitly preserve surrounding layout behavior, name out-of-scope areas, and include repo verification (`npm test`) plus manual desktop/mobile checks.
 - For tiny direct implementation requests that do not need a new issue (for example “make the top ticker 8% faster”), keep the PR intentionally surgical: inspect the existing CSS seam first, change only the needed declaration, and preserve surrounding layout/copy/JS behavior. For marquee/ticker speed, calculate the new animation duration as `old_duration / speed_multiplier` (8% faster = `42s / 1.08 = 38.9s`) rather than guessing a visually nice number. Confirm existing `prefers-reduced-motion` handling remains intact, and state the consulted repo-routed skills (`frontend-design`, `accessibility` when motion is touched) in the PR body per the project manifest.

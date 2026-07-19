@@ -62,6 +62,7 @@ For agent-harness reviewer flows, treat async lifecycle races as first-class blo
 
 See `references/electron-pty-review-loop.md` for a compact checklist from a GodMode scaffold review.
 See `references/electron-reviewer-lifecycle-races.md` for reviewer-launch/capture/comment race patterns and regression tests from the GodMode PR #32 review loop.
+See `references/pre-pr-architecture-acceptance-audit.md` for exact-default-branch, read-only audits that turn live issue contracts and current implementation seams into a post-PR verifier checklist.
 
 ## Safety-Critical Migration Plan Reviews
 

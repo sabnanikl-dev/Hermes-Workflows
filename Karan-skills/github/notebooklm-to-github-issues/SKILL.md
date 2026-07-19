@@ -272,6 +272,22 @@ Useful decision rules:
 - If an idea changes a different artifact or risk surface, create a separate issue.
 - If a recommendation depends on live account access that is not verified, make the issue a readiness/checklist issue, not an implementation/live-action issue.
 - If NotebookLM recommends generic best practices that the repo already covers, skip or turn into an existing-issue comment.
+- Treat NotebookLM's proposed issue mapping as a hypothesis. Reject cross-domain mappings that would pollute an authority boundary or artifact owner (for example, agent task contracts do not belong in client approval-gate data merely because both use the word “contract”).
+- Prefer deterministic outcome/competency tests when the repo's structural checks are healthy but user/consumer usefulness is unmeasured; do not jump straight to model grading, transcript scoring, semantic retrieval, or a persistent loop-state artifact.
+
+#### Mixed run: create new issues and refine existing issues
+
+When the approved result contains both new issues and updates to existing issues:
+
+1. Re-read live repo, issue, PR, label, and default-branch state immediately before mutation.
+2. Search all open and closed issues for duplicate titles/scopes.
+3. Create the new issues first so their real issue numbers can be linked from existing contracts.
+4. Update existing issue bodies with a dated, clearly titled refinement/activation-gate section. State explicitly whether it is additive or supersedes an earlier sentence/criterion; do not silently leave contradictory clauses.
+5. Retitle only when the old title materially misstates readiness or scope (for example, speculative retrieval work that must remain benchmark-gated).
+6. Preserve issue ownership boundaries. A semantic regression suite should not be folded into lifecycle/deprecation reporting, and private-source highlight guidance should not require committing sensitive quotes.
+7. Re-read every created and edited issue, asserting title, state, labels, required body clauses, and cross-links. Then report live open-issue/PR counts and whether the local repo worktree changed.
+
+Use a small idempotent update script or equivalent when several long issue bodies need the same safe pattern: fetch the live body, refuse closed issues, skip when the marker already exists, append the reviewed refinement, then verify through `gh issue view`. Do not paste raw NotebookLM output into issue bodies.
 
 ### 6. Draft issue bodies using `github-issue-specs`
 

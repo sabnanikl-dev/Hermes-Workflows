@@ -55,6 +55,15 @@ A strong issue is:
 
 Default to acting when the answer can be recovered from repo state, docs, previous issues, or the user's wording. Ask only when ambiguity materially changes the issue contract or risks creating the wrong thing.
 
+### Cross-tracker identifier ambiguity
+
+Do not infer that a bare identifier such as `JMD-50` or `#50` belongs to GitHub merely because the task is happening in a repository. The same number can refer to unrelated work in Linear and GitHub.
+
+1. Treat an all-caps project-key identifier (`JMD-50`, `ENG-42`) as likely Linear and inspect that tracker before a GitHub lookup or mutation.
+2. If the user corrects the tracker, discard the unrelated result and reconstruct the task from the named source of truth.
+3. If that issue is a business decision gate, gather live/repo evidence and ask for a bounded owner decision; never invent redirect targets, stakeholder sign-off, legal policy text, or public copy.
+4. Before drafting follow-ups, compare ownership boundaries across adjacent issues. Preserve a source/approval issue versus page/UI implementation split unless the user explicitly consolidates it.
+
 Ask before proceeding when any of these are unclear and not recoverable:
 
 1. **Target repo/project** — multiple plausible repos and the user wants the issue created.
@@ -104,6 +113,10 @@ Use the available tools and repo-local context before drafting. Minimum groundin
 - Inspect relevant code/docs/tests before naming implementation seams.
 - For stale local checkouts, prefer grounding against remote default branch (`git fetch`, `git show origin/main:<path>`, `git grep` where appropriate) without disturbing WIP.
 - For web/design/inspiration issues, inspect both the inspiration source and target implementation; separate "what works there" from "how to adapt here."
+- When grooming an existing design issue, treat its layout counts and placement assumptions as potentially stale. Re-read the live issue, inspect remote default-branch siblings (cards/sections/routes), and check adjacent merged work before preserving phrases such as “add a fourth card.” If the geometry has changed, reframe the solution rather than displacing shipped work or forcing an orphaned layout.
+- Inspect inspiration in two modes when visual hierarchy matters: extract accessible text/code/metadata, and inspect the rendered composition. If source code is locked, do not invent it; a rendered preview plus public usage API can still support an adaptation contract.
+- Write explicit **Adapt** versus **Do not copy** boundaries. Preserve the target stack, design tokens, brand, internal handoff path, and authority constraints instead of importing the reference framework, placeholder content, palette, pixel values, or redundant CTAs.
+- For the full design-inspiration grooming checklist, see `references/design-inspiration-issue-grooming.md`.
 
 If repo access is unavailable, say so clearly and produce a lower-confidence draft labeled with assumptions instead of inventing code facts.
 
@@ -319,6 +332,38 @@ For each issue, include at least one criterion for:
 - regression/test coverage;
 - verification command or manual smoke;
 - safety/authority invariant if external effects are possible.
+
+## External configurator and embedded-builder handoffs
+
+When a migration or new page links to an external configurator, builder, booking flow, or commerce-adjacent application, do not describe the link as a generic “redirect” without verifying the actual flow. Treat the integration as three independently owned concerns:
+
+1. **Destination page / UX** — the repo page that introduces the service and renders any outbound CTA.
+2. **Source, approval, and allowlist contract** — exact approved URLs, labels, provenance, and the owner who can approve each public handoff.
+3. **Legacy migration redirects** — permanent server-side redirects from retired routes; keep this separate from the external handoff itself.
+
+Before drafting implementation work, inspect at least one representative destination in a browser and inspect response headers. Product-specific URLs may open a saved design or stateful builder; they are not interchangeable with a generic landing URL. A missing `X-Frame-Options` or `frame-ancestors` header is not proof that iframe embedding is appropriate: verify real desktop/mobile load, state preservation, navigation, failure states, privacy implications, and whether the app exposes checkout or account behavior. Default to an explicitly approved external HTTPS link opening in a new tab (`target="_blank"`, `rel="noopener"`) when the external app is interactive, heavy, or unverified; treat embedding as a separate, tested implementation decision.
+
+Issue contracts should make the safe default explicit: when a source/approval allowlist has no approved entry, the page renders its non-transactional call/directions/visit path rather than a generic external CTA. Keep carts, checkout, live stock, prices, and unsupported availability claims out of a showroom-first site unless a distinct approval authorizes them.
+
+## Metadata-backed catalogs and product-detail overlays
+
+When a request expands a curated sample into a metadata-backed catalog, do not treat the currently shipped sample count as the final product intent. Inspect the source data and tracker history first, then distinguish the featured subset, deterministic catalog subset, and any intentionally deferred individual-route work.
+
+Before drafting:
+
+- Quantify plausible source filters separately (taxonomy-field match versus loose any-field mention), unique IDs, duplicate titles, required-field completeness, image counts/domains, payload size, and forbidden fields.
+- Prefer a deterministic taxonomy-field rule and stable model/record IDs over title-based identity.
+- Inspect the inspiration component and target implementation together; adapt the interaction hierarchy while preserving the target stack and brand rather than copying a React/Tailwind/etc. implementation into a static repo.
+- Convert “all images in one carousel” into an explicit bounded-loading contract when the corpus is large: one browse thumbnail per record, bounded/windowed initial rendering, no autoplay, and alternate images loaded only when the selected detail view opens.
+- Specify the complete accessible dialog/drawer lifecycle, optional query-state deep links, browser Back/Forward behavior, invalid-ID fallback, and canonical/sitemap invariants.
+- Keep metadata provenance separate from commerce authority. Candidate order/customize URLs must remain fail-closed behind exact allowlist/browser-QA gates; the descriptive catalog should still work when actions are disabled.
+- Split destination verification/enablement from catalog UI when it is a materially different risk surface. Use enabled/disabled fixtures so the UI issue can be reviewed without broadening live authority.
+
+See `references/metadata-backed-catalog-issues.md` for the source-analysis checklist, performance traps, accessibility contract, safe external-handoff split, and acceptance-criteria template.
+
+## External library adoption and pilot issues
+
+When evaluating a substantial third-party library, usually split the work into an **isolated adoption/toolchain issue** and a dependent **bounded pilot/dogfood issue**. Preserve the repository's existing dependency contract, require an offline installation smoke check, keep AI/extraction output in a candidate layer rather than canonical truth, use sanitized fixtures plus a manually reviewed expected set, and end the pilot with a continue/narrow/stop decision. See `references/external-library-adoption-and-pilot-issues.md` for the full issue pattern, safety boundaries, and post-creation verification checklist.
 
 ## Scope-Splitting Rules
 

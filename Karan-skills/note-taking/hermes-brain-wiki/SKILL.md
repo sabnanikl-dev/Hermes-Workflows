@@ -131,7 +131,7 @@ For YouTube/video sources, save raw metadata + captions/transcript alongside the
 Use the Obsidian CLI wrapper when available for graph/metadata queries, then use file tools for precise edits:
 
 ```bash
-GOB="~/.hermes/skills/note-taking/obsidian/scripts/obsidian_hermes.sh"
+GOB="~/.hermes/skills/note-taking/knowledge-memory-workflows/references/absorbed/obsidian/scripts/obsidian_hermes.sh"
 $GOB unresolved total
 $GOB orphans total
 $GOB deadends total

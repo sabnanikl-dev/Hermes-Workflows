@@ -81,7 +81,7 @@ Use the most efficient available backend:
 
 1. **If Obsidian CLI is installed and Obsidian is running**, prefer it for Obsidian-native graph/metadata queries through the Hermes wrapper:
    ```bash
-   GOB="~/.hermes/skills/note-taking/obsidian/scripts/obsidian_hermes.sh"
+   GOB="~/.hermes/skills/note-taking/knowledge-memory-workflows/references/absorbed/obsidian/scripts/obsidian_hermes.sh"
    $GOB unresolved format=json
    $GOB unresolved total
    $GOB orphans
@@ -143,7 +143,7 @@ Use this when Karan asks to reduce vault clutter, clean orphan files, or remove 
 7. **Log:** update both `log.md` and the daily log.
 
 ### Health Check Pitfalls
-- **Obsidian CLI optional backend:** If available, use `~/.hermes/skills/note-taking/obsidian/scripts/obsidian_hermes.sh` for `unresolved`, `orphans`, `deadends`, `backlinks`, `links`, `properties`, `tags`, `tasks`, templates, and link-safe `move`/`rename`. It requires Obsidian 1.12.7+, CLI enabled in Settings → General, and the Obsidian app running. Keep direct file tools as the default for deterministic headless reads/writes/patches.
+- **Obsidian CLI optional backend:** If available, use `~/.hermes/skills/note-taking/knowledge-memory-workflows/references/absorbed/obsidian/scripts/obsidian_hermes.sh` for `unresolved`, `orphans`, `deadends`, `backlinks`, `links`, `properties`, `tags`, `tasks`, templates, and link-safe `move`/`rename`. It requires Obsidian 1.12.7+, CLI enabled in Settings → General, and the Obsidian app running. Keep direct file tools as the default for deterministic headless reads/writes/patches.
 - **Tilde env var pitfall:** `OBSIDIAN_VAULT_PATH=~/obsidian-vault/hermes-brain/` is fine for the wrapper because it expands leading `~`, but raw shell checks like `test -d "$OBSIDIAN_VAULT_PATH"` may fail if `~` is stored literally. Prefer the wrapper or expand with `${HOME}`.
 - **Obsidian CLI unresolved-link behavior:** Do not rely on YAML `aliases:` to satisfy `$GOB unresolved`; in testing, title-style wikilinks still appeared unresolved even after aliases were added. Fix real broken wiki links by converting them to explicit vault-path wikilinks, e.g. `[[wiki/consultancy/business-plan|Papi AI Consulting Business Plan]]`.
 - **External markdown links can show as unresolved:** Absolute markdown links to local files like `[Plan](/Users/.../plan.md)` may appear in Obsidian CLI unresolved output. For working-file references outside the vault, prefer plain code paths such as `` `/Users/creator/projects/file.md` `` unless a true Obsidian link is needed.

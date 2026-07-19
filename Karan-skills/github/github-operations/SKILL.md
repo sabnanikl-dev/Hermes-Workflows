@@ -61,6 +61,8 @@ When the user asks to **update an existing issue based on current code state**, 
 ### PR lifecycle
 Create isolated branches, commit coherent changes, open PRs with test evidence, monitor checks, update branch when needed, and merge only after approval/criteria are satisfied.
 
+When a PR should auto-close its issue, place a plain closing-keyword line such as `Closes #181` in the PR body **outside** backticks, fenced code, blockquotes, or quoted prose. Merely mentioning the keyword in inline code does not register a closing reference. Before reporting the PR correctly linked, verify live metadata with `closingIssuesReferences` (GraphQL or supported `gh pr view --json closingIssuesReferences`); an issue number visible in body text is not proof.
+
 ### Repo-local skill vendoring
 When the user asks to add an external skill or framework as a **repo-local skill** rather than a global Hermes skill, treat it as a normal repository change, not as `hermes skills install`:
 1. Verify the source repository (`gh repo view <owner>/<repo> --json nameWithOwner,url,defaultBranchRef,isPrivate,licenseInfo`) and confirm the license is acceptable to vendor.

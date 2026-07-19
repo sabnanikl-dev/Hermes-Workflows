@@ -218,11 +218,43 @@ Before reporting completion:
 - Evidence source IDs should be local to their file's `source_registry` / `evidence_sources`. It is normal and useful for multiple modules to reuse a source ID such as `femme-local-seo-sot`; do not reject those as global duplicates. Reserve global duplicate checks for ontology object IDs such as clients, modules, entities, relationships, rules, projections, claims, approval gates, and state machines.
 - If Python YAML libraries are unavailable, Ruby stdlib YAML can be used as a dependency-light parser from Python subprocesses. Prefer broadly compatible calls such as `YAML.load_file(ARGV[0])`; avoid newer Psych keyword arguments unless verified on the host.
 
+## Refresh an Existing Issue Roadmap
+
+When asked to refresh a roadmap or working order for the canonical ontology repo:
+
+1. Reconstruct the **live** open issue set and inspect each issue's dependencies, prerequisites, blockers, phase notes, and trigger conditions; do not rely only on the older roadmap text.
+2. Separate the **hard dependency graph** from the **recommended execution queue**. Independent work may have a useful position without becoming a fabricated prerequisite. Keep trigger gates and soft sequencing out of the hard-dependency diagram: a scaffold recommended before an event is not automatically a prerequisite for work that may be triggered after that event, and the event itself does not force the triggered work when its underlying condition (for example, actual cross-client duplication pressure) is absent.
+3. Classify optional experiments, trigger-gated modeling work, and speculative items explicitly so future agents do not execute them blindly.
+4. Ensure every open issue appears in the refreshed roadmap with a deterministic issue-coverage check, and remove stale “untracked gap” claims for work that now has an issue.
+5. Preserve repository delivery rules such as one issue / one branch / one PR and keep a roadmap-only PR free of implementation changes.
+6. Refresh the existing PR title and body as well as the roadmap file, then verify local `HEAD`, the raw remote branch ref, and the PR head commit all match.
+7. Treat CI as fresh only when the workflow/check-run is attached to the new head SHA; old green checks on the same PR are not verification of the refresh.
+8. Keep roadmap phase and exit gates compatible with the linked issues' evidence contract. Do not require an “evidence-backed” or `verified` resource when the issue deliberately requires an honest `draft`/`unknown` authoring proof because no source snapshot exists. Prefer gates such as “validator-compliant and modeled honestly against available evidence,” while still requiring citations wherever the source supports the fact.
+9. Do not merge merely because the refreshed PR is clean and mergeable unless the user separately authorizes the merge.
+
+See `references/github-roadmap-refresh.md` for the reconstruction, sequencing, coverage-check, and PR-verification pattern.
+
+## NotebookLM-Grounded Harness and Roadmap Review
+
+When strategic-engineering and ontology-development notebooks are used to critique this repo:
+
+1. Give each notebook the same verified repo digest and complete open-issue scope map; query them separately.
+2. Classify every recommendation as `UPDATE existing issue`, `NEW focused issue`, or `DO NOT BUILD YET`.
+3. Adjudicate outside NotebookLM. Reject recommendations that cross authority or ownership boundaries merely because the terminology sounds related.
+4. Prefer a test-owned competency-question registry plus deterministic semantic answer tests when structural validation is healthy but consumer usefulness is unmeasured. Competency questions are requirements/tests, never canonical facts, evidence, or authority.
+5. Add only ontology formality justified by the live model: bounded predicate domain/range checks may be useful; class disjointness, OWL hierarchy, GraphRAG, or vector infrastructure require a demonstrated model/consumer need.
+6. For retrieval work, require a real consumer failure and benchmark full projection, filtered SQLite, and proposed semantic/hybrid modes before activation.
+7. Preserve privacy when translating “gold highlights” research: sanitized fixtures may commit exact spans, but private source quotes are not mandatory canonical data.
+8. If approved to mutate GitHub, create new issues first to obtain real IDs, then link those IDs from dated refinement sections appended to existing issue bodies. Re-read and assert every mutation.
+
+See `references/notebooklm-harness-enhancement-review.md` for the grounding packet, adjudication rules, common accepted/rejected recommendations, and safe mutation order.
+
 ## Pitfalls
 
 - **Ontology sprawl:** one YAML file per idea becomes unusable. Create a spec and module boundaries first.
 - **Harness bloat:** repo `AGENTS.md` files should stay slim and operational. If asked to compress one, preserve the load-bearing rules (canonical truth, evidence, stewardship/docs-in-PR, human approval, validation, PR verification) and move detail to `docs/spec.md`, `docs/conventions.md`, examples, or references rather than duplicating the full ontology spec.
 - **Docs drift during issue work:** agents are ontology stewards. When issue work changes ontology concepts, module boundaries, schema expectations, validator/export behavior, or consumer semantics, the same PR should update the relevant docs (`docs/spec.md`, `docs/conventions.md`, and/or `docs/examples.md`) or explicitly state why no doc change was needed.
+- **Agent-facing orientation docs can overstate validator guarantees:** verify `CLAUDE.md`, `AGENTS.md`, and README claims directly against the current schema dispatch, validator implementation, fixtures, and git history. Distinguish canonical `kind` values from schema filenames/roles (for example, `ontology` may dispatch to `manifest.schema.json`); qualify unknown-field rejection when schemas contain intentionally open objects; and describe secret/sensitive-field scanners by their actual patterns instead of calling them general PII scanners. Keep the orientation doc thin, put process rules in `AGENTS.md`, and rerun the canonical validator/export/test commands after docs-only corrections.
 - **Product/SaaS namespace drift:** keep schema IDs, ontology namespaces, RDF prefixes, and docs neutral unless Karan explicitly asks to brand the system. PAPI/Linear issue IDs may remain as evidence/history, but `papi.ai` schema URLs or language like “future hosted Papi systems” incorrectly imply a SaaS/platform direction. Future UI interaction is desired, but the UI should be described as a consumer/interface over canonical repo YAML, not the source of truth or a SaaS commitment.
 - **Agent lock-in:** avoid fields that only make sense for Hermes unless the module is explicitly a Hermes projection.
 - **Evidence-free facts:** if the source is not known, mark it draft/inferred.
@@ -237,4 +269,5 @@ Before reporting completion:
 - `references/v01-femme-jmd-implementation-pattern.md` — implementation pattern from building the first usable v0.1 Femme/JMD ontology system, including validator/export design, source-ID locality, dependency-free YAML parsing fallback, and verification checklist.
 - `references/palantir-ontology-cross-reference.md` — condensed Palantir Foundry Ontology research mapped to `sabnanikl-dev/client-ontologies` improvements: manifests, schema/CI, actions/functions, interfaces, cleanup, semantic search/OAG, projection provenance, approvals, state machines, machine-checkable rules, and handoff generation.
 - `references/ontology-agent-harness.md` — pattern for adding an ontology-tailored `AGENTS.md` harness: roles, canonical-truth rules, evidence/source requirements, projection boundaries, approval gates, validation commands, review blockers, and PR hygiene.
+- `references/notebooklm-harness-enhancement-review.md` — repo-grounded two-notebook critique pattern: competency-question outcome tests, ontology/retrieval maturity gates, issue-boundary adjudication, and verified mixed create/update sequencing.
 - `references/neutral-ontology-branding-and-ui-direction.md` — guidance for removing accidental Papi/SaaS branding while preserving Karan's desired future UI interaction model over canonical YAML.

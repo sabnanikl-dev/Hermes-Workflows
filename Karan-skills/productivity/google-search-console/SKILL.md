@@ -27,7 +27,7 @@ Load this when working on Google Search Console (GSC) for Femme Events, JMD, or 
 
 - `references/project-local-gsc-wiring.md` — reusable pattern for wiring GSC credentials into a project via ignored symlinks/env files plus ad-hoc verification.
 - `references/sitemap-submission-scope-blocker.md` — approved sitemap submission flow when a read-only token blocks `sitemaps.submit` with `ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
-- `references/migration-precutover-baselines.md` — rankings-preserving migration baseline workflow: zero-row interpretation, URL Inspection inventory, redirect-map cross-checks, stale sitemap handling, analytics continuity, and artifact verification.
+- `references/migration-precutover-baselines.md` — rankings-preserving migration baseline workflow: zero-row interpretation, delayed Performance/Page Indexing ingestion, URL Inspection inventory, redirect-map cross-checks, stale sitemap handling, analytics continuity, and artifact verification.
 
 ## Migration baseline rules
 
@@ -35,7 +35,7 @@ For pre-cutover migration baselines, do not stop at a page/query export:
 
 1. Separate property access, current-user permission, and verified-owner identity; `sites.list` does not prove who the owner is.
 2. Treat zero-row Search Analytics responses as **data unavailable**, never as proof of zero traffic.
-3. State that the Page Indexing aggregate count requires the GSC UI; URL Inspection samples are not a substitute total.
+3. State that the Page Indexing aggregate count requires the GSC UI; URL Inspection samples are not a substitute total. If it populates later, ingest the chart + reason exports, reconcile reason counts to the not-indexed total, preserve data-point vs export dates, and keep the UI Impressions overlay separate from Search Analytics aggregates.
 4. Recursively inventory the current public sitemap and URL-inspect migration-critical legacy URLs, including taxonomy and pagination surfaces.
 5. Cross-check indexed URLs against redirect rules by actual public path shape, not only broad prose descriptions.
 6. Keep stale/suspicious submitted-sitemap history distinct from current compromise claims; UI security/manual-action checks and sitemap deletion remain human-gated.
@@ -211,6 +211,19 @@ creds.refresh(Request())
 service = googleapiclient.discovery.build('webmasters', 'v3', credentials=creds, cache_discovery=False)
 print(service.sites().list().execute())
 ```
+
+## Delayed Performance-population follow-up
+
+A working property can initially return zero Search Analytics rows and populate later. Treat this as **data unavailable at capture time**, never proof of zero traffic.
+
+When a pre-cutover recheck begins returning rows:
+
+1. Re-run the same property with the same reporting lag and dimensions used in the original capture (at minimum `page`, `query`, and `date`; add `device`/`country` when the baseline calls for them).
+2. Capture both the intended baseline window and a longer diagnostic window. If they expose the same newly available short cohort, describe it as an **early snapshot**, not a full historical or seasonality baseline.
+3. Use the `date` response for the observed timeline. Do not add metrics across page/query/date/device/country responses: each dimension is independently aggregated and can be privacy-thresholded, so their totals may differ.
+4. Save a new date-stamped Markdown supplement plus machine-readable evidence rather than rewriting the original zero-row/URL-Inspection artifact. Cross-link the two in the client profile/memory and state exactly what the newer evidence supersedes.
+5. Re-check migration-critical reported pages against the redirect map. Record missing public-path classes explicitly (for example, a taxonomy path omitted by a catch-all), but do not modify redirects, sitemap submissions, or cutover settings without their separate approval gates.
+6. Keep the tracker issue in progress unless every acceptance criterion is actually met. A Performance supplement does not substitute for the GSC UI Page Indexing aggregate, new-site analytics continuity, or post-cutover monitoring.
 
 ## Common errors
 

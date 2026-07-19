@@ -27,21 +27,43 @@ For static-site regression checks, positive `npm test` is not enough. Add at lea
 
 Use a small Python script with `try/finally` so the file is restored even if a negative assertion fails.
 
-### 3. Avoid marker false positives in regex-based HTML checks
+### 3. Avoid comment false positives in regex-based HTML checks
 
-When a static check keys off a marker attribute, match the attribute inside an actual opening tag, not anywhere in the fragment. Comments frequently document marker names and can poison a bare string search.
+When a static check keys off a marker attribute or link, match the attribute inside an actual opening tag, not anywhere in the fragment. Comments frequently document complete marker/link markup and can poison a bare string or raw-tag search.
 
-Good:
+Good marker check:
 
 ```js
 new RegExp(`<section\\b[^>]*\\bdata-article-cta\\b[^>]*>`, "i")
 ```
 
-Risky:
+Risky marker check:
 
 ```js
 html.search(/\bdata-article-cta\b/)
 ```
+
+For a regex-based structural/link validator, strip non-rendered comments **before** extracting `<main>`/`<section>` regions or matching anchors:
+
+```js
+function stripHtmlComments(html) {
+  return html.replace(/<!--[\s\S]*?-->/g, "");
+}
+
+const main = mainBody(stripHtmlComments(homepageHtml));
+const feature = sectionById(main, "feature-id");
+const hasRequiredLink = linksTo(feature, "target-route/");
+```
+
+Stripping first also prevents a commented `</main>` or `</section>` from truncating a non-greedy region extractor. Add a deterministic self-test that proves both sides of the regression:
+
+- the old raw matcher accepts a commented-only CTA (expected red / documents the bug);
+- the comment-stripped matcher rejects it;
+- a real CTA still passes;
+- mixed real + commented markup passes because of the real CTA;
+- cover both the dedicated-section path and any broader contextual-`<main>` path.
+
+Do not generalize this into “regex can parse arbitrary HTML.” Keep the validator scoped to repo-controlled static markup with documented non-nesting assumptions; use a parser when nested/irregular HTML breaks those assumptions.
 
 ### 4. Use local browser evidence even for static repos
 
