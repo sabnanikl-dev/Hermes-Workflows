@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "repo": "owner/name",
+  "pr": 89,
+  "branch": "feat/example-branch",
+  "base": "main",
+  "source_repo": "/absolute/path/to/an/existing/clone",
+  "worktree_root": "/tmp/pr-prover-worktrees",
+  "state_file": "/tmp/pr-prover-owner-name-89.state.json",
+  "lock_file": "/tmp/pr-prover-owner-name-89.lock",
+  "visual_qa_required": false,
+  "gates": [
+    {
+      "name": "tests",
+      "kind": "baseline",
+      "argv": ["make", "test"],
+      "timeout": 900
+    },
+    {
+      "name": "visual",
+      "kind": "visual",
+      "argv": ["./scripts/visual-qa.sh", "--head", "{head}"],
+      "timeout": 900
+    }
+  ],
+  "reviewers": [
+    {
+      "name": "A",
+      "argv": [
+        "./scripts/reviewer-lane.sh",
+        "--role", "{reviewer}",
+        "--repo", "{repo}",
+        "--pr", "{pr}",
+        "--head", "{head}",
+        "--worktree", "{worktree}"
+      ],
+      "timeout": 1800
+    },
+    {
+      "name": "B",
+      "argv": [
+        "./scripts/reviewer-lane.sh",
+        "--role", "{reviewer}",
+        "--repo", "{repo}",
+        "--pr", "{pr}",
+        "--head", "{head}",
+        "--worktree", "{worktree}"
+      ],
+      "timeout": 1800
+    }
+  ],
+  "builder": {
+    "argv": [
+      "./scripts/builder-lane.sh",
+      "--repo", "{repo}",
+      "--pr", "{pr}",
+      "--branch", "{branch}",
+      "--head", "{head}",
+      "--attempt", "{attempt}",
+      "--mode", "{mode}",
+      "--blockers", "{blockers_file}",
+      "--worktree", "{worktree}"
+    ],
+    "signature": "Fixed by: Claude Code via Hermes orchestration",
+    "comment_author": null,
+    "timeout": 2400
+  }
+}
