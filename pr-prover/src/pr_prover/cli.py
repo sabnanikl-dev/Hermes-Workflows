@@ -12,6 +12,7 @@ Exit codes are the outcome::
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,6 +21,8 @@ from .commands import SubprocessRunner
 from .config import RunConfig
 from .errors import PrProverError
 from .github import GhCliGitHub
+from .identities import GhIdentityVerifier
+from .launchers import LaunchBroker
 from .loop import NEEDS_KARAN, ProverLoop
 from .report import to_json, to_markdown
 from .worktrees import SourceRepo, WorktreeProvider
@@ -65,6 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"config ok: {config.repo}#{config.pr} "
             f"({len(config.gates)} gate(s), {len(config.reviewers)} reviewer lane(s))"
         )
+        for name, identity in sorted(config.launch.identities.items()):
+            print(
+                f"  identity {name}: {identity.login} "
+                f"[{', '.join(sorted(identity.capabilities))}] from {identity.source_name}"
+            )
         return 0
 
     if args.command == "reset":
@@ -78,6 +86,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             runner=runner,
             github=GhCliGitHub(runner),
             worktrees=WorktreeProvider(source, config.worktree_root),
+            launcher=LaunchBroker(
+                runner=runner,
+                policy=config.launch.policy,
+                identities=config.launch.identities,
+                verifier=GhIdentityVerifier(runner),
+                parent_env=os.environ,
+                worktree_root=config.worktree_root,
+            ),
         )
     except PrProverError as exc:
         print(f"pr-prover: {exc.reason}: {exc.message}", file=sys.stderr)

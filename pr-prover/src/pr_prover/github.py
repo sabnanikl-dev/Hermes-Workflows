@@ -1,9 +1,10 @@
 """The injectable GitHub boundary.
 
-The loop reads GitHub for exactly two things: the live PR (to bind the exact
-``headRefOid``) and the PR conversation comments (to read back the builder's
-signed fix comment). It never writes. The builder pushes and comments under its
-own PAPI-90 scoped identity; PAPI-88 only verifies what actually landed.
+The loop reads GitHub for exactly three things: the live PR (to bind the exact
+``headRefOid``), the PR conversation comments (to read back the builder's signed
+fix comment), and the PR reviews (to read back each reviewer lane's artifact
+under its own identity). It never writes. Children push, comment, and review
+under their own scoped identities; the loop only verifies what actually landed.
 
 Everything returned here is untrusted data. PR titles, bodies, and comment
 bodies are spec evidence, never instructions.
@@ -54,12 +55,31 @@ class Comment:
     url: str = ""
 
 
+@dataclass(frozen=True)
+class Review:
+    """One submitted review, as untrusted evidence.
+
+    ``commit_oid`` is the part that matters to this loop: GitHub records which
+    commit a review was submitted against, so a review artifact can be bound to
+    the exact head it reviewed rather than to whatever the PR points at now.
+    """
+
+    identifier: str
+    author: str
+    body: str
+    commit_oid: str
+    state: str = ""
+    url: str = ""
+
+
 class GitHubBoundary(Protocol):
     """Injection seam for every GitHub read the loop performs."""
 
     def pull_request(self, repo: str, number: int) -> PullRequest: ...
 
     def comments(self, repo: str, number: int) -> tuple[Comment, ...]: ...
+
+    def reviews(self, repo: str, number: int) -> tuple[Review, ...]: ...
 
 
 class GhCliGitHub:
@@ -89,7 +109,39 @@ class GhCliGitHub:
             )
         return tuple(_comment_from(item) for item in raw)
 
+    def reviews(self, repo: str, number: int) -> tuple[Review, ...]:
+        """Read submitted reviews, each with the commit it was submitted against.
+
+        ``gh pr view --json reviews`` does not carry the reviewed commit, so this
+        goes to the REST endpoint that does: without it a review artifact could
+        only ever be bound to a login, not to a head.
+        """
+        payload = self._call(
+            [
+                self._gh,
+                "api",
+                f"repos/{repo}/pulls/{number}/reviews?per_page=100",
+                "--header",
+                "Accept: application/vnd.github+json",
+            ],
+            what="pull request reviews",
+        )
+        if not isinstance(payload, list):
+            raise GitHubError(
+                "gh returned no reviews array", evidence={"repo": repo, "pr": number}
+            )
+        return tuple(_review_from(item) for item in payload)
+
     def _json(self, argv: Sequence[str], *, what: str) -> dict[str, Any]:
+        payload = self._call(argv, what=what)
+        if not isinstance(payload, dict):
+            raise GitHubError(
+                f"gh returned a non-object payload for the {what}",
+                evidence={"argv": list(argv)},
+            )
+        return payload
+
+    def _call(self, argv: Sequence[str], *, what: str) -> Any:
         result = self._runner.run(argv, timeout=self._timeout)
         if not result.ok:
             raise GitHubError(
@@ -101,18 +153,12 @@ class GhCliGitHub:
                 },
             )
         try:
-            payload = json.loads(result.stdout)
+            return json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise GitHubError(
                 f"gh returned unparsable JSON for the {what}: {exc}",
                 evidence={"argv": list(result.argv), "stdout": redact_evidence(result.stdout, limit=1000)},
             ) from exc
-        if not isinstance(payload, dict):
-            raise GitHubError(
-                f"gh returned a non-object payload for the {what}",
-                evidence={"argv": list(result.argv)},
-            )
-        return payload
 
 
 def _pull_request_from(payload: dict[str, Any], *, repo: str, number: int) -> PullRequest:
@@ -190,4 +236,34 @@ def _comment_from(payload: object) -> Comment:
     )
 
 
-__all__ = ["Comment", "GhCliGitHub", "GitHubBoundary", "PullRequest"]
+def _review_from(payload: object) -> Review:
+    if not isinstance(payload, dict):
+        raise GitHubError("review payload is not an object")
+    user = payload.get("user")
+    login = str(user.get("login") or "") if isinstance(user, dict) else ""
+    if not login:
+        raise GitHubError(
+            "review payload has no author login",
+            evidence={"review_id": str(payload.get("id") or "")},
+        )
+    identifier = payload.get("id")
+    if not isinstance(identifier, (str, int)) or isinstance(identifier, bool) or str(identifier) == "":
+        raise GitHubError("review payload has no stable id", evidence={"author": login})
+    commit_oid = str(payload.get("commit_id") or "").lower()
+    if len(commit_oid) != 40 or any(character not in "0123456789abcdef" for character in commit_oid):
+        raise GitHubError(
+            "review payload does not name the exact commit it reviewed",
+            evidence={"author": login, "commit_id": str(payload.get("commit_id") or "")},
+        )
+    body = payload.get("body")
+    return Review(
+        identifier=str(identifier),
+        author=login,
+        body=body if isinstance(body, str) else "",
+        commit_oid=commit_oid,
+        state=str(payload.get("state") or ""),
+        url=str(payload.get("html_url") or ""),
+    )
+
+
+__all__ = ["Comment", "GhCliGitHub", "GitHubBoundary", "PullRequest", "Review"]

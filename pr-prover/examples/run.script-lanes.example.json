@@ -10,7 +10,6 @@
   "lock_file": "/tmp/pr-prover-owner-name-89.lock",
   "visual_qa_required": false,
   "launch": {
-    "env_allow": ["NODE_ENV"],
     "identities": {
       "builder": {
         "login": "the-builder-login",
@@ -30,45 +29,51 @@
       "kind": "baseline",
       "argv": ["make", "test"],
       "timeout": 900
-    },
-    {
-      "name": "visual",
-      "kind": "visual",
-      "argv": ["./scripts/visual-qa.sh", "--head", "{head}"],
-      "timeout": 900
     }
   ],
   "reviewers": [
     {
       "name": "A",
       "identity": "reviewer",
-      "agent": {
-        "program": "claude",
-        "model": "opus",
-        "tools": ["Read", "Grep", "Glob", "Bash"]
-      },
+      "argv": [
+        "./scripts/reviewer-lane.sh",
+        "--role", "{reviewer}",
+        "--repo", "{repo}",
+        "--pr", "{pr}",
+        "--head", "{head}",
+        "--worktree", "{worktree}"
+      ],
       "timeout": 1800
     },
     {
       "name": "B",
       "identity": "reviewer",
-      "agent": {
-        "program": "claude",
-        "model": "sonnet",
-        "tools": ["Read", "Grep", "Glob", "Bash"]
-      },
+      "argv": [
+        "./scripts/reviewer-lane.sh",
+        "--role", "{reviewer}",
+        "--repo", "{repo}",
+        "--pr", "{pr}",
+        "--head", "{head}",
+        "--worktree", "{worktree}"
+      ],
       "timeout": 1800
     }
   ],
   "builder": {
     "identity": "builder",
-    "agent": {
-      "program": "claude",
-      "model": "opus",
-      "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
-    },
+    "argv": [
+      "./scripts/builder-lane.sh",
+      "--repo", "{repo}",
+      "--pr", "{pr}",
+      "--branch", "{branch}",
+      "--head", "{head}",
+      "--attempt", "{attempt}",
+      "--mode", "{mode}",
+      "--blockers", "{blockers_file}",
+      "--worktree", "{worktree}"
+    ],
     "signature": "Fixed by: Claude Code via Hermes orchestration",
     "comment_author": "the-builder-login",
-    "timeout": 1500
+    "timeout": 2400
   }
 }

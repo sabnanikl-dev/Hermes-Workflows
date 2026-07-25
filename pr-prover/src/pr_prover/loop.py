@@ -48,7 +48,15 @@ agree, so a marker alone never decides:
 configured login, and only if GitHub's own comment id was not already present
 before the builder was invoked. The signature and the head SHA both become
 public the moment the real comment is posted, so neither can carry the proof on
-its own.
+its own. A reviewer lane bound to a scoped identity is held to the same
+standard: its verdict counts only once GitHub shows a new review or comment
+under that login, carrying a tag that names this repository, this PR, that
+reviewer's role, and the exact head it reviewed.
+
+Every child is launched through :class:`~.launchers.LaunchBroker`, which is the
+only thing in this package that builds a child environment. The loop hands it a
+lane and a bound context and gets a result back; it never assembles an
+environment, and it never passes one through.
 
 Every ambiguity — a malformed verdict, a stale head, a lane whose result
 contradicts its verdict, a push that cannot be bound to exactly one new head, a
@@ -59,6 +67,7 @@ with the evidence preserved.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -67,7 +76,7 @@ from pathlib import Path
 from typing import Any
 
 from .commands import CommandResult, CommandRunner, render_argv
-from .config import RunConfig
+from .config import ReviewerConfig, RunConfig
 from .errors import (
     AmbiguousPush,
     BuilderRefusal,
@@ -87,6 +96,8 @@ from .findings import (
     default_adjudicator,
 )
 from .github import GitHubBoundary, PullRequest
+from .launchers import BoundContext, LaunchBroker
+from .prompts import review_tag
 from .redaction import evidence as redact_evidence
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
@@ -153,6 +164,7 @@ class ProverLoop:
         worktrees: Any,
         adjudicator: Adjudicator = default_adjudicator,
         scratch_root: Path | None = None,
+        launcher: LaunchBroker | None = None,
     ) -> None:
         self.config = config
         self.runner = runner
@@ -166,6 +178,18 @@ class ProverLoop:
         self._gates: list[GateOutcome] = []
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
         self._retained: list[str] = []
+        # Every child goes through a broker. A caller that supplies none still
+        # gets one — with no verifier, so any lane that names a scoped identity
+        # stops rather than launching on a credential nobody checked.
+        self.launcher = launcher or LaunchBroker(
+            runner=runner,
+            policy=config.launch.policy,
+            identities=config.launch.identities,
+            parent_env=os.environ,
+            worktree_root=config.worktree_root,
+            scratch_root=scratch_root,
+        )
+        self.launcher.observe(self._event)
 
     # -- entry point ------------------------------------------------------
     def run(self) -> RunResult:
@@ -178,6 +202,7 @@ class ProverLoop:
         except PrProverError as exc:  # pragma: no cover - defensive
             return self._failed(exc)
         finally:
+            self.launcher.close()
             self._cleanup_scratch()
 
     def _run_locked(self) -> RunResult:
@@ -355,7 +380,11 @@ class ProverLoop:
                 self._values(pull, head, worktree),
                 what=f"gate {gate.name!r}",
             )
-            result = self.runner.run(argv, cwd=worktree, timeout=gate.timeout)
+            # A gate is repository-owned work, so it gets a hardened environment
+            # and no GitHub identity at all.
+            result = self.launcher.run_gate(
+                name=gate.name, argv=argv, cwd=worktree, timeout=gate.timeout
+            )
             output = redact_evidence(_combined(result))
             self._gates.append(
                 GateOutcome(
@@ -390,13 +419,28 @@ class ProverLoop:
     ) -> tuple[ReviewerVerdict, ...]:
         verdicts: list[ReviewerVerdict] = []
         for reviewer in self.config.reviewers:
-            argv = render_argv(
-                reviewer.argv,
-                self._values(pull, head, worktree, extra={"reviewer": reviewer.name}),
-                what=f"reviewer {reviewer.name!r}",
+            argv = (
+                render_argv(
+                    reviewer.argv,
+                    self._values(pull, head, worktree, extra={"reviewer": reviewer.name}),
+                    what=f"reviewer {reviewer.name!r}",
+                )
+                if reviewer.argv is not None
+                else None
             )
             lane = f"reviewer {reviewer.name}"
-            result = self.runner.run(argv, cwd=worktree, timeout=reviewer.timeout)
+            # Snapshot the artifacts that already exist, so only one this lane
+            # posted can satisfy the readback below.
+            known = self._artifact_identities(reviewer)
+            result = self.launcher.run_reviewer(
+                role=reviewer.name,
+                identity=reviewer.identity,
+                agent=reviewer.agent,
+                argv=argv,
+                bound=self._bound(pull, head),
+                cwd=worktree,
+                timeout=reviewer.timeout,
+            )
             self._reject_timed_out(result, lane=lane, head=head)
             verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
             # "pass" is the only verdict that lets the PR through this lane, so
@@ -405,6 +449,7 @@ class ProverLoop:
             self._require_success_for_clean(
                 result, lane=lane, status=verdict.status, clean="pass", head=head
             )
+            self._read_back_review(reviewer, head=head, known=known)
             verdicts.append(verdict)
             self._event(
                 f"reviewer {reviewer.name} returned {verdict.status} with "
@@ -535,21 +580,37 @@ class ProverLoop:
         wanted = frozenset(omitted) if omitted else frozen_ids
         blockers = [item for item in classification.blocking if item.finding.id in wanted]
         blockers_file = self._write_blockers(state, pull, head, blockers, mode=mode, omitted=omitted)
-        argv = render_argv(
-            self.config.builder.argv,
-            self._values(
-                pull,
-                head,
-                worktree,
-                extra={
-                    "attempt": str(state.attempt),
-                    "mode": mode,
-                    "blockers_file": str(blockers_file),
-                },
-            ),
-            what="builder",
+        builder = self.config.builder
+        argv = (
+            render_argv(
+                builder.argv,
+                self._values(
+                    pull,
+                    head,
+                    worktree,
+                    extra={
+                        "attempt": str(state.attempt),
+                        "mode": mode,
+                        "blockers_file": str(blockers_file),
+                    },
+                ),
+                what="builder",
+            )
+            if builder.argv is not None
+            else None
         )
-        result = self.runner.run(argv, cwd=worktree, timeout=self.config.builder.timeout)
+        result = self.launcher.run_builder(
+            identity=builder.identity,
+            agent=builder.agent,
+            argv=argv,
+            bound=self._bound(pull, head),
+            cwd=worktree,
+            timeout=builder.timeout,
+            attempt=state.attempt,
+            mode=mode,
+            blockers_file=blockers_file,
+            signature=builder.signature,
+        )
         # The builder lane carries the same rule as the reviewer lanes: a
         # timeout is never a verdict, and only the clean claim ("success", the
         # one that leads to push verification) requires a successful process.
@@ -623,6 +684,78 @@ class ProverLoop:
         self.worktrees.source.verified_head(refreshed.head_ref_name, new_head)
         self._read_back_comment(new_head, known_comments)
         self._event(f"push verified: {old_head} -> {new_head}")
+
+    def _artifact_identities(self, reviewer: ReviewerConfig) -> frozenset[str]:
+        """GitHub's ids for the reviews and comments visible before a reviewer runs.
+
+        Only collected for a lane bound to a scoped identity: with no identity
+        there is no account to hold an artifact to, and nothing to read back.
+        """
+        if reviewer.identity is None:
+            return frozenset()
+        reviews = self.github.reviews(self.config.repo, self.config.pr)
+        comments = self.github.comments(self.config.repo, self.config.pr)
+        return frozenset(
+            [f"review:{item.identifier}" for item in reviews]
+            + [f"comment:{item.identifier}" for item in comments]
+        )
+
+    def _read_back_review(self, reviewer: ReviewerConfig, *, head: str, known: frozenset[str]) -> None:
+        """Prove this reviewer's artifact exists under its own login, for this head.
+
+        A verdict printed on stdout is a claim. What counts is an artifact
+        GitHub can show: posted since this lane started, authored by the exact
+        login the launcher gave the lane, and carrying the tag that names this
+        repository, this PR, this role, and this exact commit. A review is held
+        to the commit GitHub recorded for it as well, so a review of an older
+        head cannot be re-labelled into this one.
+        """
+        if reviewer.identity is None:
+            return
+        login = self.config.launch.identities[reviewer.identity].login
+        tag = review_tag(repo=self.config.repo, pr=self.config.pr, role=reviewer.name, head=head)
+        reviews = self.github.reviews(self.config.repo, self.config.pr)
+        comments = self.github.comments(self.config.repo, self.config.pr)
+        for item in reviews:
+            if f"review:{item.identifier}" in known or item.author != login:
+                continue
+            if item.commit_oid == head and tag in item.body:
+                self._event(
+                    f"reviewer {reviewer.name}: review {item.identifier} read back "
+                    f"under {login} for {head}"
+                )
+                return
+        for item in comments:
+            if f"comment:{item.identifier}" in known or item.author != login:
+                continue
+            if tag in item.body:
+                self._event(
+                    f"reviewer {reviewer.name}: comment {item.identifier} read back "
+                    f"under {login} for {head}"
+                )
+                return
+        raise ReadbackMismatch(
+            "no review or comment posted since this reviewer lane started resolves to "
+            "its identity and this exact head",
+            evidence={
+                "lane": f"reviewer {reviewer.name}",
+                "expected_login": login,
+                "expected_tag": tag,
+                "head": head,
+                "reviews_seen": len(reviews),
+                "comments_seen": len(comments),
+            },
+        )
+
+    def _bound(self, pull: PullRequest, head: str) -> BoundContext:
+        """The exact repo, PR, branch, base, and commit every lane is launched against."""
+        return BoundContext(
+            repo=self.config.repo,
+            pr=pull.number,
+            branch=pull.head_ref_name,
+            base=pull.base_ref_name,
+            head=head,
+        )
 
     def _comment_identities(self) -> frozenset[str]:
         """GitHub's own ids for the comments visible right now."""

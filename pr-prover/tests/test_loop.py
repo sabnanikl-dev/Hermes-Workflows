@@ -12,14 +12,17 @@ from _support import (
     HEAD_A,
     HEAD_B,
     HEAD_C,
+    REVIEWER_LOGIN,
     FakeGitHub,
     FakeRemote,
     FakeRunner,
     LaneScript,
     builder_output,
     fix_comment,
+    make_broker,
     make_config,
     make_source_repo,
+    review_body,
     reviewer_output,
 )
 from pr_prover.findings import Finding
@@ -44,16 +47,22 @@ class LoopHarness(unittest.TestCase):
         self.runner = FakeRunner(self.remote, self.script)
         self.github = FakeGitHub(self.remote)
 
-    def build(self, **config_kwargs) -> ProverLoop:
+    def build(self, *, launcher=None, **config_kwargs) -> ProverLoop:
         config = make_config(self.tmp, source_repo=self.source_repo, **config_kwargs)
         self.config = config
         source = SourceRepo(runner=self.runner, path=config.source_repo)
+        if launcher is None and config.launch.identities:
+            # A run whose lanes are bound to scoped identities needs the broker
+            # that owns them, and something that can verify what they resolve to.
+            launcher = make_broker(config, self.runner, scratch_root=self.tmp / "scratch")
+            self.addCleanup(launcher.close)
         return ProverLoop(
             config,
             runner=self.runner,
             github=self.github,
             worktrees=WorktreeProvider(source, config.worktree_root),
             scratch_root=self.tmp / "scratch",
+            launcher=launcher,
         )
 
     def review_round(self, head: str, findings=()) -> None:
@@ -1152,6 +1161,131 @@ class ResumeTests(LoopHarness):
 
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "unexpected-state")
+
+
+class ReviewerIdentityTests(LoopHarness):
+    """A reviewer's verdict counts only once GitHub shows its artifact."""
+
+    def scoped_round(self, head: str, findings=(), *, poster=None) -> None:
+        """Script both reviewer lanes, each posting its own artifact as it runs."""
+        for role, program in (("A", "lane-reviewer-A"), ("B", "lane-reviewer-B")):
+            post = poster or (
+                lambda role=role: self.remote.review(
+                    review_body(role, head), head=head, author=REVIEWER_LOGIN
+                )
+            )
+            self.script.add(
+                program,
+                reviewer_output(head, findings if role == "A" else ()),
+                after=post,
+            )
+
+    def test_a_reviewer_artifact_under_its_own_login_and_head_is_read_back(self) -> None:
+        loop = self.build(scoped=True)
+        self.scoped_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(len(self.remote.reviews), 2)
+        self.assertTrue(
+            any("review" in event and REVIEWER_LOGIN in event for event in result.events)
+        )
+
+    def test_a_reviewer_that_posts_nothing_fails_closed(self) -> None:
+        loop = self.build(scoped=True)
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_an_artifact_under_another_login_does_not_count(self) -> None:
+        loop = self.build(scoped=True)
+        self.script.add(
+            "lane-reviewer-A",
+            reviewer_output(HEAD_A),
+            after=lambda: self.remote.review(
+                review_body("A", HEAD_A), head=HEAD_A, author="somebody-else"
+            ),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_an_artifact_for_another_head_does_not_count(self) -> None:
+        loop = self.build(scoped=True)
+        self.script.add(
+            "lane-reviewer-A",
+            reviewer_output(HEAD_A),
+            after=lambda: self.remote.review(
+                review_body("A", HEAD_B), head=HEAD_B, author=REVIEWER_LOGIN
+            ),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_an_artifact_naming_the_other_reviewers_role_does_not_count(self) -> None:
+        loop = self.build(scoped=True)
+        self.script.add(
+            "lane-reviewer-A",
+            reviewer_output(HEAD_A),
+            after=lambda: self.remote.review(
+                review_body("B", HEAD_A), head=HEAD_A, author=REVIEWER_LOGIN
+            ),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_an_artifact_that_existed_before_the_lane_ran_does_not_count(self) -> None:
+        loop = self.build(scoped=True)
+        self.remote.review(review_body("A", HEAD_A), head=HEAD_A, author=REVIEWER_LOGIN)
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_a_tagged_comment_is_an_acceptable_artifact(self) -> None:
+        loop = self.build(scoped=True)
+        for role, program in (("A", "lane-reviewer-A"), ("B", "lane-reviewer-B")):
+            self.script.add(
+                program,
+                reviewer_output(HEAD_A),
+                after=lambda role=role: self.remote.comment(
+                    review_body(role, HEAD_A), author=REVIEWER_LOGIN
+                ),
+            )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+
+    def test_the_builder_lane_still_proves_its_own_push_and_comment(self) -> None:
+        loop = self.build(scoped=True)
+        self.scoped_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B), author=BUILDER_LOGIN),
+        )
+        self.scoped_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.head, HEAD_B)
+        self.assertEqual(result.attempts_used, 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

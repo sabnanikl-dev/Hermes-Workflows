@@ -159,6 +159,52 @@ class GhBoundaryTests(unittest.TestCase):
         with self.assertRaises(GitHubError):
             self.boundary(payload).comments("example/repo", 7)
 
+    def review_payload(self, **overrides: object) -> str:
+        body = {
+            "id": 4242,
+            "user": {"login": "karanagent1"},
+            "body": "PR-PROVER-REVIEW: repo=example/repo pr=7 role=A head=" + HEAD_A,
+            "commit_id": HEAD_A,
+            "state": "COMMENTED",
+            "html_url": "https://example.invalid/pull/7#pullrequestreview-4242",
+        }
+        body.update(overrides)
+        return json.dumps([body])
+
+    def test_a_review_carries_its_author_and_the_commit_it_reviewed(self) -> None:
+        review = self.boundary(self.review_payload()).reviews("example/repo", 7)[0]
+        self.assertEqual(review.author, "karanagent1")
+        self.assertEqual(review.commit_oid, HEAD_A)
+        self.assertEqual(review.identifier, "4242")
+
+    def test_reviews_are_read_from_the_endpoint_that_names_the_commit(self) -> None:
+        seen: list[tuple[str, ...]] = []
+
+        class Recorder:
+            def run(self, argv, *, cwd=None, env=None, timeout=None):
+                seen.append(tuple(argv))
+                return CommandResult(argv=tuple(argv), returncode=0, stdout="[]", stderr="")
+
+        GhCliGitHub(Recorder()).reviews("example/repo", 7)
+        self.assertEqual(seen[0][:2], ("gh", "api"))
+        self.assertIn("repos/example/repo/pulls/7/reviews", seen[0][2])
+
+    def test_a_review_without_the_reviewed_commit_fails_closed(self) -> None:
+        with self.assertRaises(GitHubError):
+            self.boundary(self.review_payload(commit_id="")).reviews("example/repo", 7)
+
+    def test_a_review_naming_a_short_commit_fails_closed(self) -> None:
+        with self.assertRaises(GitHubError):
+            self.boundary(self.review_payload(commit_id="abc1234")).reviews("example/repo", 7)
+
+    def test_a_review_without_an_author_fails_closed(self) -> None:
+        with self.assertRaises(GitHubError):
+            self.boundary(self.review_payload(user={})).reviews("example/repo", 7)
+
+    def test_a_non_array_reviews_payload_fails_closed(self) -> None:
+        with self.assertRaises(GitHubError):
+            self.boundary(json.dumps({"reviews": []})).reviews("example/repo", 7)
+
 
 class RedactionTests(unittest.TestCase):
     def test_github_tokens_are_removed(self) -> None:

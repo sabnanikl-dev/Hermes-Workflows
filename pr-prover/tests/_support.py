@@ -19,7 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pr_prover.commands import CommandResult, validate_argv
 from pr_prover.config import RunConfig
-from pr_prover.github import Comment, PullRequest
+from pr_prover.github import Comment, PullRequest, Review
+from pr_prover.identities import IdentityFacts
+from pr_prover.launchers import LaunchBroker
+from pr_prover.prompts import review_tag
 
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
@@ -27,6 +30,9 @@ HEAD_C = "c" * 40
 SIGNATURE = "Fixed by: Claude Code via Hermes orchestration"
 BRANCH = "feat/example"
 BUILDER_LOGIN = "sabnanikl-dev"
+REVIEWER_LOGIN = "karanagent1"
+BUILDER_TOKEN = "ghp_" + "b" * 36
+REVIEWER_TOKEN = "ghp_" + "r" * 36
 
 
 # -- lane output builders -------------------------------------------------
@@ -57,6 +63,11 @@ def fix_comment(head: str) -> str:
     return f"Fixed the blockers on this head.\n\n---\n{SIGNATURE}\nHEAD: {head}\n"
 
 
+def review_body(role: str, head: str, *, repo: str = "example/repo", pr: int = 7) -> str:
+    """A reviewer artifact carrying the tag that binds repo, PR, role, and head."""
+    return f"{review_tag(repo=repo, pr=pr, role=role, head=head)}\n\nLooks fine to me.\n"
+
+
 # -- fakes ----------------------------------------------------------------
 @dataclass
 class FakeRemote:
@@ -69,7 +80,9 @@ class FakeRemote:
     state: str = "OPEN"
     is_draft: bool = True
     comments: list[Comment] = field(default_factory=list)
+    reviews: list[Review] = field(default_factory=list)
     _next_comment_id: int = 1
+    _next_review_id: int = 1
 
     def push(self, head: str, *, comment: str | None = None, author: str = BUILDER_LOGIN) -> None:
         self.head = head
@@ -83,6 +96,19 @@ class FakeRemote:
         )
         self._next_comment_id += 1
         self.comments.append(posted)
+        return posted
+
+    def review(self, body: str, *, head: str, author: str = REVIEWER_LOGIN) -> Review:
+        """Append a submitted review with a fresh id, bound to the commit it reviewed."""
+        posted = Review(
+            identifier=f"PRR_review{self._next_review_id}",
+            author=author,
+            body=body,
+            commit_oid=head,
+            state="COMMENTED",
+        )
+        self._next_review_id += 1
+        self.reviews.append(posted)
         return posted
 
     def pull_request(self) -> PullRequest:
@@ -105,6 +131,7 @@ class FakeGitHub:
         self.remote = remote
         self.pull_request_calls = 0
         self.comment_calls = 0
+        self.review_calls = 0
 
     def pull_request(self, repo: str, number: int) -> PullRequest:
         self.pull_request_calls += 1
@@ -114,11 +141,41 @@ class FakeGitHub:
         self.comment_calls += 1
         return tuple(self.remote.comments)
 
+    def reviews(self, repo: str, number: int) -> tuple[Review, ...]:
+        self.review_calls += 1
+        return tuple(self.remote.reviews)
+
+
+class FakeVerifier:
+    """Reports whatever GitHub is pretending this credential resolves to."""
+
+    def __init__(
+        self,
+        logins: Mapping[str, str] | None = None,
+        permissions: Mapping[str, Mapping[str, bool]] | None = None,
+    ) -> None:
+        self.logins = dict(logins or {BUILDER_TOKEN: BUILDER_LOGIN, REVIEWER_TOKEN: REVIEWER_LOGIN})
+        self.permissions = dict(
+            permissions
+            or {
+                BUILDER_LOGIN: {"pull": True, "push": True, "maintain": False, "admin": False},
+                REVIEWER_LOGIN: {"pull": True, "push": False, "maintain": False, "admin": False},
+            }
+        )
+        self.calls: list[dict[str, str]] = []
+
+    def facts(self, env: Mapping[str, str], *, repo: str) -> IdentityFacts:
+        token = env.get("GH_TOKEN", "")
+        self.calls.append({"repo": repo, "token_present": str(bool(token))})
+        login = self.logins.get(token, "somebody-else")
+        return IdentityFacts(login=login, permissions=self.permissions.get(login, {"pull": True}))
+
 
 @dataclass(frozen=True)
 class Call:
     argv: tuple[str, ...]
     cwd: str | None
+    env: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -198,7 +255,13 @@ class FakeRunner:
         timeout: float | None = None,
     ) -> CommandResult:
         checked = validate_argv(argv)
-        self.calls.append(Call(argv=checked, cwd=str(cwd) if cwd is not None else None))
+        self.calls.append(
+            Call(
+                argv=checked,
+                cwd=str(cwd) if cwd is not None else None,
+                env=dict(env) if env is not None else None,
+            )
+        )
         if checked[0] == "git":
             return self._git(checked)
         return self.script(checked, str(cwd) if cwd is not None else None)
@@ -233,6 +296,57 @@ class FakeRunner:
         return [call.argv[3] for call in self.calls if call.argv[0] == "git" and call.argv[2] == target]
 
 
+def parent_env(**extra: str) -> dict[str, str]:
+    """A parent environment holding both scoped credentials and a lot of authority."""
+    env = {
+        "HOME": "/tmp/pr-prover-home",
+        "PATH": "/usr/bin:/bin",
+        "LANG": "en_GB.UTF-8",
+        "PR_PROVER_BUILDER_TOKEN": BUILDER_TOKEN,
+        "PR_PROVER_REVIEWER_TOKEN": REVIEWER_TOKEN,
+        # Everything below must never reach a child.
+        "GH_TOKEN": "ghp_" + "0" * 36,
+        "GITHUB_TOKEN": "ghp_" + "1" * 36,
+        "KARAN_APPROVAL_TOKEN": "approve-" + "2" * 32,
+        "JMD_DEPLOY_KEY": "jmd-" + "3" * 32,
+        "VERCEL_TOKEN": "vercel-" + "4" * 32,
+        "SANITY_WRITE_TOKEN": "sanity-" + "5" * 32,
+        "AWS_SECRET_ACCESS_KEY": "aws-" + "6" * 32,
+        "N8N_API_KEY": "n8n-" + "7" * 32,
+        "ANTHROPIC_API_KEY": "sk-ant-" + "8" * 32,
+        "SSH_AUTH_SOCK": "/private/tmp/ssh-agent.sock",
+        "STRIPE_SECRET": "sk_live_" + "9" * 24,
+    }
+    env.update(extra)
+    return env
+
+
+FORBIDDEN_VALUES = tuple(
+    value
+    for name, value in parent_env().items()
+    if name not in {"HOME", "PATH", "LANG", "PR_PROVER_BUILDER_TOKEN", "PR_PROVER_REVIEWER_TOKEN"}
+)
+
+
+def make_broker(
+    config: RunConfig,
+    runner: object,
+    *,
+    env: Mapping[str, str] | None = None,
+    verifier: object | None = None,
+    scratch_root: Path | None = None,
+) -> LaunchBroker:
+    return LaunchBroker(
+        runner=runner,
+        policy=config.launch.policy,
+        identities=config.launch.identities,
+        verifier=FakeVerifier() if verifier is None else verifier,
+        parent_env=parent_env() if env is None else env,
+        worktree_root=config.worktree_root,
+        scratch_root=scratch_root,
+    )
+
+
 def make_config(
     tmp: Path,
     *,
@@ -241,6 +355,8 @@ def make_config(
     visual_qa_required: bool = False,
     comment_author: str = BUILDER_LOGIN,
     branch: str | None = BRANCH,
+    scoped: bool = False,
+    reviewer_login: str = REVIEWER_LOGIN,
 ) -> RunConfig:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -266,6 +382,24 @@ def make_config(
     }
     if branch is None:
         payload.pop("branch")
+    if scoped:
+        payload["launch"] = {
+            "identities": {
+                "builder": {
+                    "login": comment_author,
+                    "capabilities": ["push-branch", "comment-pr"],
+                    "token_env": "PR_PROVER_BUILDER_TOKEN",
+                },
+                "reviewer": {
+                    "login": reviewer_login,
+                    "capabilities": ["comment-pr", "review-pr"],
+                    "token_env": "PR_PROVER_REVIEWER_TOKEN",
+                },
+            }
+        }
+        payload["builder"]["identity"] = "builder"  # type: ignore[index]
+        for reviewer in payload["reviewers"]:  # type: ignore[attr-defined]
+            reviewer["identity"] = "reviewer"
     return RunConfig.from_mapping(payload, base_dir=tmp)
 
 

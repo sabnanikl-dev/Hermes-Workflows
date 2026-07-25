@@ -97,6 +97,18 @@ class BuilderRefusal(FailClosed):
     reason = "builder-refusal"
 
 
+class IdentityError(FailClosed):
+    """A lane's credential is missing, ambiguous, the wrong account, or too broad."""
+
+    reason = "identity-error"
+
+
+class LaunchPolicyError(FailClosed):
+    """A child launch would carry authority the launcher does not own."""
+
+    reason = "launch-policy"
+
+
 class GitHubError(FailClosed):
     """The GitHub boundary failed or returned an unusable payload."""
 
