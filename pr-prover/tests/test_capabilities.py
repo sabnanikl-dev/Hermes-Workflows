@@ -6,8 +6,11 @@ another repository, approve a review, or run an arbitrary ``gh`` call.
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -18,6 +21,7 @@ from pathlib import Path
 from _support import BUILDER_TOKEN, HEAD_A, HEAD_B
 
 from pr_prover.capabilities import (
+    AUTH_REFUSED,
     COMMENT_PR,
     GITHUB_HOST,
     MAX_BODY_CHARS,
@@ -25,13 +29,20 @@ from pr_prover.capabilities import (
     PUSH_BRANCH,
     REQUEST_FIELDS,
     REVIEW_PR,
+    SECRET_CHARS,
     SHIM_NAME,
+    SHIM_SOURCE,
     CapabilityBroker,
     CapabilityChannel,
     CapabilityScope,
+    _ChannelHandler,
+    authenticates,
+    frame,
     request,
+    split_frame,
     write_shim,
 )
+from pr_prover.childenv import MIN_CAPABILITY_SECRET_CHARS
 from pr_prover.commands import CommandResult
 from pr_prover.errors import CapabilityRefused
 from pr_prover.identities import BUILDER_CAPABILITIES, REVIEWER_CAPABILITIES
@@ -251,25 +262,228 @@ class ChannelTests(BrokerTestCase):
 
     def test_a_request_over_the_real_socket_is_served(self) -> None:
         channel = self.channel()
-        reply = request(channel.path, {"operation": COMMENT_PR, "body": "over the wire"})
+        reply = request(
+            channel.path,
+            {"operation": COMMENT_PR, "body": "over the wire"},
+            secret=channel.secret,
+        )
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(channel.broker.granted, [COMMENT_PR])
 
     def test_a_closed_channel_serves_nothing(self) -> None:
         channel = CapabilityChannel(self.broker(), label="lane-b")
-        path = channel.path
+        path, secret = channel.path, channel.secret
         channel.close()
         self.assertFalse(path.exists())
         with self.assertRaises(OSError):
-            request(path, {"operation": COMMENT_PR, "body": "too late"})
+            request(path, {"operation": COMMENT_PR, "body": "too late"}, secret=secret)
 
     def test_two_lanes_get_two_different_channels(self) -> None:
         first = self.channel()
         second = CapabilityChannel(self.broker(REVIEWER_CAPABILITIES), label="lane-b")
         self.addCleanup(second.close)
         self.assertNotEqual(first.path, second.path)
-        self.assertFalse(request(second.path, {"operation": PUSH_BRANCH})["ok"])
-        self.assertTrue(request(first.path, {"operation": PUSH_BRANCH})["ok"])
+        self.assertNotEqual(first.secret, second.secret)
+        self.assertFalse(
+            request(second.path, {"operation": PUSH_BRANCH}, secret=second.secret)["ok"]
+        )
+        self.assertTrue(
+            request(first.path, {"operation": PUSH_BRANCH}, secret=first.secret)["ok"]
+        )
+
+    def test_one_lane_cannot_spend_another_lanes_capabilities(self) -> None:
+        """PAPI-90 item 2, former-red: finding a live socket is not enough.
+
+        Both lanes run as the same user, so the mode bits on the socket keep
+        nobody out. The reviewer lane holds no ``push-branch`` capability, so it
+        has an obvious reason to want the builder's channel — and knowing the
+        path of it gets the reviewer exactly nowhere, because the request is
+        refused before it is parsed and no subprocess is started.
+        """
+        builder = self.channel()
+        reviewer = CapabilityChannel(self.broker(REVIEWER_CAPABILITIES), label="lane-r")
+        self.addCleanup(reviewer.close)
+
+        stolen = request(
+            builder.path, {"operation": PUSH_BRANCH}, secret=reviewer.secret
+        )
+
+        self.assertFalse(stolen["ok"])
+        self.assertEqual(stolen["error"], AUTH_REFUSED)
+        self.assertEqual(builder.broker.granted, [])
+        self.assertEqual(builder.broker.refused, [])
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(builder.unauthenticated, 1)
+
+    def test_a_request_with_no_secret_at_all_is_refused(self) -> None:
+        channel = self.channel()
+        reply = request(channel.path, {"operation": PUSH_BRANCH}, secret="")
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], AUTH_REFUSED)
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_replayed_secret_after_close_reaches_nothing(self) -> None:
+        """A secret is not a bearer token for a channel that no longer exists."""
+        channel = CapabilityChannel(self.broker(), label="lane-c")
+        path, secret = channel.path, channel.secret
+        channel.close()
+        with self.assertRaises(OSError):
+            request(path, {"operation": PUSH_BRANCH}, secret=secret)
+        self.assertEqual(self.runner.calls, [])
+
+    def test_the_lane_secret_is_long_and_never_repeats(self) -> None:
+        secrets = set()
+        for index in range(4):
+            channel = CapabilityChannel(self.broker(), label=f"lane-{index}")
+            self.addCleanup(channel.close)
+            self.assertEqual(len(channel.secret), SECRET_CHARS)
+            self.assertGreaterEqual(len(channel.secret), MIN_CAPABILITY_SECRET_CHARS)
+            secrets.add(channel.secret)
+        self.assertEqual(len(secrets), 4)
+
+
+class ChannelHandlerTests(BrokerTestCase):
+    """The wire protocol itself, driven over a socket pair.
+
+    :class:`ChannelTests` needs a bound unix socket, which some hardened
+    sandboxes refuse outright. These tests reach the same handler — the same
+    authentication, the same parse, the same dispatch — through a connected
+    socket pair instead, so the rule that matters ("a request that cannot prove
+    it is this lane starts no subprocess") is checked wherever the suite runs.
+    """
+
+    def serve(self, secret: str, payload: bytes, *, capabilities=BUILDER_CAPABILITIES):  # type: ignore[no-untyped-def]
+        """Hand one raw frame to a real handler and return the parsed reply."""
+        broker = self.broker(capabilities)
+        server = _FakeChannelServer(broker, secret)
+        near, far = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            far.sendall(payload)
+            far.shutdown(socket.SHUT_WR)
+            # Constructing the handler runs setup/handle/finish, exactly as the
+            # threading server does for one accepted connection.
+            _ChannelHandler(near, ("", 0), server)
+            near.close()
+            reply = b""
+            while True:
+                chunk = far.recv(65536)
+                if not chunk:
+                    break
+                reply += chunk
+        finally:
+            far.close()
+        return json.loads(reply.decode("utf-8")), broker, server
+
+    def test_the_right_secret_reaches_the_broker(self) -> None:
+        reply, broker, _ = self.serve(
+            "s" * 64, frame("s" * 64, {"operation": COMMENT_PR, "body": "hello"})
+        )
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(broker.granted, [COMMENT_PR])
+
+    def test_a_wrong_secret_never_reaches_the_broker(self) -> None:
+        """Former-red: refused before the JSON is even decoded."""
+        reply, broker, server = self.serve(
+            "s" * 64, frame("w" * 64, {"operation": PUSH_BRANCH})
+        )
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], AUTH_REFUSED)
+        self.assertEqual(broker.granted, [])
+        self.assertEqual(broker.refused, [])
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(server.unauthenticated, 1)
+
+    def test_a_frame_with_no_secret_line_is_refused(self) -> None:
+        reply, broker, _ = self.serve(
+            "s" * 64, json.dumps({"operation": PUSH_BRANCH}).encode("utf-8")
+        )
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], AUTH_REFUSED)
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_secret_that_is_a_prefix_of_the_real_one_is_refused(self) -> None:
+        secret = "s" * 64
+        reply, _, _ = self.serve(secret, frame(secret[:32], {"operation": PUSH_BRANCH}))
+        self.assertFalse(reply["ok"])
+        self.assertEqual(self.runner.calls, [])
+
+    def test_the_refusal_is_the_same_whatever_was_wrong(self) -> None:
+        """The reply is not an oracle for which lane a socket belongs to."""
+        secret = "s" * 64
+        wrong = self.serve(secret, frame("w" * 64, {"operation": PUSH_BRANCH}))[0]
+        absent = self.serve(secret, b"\n" + json.dumps({"operation": PUSH_BRANCH}).encode())[0]
+        self.assertEqual(wrong, absent)
+
+    def test_authentication_is_a_constant_time_comparison(self) -> None:
+        self.assertTrue(authenticates(b"abc", "abc"))
+        self.assertFalse(authenticates(b"abc", "abd"))
+        self.assertFalse(authenticates(b"", "abc"))
+        self.assertFalse(authenticates(b"abc", ""))
+        source = inspect.getsource(authenticates)
+        self.assertIn("compare_digest", source)
+
+    def test_a_frame_splits_into_secret_and_request(self) -> None:
+        self.assertEqual(split_frame(b"sec\n{}"), (b"sec", b"{}"))
+        self.assertEqual(split_frame(b"{}"), (b"", b""))
+        self.assertEqual(split_frame(b""), (b"", b""))
+
+    def test_an_authenticated_request_still_cannot_name_its_own_target(self) -> None:
+        """Authentication is not authorisation: the vocabulary is still closed."""
+        secret = "s" * 64
+        reply, _, _ = self.serve(
+            secret,
+            frame(secret, {"operation": PUSH_BRANCH, "repo": "someone/else"}),
+        )
+        self.assertFalse(reply["ok"])
+        self.assertIn("cannot name its own repository", reply["error"])
+        self.assertEqual(self.runner.calls, [])
+
+
+class _FakeChannelServer:
+    """The two attributes a handler reads, without binding anything."""
+
+    def __init__(self, broker: CapabilityBroker, secret: str) -> None:
+        self.broker = broker
+        self.secret = secret
+        self.unauthenticated = 0
+
+    def note_unauthenticated(self) -> None:
+        self.unauthenticated += 1
+
+
+class GeneratedShimTests(unittest.TestCase):
+    """The shim is source code this module writes, so it has to be source code."""
+
+    def test_the_generated_shim_is_valid_python(self) -> None:
+        """Former-red: an escaping slip made the generated program unparsable.
+
+        SHIM_SOURCE is an ordinary (non-raw) string literal, so an escape meant
+        for the *generated* program needs writing twice. Getting that wrong
+        produced a shim that failed with a SyntaxError only when a lane ran it.
+        """
+        ast.parse(SHIM_SOURCE)
+
+    def test_the_written_shim_compiles_and_reports_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            shim = write_shim(Path(tmp) / "bin")
+            compile(shim.read_text(encoding="utf-8"), str(shim), "exec")
+            result = subprocess.run(
+                [sys.executable, str(shim)],
+                capture_output=True,
+                text=True,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                timeout=60,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage", result.stderr.lower())
+        self.assertNotIn("SyntaxError", result.stderr)
+
+    def test_the_generated_shim_sends_the_secret_as_the_first_line(self) -> None:
+        self.assertIn('b"\\n"', SHIM_SOURCE)
+        self.assertIn("PR_PROVER_CAPABILITY_SECRET", SHIM_SOURCE)
+        # ...and reads it from the environment, never from argv.
+        self.assertIn('os.environ.get("PR_PROVER_CAPABILITY_SECRET"', SHIM_SOURCE)
 
 
 class ShimTests(BrokerTestCase):
@@ -281,11 +495,25 @@ class ShimTests(BrokerTestCase):
         self.channel = CapabilityChannel(self.broker(), label="lane-a")
         self.addCleanup(self.channel.close)
 
-    def shim_run(self, *arguments: str, socket_path: str | None = None) -> subprocess.CompletedProcess:
+    def shim_run(
+        self,
+        *arguments: str,
+        socket_path: str | None = None,
+        secret: str | None = None,
+    ) -> subprocess.CompletedProcess:
+        """Run the real shim the way a lane would: socket and secret from the environment.
+
+        Both come from the narrow child environment. Neither is on argv, where
+        every process on the machine could read it, and neither is read from a
+        file the request names.
+        """
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         path = self.channel.path if socket_path is None else socket_path
         if path:
             env["PR_PROVER_CAPABILITY_SOCKET"] = str(path)
+        issued = self.channel.secret if secret is None else secret
+        if issued:
+            env["PR_PROVER_CAPABILITY_SECRET"] = issued
         return subprocess.run(
             [sys.executable, str(self.shim), *arguments],
             capture_output=True,
@@ -327,7 +555,9 @@ class ShimTests(BrokerTestCase):
     def test_a_refused_operation_exits_nonzero_with_the_reason(self) -> None:
         channel = CapabilityChannel(self.broker(REVIEWER_CAPABILITIES), label="lane-r")
         self.addCleanup(channel.close)
-        result = self.shim_run("push", socket_path=str(channel.path))
+        result = self.shim_run(
+            "push", socket_path=str(channel.path), secret=channel.secret
+        )
         self.assertEqual(result.returncode, 1)
         self.assertIn("does not carry the capability", result.stderr)
 
@@ -335,6 +565,23 @@ class ShimTests(BrokerTestCase):
         result = self.shim_run("push", socket_path="")
         self.assertEqual(result.returncode, 2)
         self.assertIn("no capability channel", result.stderr)
+
+    def test_a_child_with_no_secret_can_do_nothing(self) -> None:
+        """PAPI-90 item 2, former-red: the socket path alone buys nothing."""
+        result = self.shim_run("push", secret="")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no capability channel secret", result.stderr)
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_child_presenting_another_lanes_secret_is_refused(self) -> None:
+        """A lane that reads a sibling's socket path still cannot spend it."""
+        other = CapabilityChannel(self.broker(REVIEWER_CAPABILITIES), label="lane-r")
+        self.addCleanup(other.close)
+        result = self.shim_run("push", secret=other.secret)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("secret", result.stderr)
+        self.assertEqual(self.channel.broker.granted, [])
+        self.assertEqual(self.runner.calls, [])
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -50,7 +50,10 @@ from .errors import LaunchPolicyError
 
 # Names a child may inherit. Deliberately short: locale, paths, and the
 # toolchain basics, with nothing that carries authority. HOME is absent on
-# purpose — the launcher synthesises one.
+# purpose — the launcher synthesises one. So is ``TMPDIR``: the operator's
+# temporary directory is shared with every other lane and with the launcher's
+# own material, so the launcher writes that one too, pointing it inside the
+# lane's own writable scratch.
 DEFAULT_ALLOW = frozenset(
     {
         "LANG",
@@ -59,7 +62,6 @@ DEFAULT_ALLOW = frozenset(
         "LOGNAME",
         "PATH",
         "SHELL",
-        "TMPDIR",
         "TZ",
         "USER",
     }
@@ -85,18 +87,37 @@ HOME_GUARDS = (
 # other end is what actually holds authority.
 CAPABILITY_CHANNEL = "PR_PROVER_CAPABILITY_SOCKET"
 
+# The per-lane shared secret that authenticates a request on that channel. A
+# path is not an authenticator: any process running as this user can list the
+# launcher's scratch directory, find another lane's socket, and connect to it.
+# So each channel is bound to one cryptographically random secret, handed to
+# exactly one lane through this variable and compared in constant time before a
+# request is parsed at all (see :mod:`.capabilities`).
+#
+# It travels in the narrow child environment rather than in a file the request
+# names or an argv entry: argv is visible to every process on the machine and is
+# echoed into launch evidence, and a request-named file is chosen by the
+# requester rather than by the launcher.
+CAPABILITY_SECRET = "PR_PROVER_CAPABILITY_SECRET"
+
 # Everything a launcher may inject, in full. Anything outside this set fails
 # closed, so "the launcher is the only credential broker" cannot decay into
 # "the launcher may write whatever it likes".
-INJECTABLE = frozenset({"HOME", "PATH", CAPABILITY_CHANNEL, *HOME_GUARDS})
+INJECTABLE = frozenset(
+    {"HOME", "PATH", CAPABILITY_CHANNEL, CAPABILITY_SECRET, *HOME_GUARDS}
+)
 
 # Names a launcher may set that carry no authority: quiet/progress discipline,
-# the refusal to prompt for credentials, and the refusal to litter a read-only
-# worktree with bytecode. Listed here so that "the launcher owns this variable"
-# stays a closed set rather than anything a launcher writes.
+# the refusal to prompt for credentials, the refusal to litter a read-only
+# worktree with bytecode, and the two lane-scoped temporary directories. Listed
+# here so that "the launcher owns this variable" stays a closed set rather than
+# anything a launcher writes, and so a configuration that tries to name one of
+# them is refused when the policy is built.
 LAUNCHER_OVERRIDES = frozenset(
     {
         "CI",
+        "CLAUDE_CODE_TMPDIR",
+        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
         "CLICOLOR",
         "COLUMNS",
         "GIT_TERMINAL_PROMPT",
@@ -104,8 +125,23 @@ LAUNCHER_OVERRIDES = frozenset(
         "PAGER",
         "PYTHONDONTWRITEBYTECODE",
         "TERM",
+        "TMPDIR",
     }
 )
+
+# The value that variable always carries. An agent lane runs shells, and a shell
+# that re-exported the lane's own environment into a grandchild would carry the
+# capability secret further than the lane it was issued to.
+SUBPROCESS_ENV_SCRUB = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+
+# Where a Claude agent lane's sandboxed Bash actually resolves its temporary
+# directory. Setting ``TMPDIR`` alone is not enough: a live probe of Claude Code
+# 2.1.219 reported ``TMPDIR=/tmp/claude-501`` inside a sandboxed shell whatever
+# the launcher had set, because the client supplies its own session temporary
+# directory. This is the documented name that overrides it, and the launcher
+# points it at the lane's own scratch so a temporary file lands somewhere only
+# this lane can read and the sandbox actually allows writing.
+CLAUDE_TMPDIR = "CLAUDE_CODE_TMPDIR"
 
 # The model-access channels a configuration may pick from, keyed by the name a
 # configuration writes. The environment variable is this module's to choose,
@@ -225,6 +261,10 @@ NEVER_PERMITTED = frozenset(
         "SSH_AUTH_SOCK",
     }
 )
+
+# The shortest per-lane secret this module will let a launcher inject. 32 hex
+# characters is 128 bits; :mod:`.capabilities` mints 64.
+MIN_CAPABILITY_SECRET_CHARS = 32
 
 _ENV_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -452,6 +492,35 @@ def assert_scoped(
             "configuration redirection, or a toolchain falls back to the operator's",
             evidence={"missing": missing},
         )
+    _assert_channel_is_authenticated(env, injected=injected)
+
+
+def _assert_channel_is_authenticated(
+    env: Mapping[str, str], *, injected: frozenset[str]
+) -> None:
+    """A capability channel and its secret are one thing, never half of one.
+
+    A lane given the socket path but no secret would find every request refused;
+    a lane given a secret but no socket has an authenticator for a channel it
+    cannot name. Both are launcher bugs, and both are the kind that would be
+    discovered by a lane rather than by a test, so they fail here instead.
+    """
+    channel = CAPABILITY_CHANNEL in injected
+    secret = CAPABILITY_SECRET in injected
+    if channel != secret:
+        raise LaunchPolicyError(
+            "a capability channel must be injected together with the per-lane secret "
+            "that authenticates it; a socket path on its own is not an authenticator",
+            evidence={"channel_injected": channel, "secret_injected": secret},
+        )
+    if not secret:
+        return
+    value = env.get(CAPABILITY_SECRET) or ""
+    if len(value) < MIN_CAPABILITY_SECRET_CHARS:
+        raise LaunchPolicyError(
+            "a capability channel secret is too short to be unguessable",
+            evidence={"length": len(value), "minimum": MIN_CAPABILITY_SECRET_CHARS},
+        )
 
 
 def _text(name: str, value: object) -> str:
@@ -471,12 +540,15 @@ def carries_none_of(env: Mapping[str, str], values: Iterable[str]) -> bool:
 
 __all__ = [
     "CAPABILITY_CHANNEL",
+    "CAPABILITY_SECRET",
     "DEFAULT_ALLOW",
     "HOME_GUARDS",
     "INJECTABLE",
     "LAUNCHER_OVERRIDES",
     "MODEL_AUTH_CHANNELS",
+    "MIN_CAPABILITY_SECRET_CHARS",
     "NEVER_PERMITTED",
+    "SUBPROCESS_ENV_SCRUB",
     "EnvironmentPolicy",
     "assert_scoped",
     "carries_none_of",

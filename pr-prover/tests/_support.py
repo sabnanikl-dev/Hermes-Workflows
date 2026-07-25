@@ -5,6 +5,13 @@ set of git calls the loop is allowed to make and hands every other argv array
 to a scripted lane. A shared :class:`FakeRemote` is the single source of truth
 for the head and the PR comments, so "the builder pushed" is one call that
 moves the remote head, the remote-tracking ref, and the comment list together.
+
+Two things follow from the launcher resolving every configured program to a
+trusted absolute path before it spawns anything. :func:`lane_program` writes a
+real executable file for each lane name a test scripts, so resolution has
+something to find; and :attr:`Call.program` is the basename of what was
+actually launched, which is what a test means when it says "the builder lane
+ran". ``Call.argv`` still holds the absolute path the launcher chose.
 """
 from __future__ import annotations
 
@@ -33,6 +40,43 @@ BUILDER_LOGIN = "sabnanikl-dev"
 REVIEWER_LOGIN = "karanagent1"
 BUILDER_TOKEN = "ghp_" + "b" * 36
 REVIEWER_TOKEN = "ghp_" + "r" * 36
+
+
+LANE_PROGRAMS = (
+    "lane-reviewer-A",
+    "lane-reviewer-B",
+    "lane-builder",
+    "lane-gate-tests",
+    "lane-gate-visual",
+    "lane-gate-lint",
+    "lane-gate-slow",
+    "claude",
+)
+
+
+def lane_bin(tmp: Path, names: Sequence[str] = LANE_PROGRAMS) -> Path:
+    """A directory of real, executable stubs the launcher can resolve to.
+
+    The launcher no longer hands a child a bare program name — it resolves the
+    name to an absolute path, checks it, and fingerprints it — so a lane a test
+    scripts has to exist on disk. These stubs are never executed: the fake
+    runner intercepts the call. They exist so that resolution has a real regular
+    file, owned by this user and not group-writable, to find.
+    """
+    directory = Path(tmp) / "lane-bin"
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    for name in names:
+        path = directory / name
+        if not path.exists():
+            path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            path.chmod(0o700)
+    return directory
+
+
+def lane_program(tmp: Path, name: str) -> str:
+    """The absolute path of one lane stub, for use in a configured argv array."""
+    return str(lane_bin(tmp) / name)
 
 
 # -- lane output builders -------------------------------------------------
@@ -184,6 +228,11 @@ class Call:
     cwd: str | None
     env: Mapping[str, str] | None = None
 
+    @property
+    def program(self) -> str:
+        """The name of the program launched, without the path the launcher chose."""
+        return Path(self.argv[0]).name
+
 
 @dataclass(frozen=True)
 class ScriptedResult:
@@ -197,7 +246,11 @@ class ScriptedResult:
 
 
 class LaneScript:
-    """Queued outputs per lane program, keyed by ``argv[0]``."""
+    """Queued outputs per lane program, keyed by the basename of ``argv[0]``.
+
+    The launcher passes an absolute path, so the key is the program name a test
+    asked for rather than the path the launcher resolved it to.
+    """
 
     def __init__(self) -> None:
         self._queues: dict[str, deque[ScriptedResult]] = {}
@@ -224,7 +277,7 @@ class LaneScript:
         return self
 
     def __call__(self, argv: tuple[str, ...], cwd: str | None) -> CommandResult:
-        queue = self._queues.get(argv[0])
+        queue = self._queues.get(Path(argv[0]).name)
         if not queue:
             raise AssertionError(f"unscripted lane call: {list(argv)}")
         scripted = queue.popleft()
@@ -260,6 +313,17 @@ class FakeRunner:
         # The commit each worktree was created at. A worktree does not follow
         # the remote, so `rev-parse HEAD` inside one must not answer with it.
         self.worktree_heads: dict[str, str] = {}
+        # What the exact-tree proof finds in a reviewer worktree. Empty means
+        # "byte for byte the bound commit", which is the normal case.
+        self.reviewer_index_flags = ""
+        self.reviewer_divergence: tuple[str, ...] = ()
+        self.reviewer_git_config = ""
+        # A reviewer worktree whose HEAD names a tree other than the bound
+        # commit's, keyed by worktree path.
+        self.worktree_tree_overrides: dict[str, str] = {}
+        # The paths a fix attempt's commits touched, as `git diff --name-only`
+        # would report them between the old and new head.
+        self.committed_paths: tuple[str, ...] = ("src/fix.py",)
 
     def run(
         self,
@@ -294,7 +358,37 @@ class FakeRunner:
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         if rest[0] == "rev-parse":
             head = self.worktree_heads.get(target, self.remote.head)
+            wanted = rest[-1]
+            if wanted.endswith("^{tree}"):
+                revision = wanted[: -len("^{tree}")]
+                if revision == "HEAD":
+                    override = self.worktree_tree_overrides.get(target)
+                    tree = override if override is not None else _tree_of(head)
+                else:
+                    tree = _tree_of(revision)
+                return CommandResult(argv=argv, returncode=0, stdout=tree + "\n", stderr="")
             return CommandResult(argv=argv, returncode=0, stdout=head + "\n", stderr="")
+        if rest[0] in ("read-tree", "update-index"):
+            return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
+        if rest[0] == "ls-files":
+            return CommandResult(
+                argv=argv, returncode=0, stdout=self.reviewer_index_flags, stderr=""
+            )
+        if rest[0] == "diff-index":
+            return CommandResult(
+                argv=argv,
+                returncode=0,
+                stdout=_nul(self.reviewer_divergence),
+                stderr="",
+            )
+        if rest[0] == "config":
+            return CommandResult(
+                argv=argv, returncode=0, stdout=self.reviewer_git_config, stderr=""
+            )
+        if rest[0] == "diff":
+            return CommandResult(
+                argv=argv, returncode=0, stdout=_nul(self.committed_paths), stderr=""
+            )
         if rest[0] == "worktree" and rest[1] == "add":
             path = Path(rest[3])
             path.mkdir(parents=True, exist_ok=False)
@@ -315,6 +409,16 @@ class FakeRunner:
     def git_subcommands(self, repo_path: Path) -> list[str]:
         target = str(Path(repo_path).resolve())
         return [call.argv[3] for call in self.calls if call.argv[0] == "git" and call.argv[2] == target]
+
+
+def _tree_of(commit: str) -> str:
+    """A deterministic stand-in for the tree a commit names."""
+    return "t" + commit[1:] if commit else ""
+
+
+def _nul(paths: Sequence[str]) -> str:
+    """``git ... -z`` output: every path NUL-terminated."""
+    return "".join(f"{path}\x00" for path in paths)
 
 
 def parent_env(**extra: str) -> dict[str, str]:
@@ -377,6 +481,7 @@ def make_config(
     comment_author: str = BUILDER_LOGIN,
     branch: str | None = BRANCH,
     reviewer_login: str = REVIEWER_LOGIN,
+    allowed_paths: Sequence[str] = ("src/",),
 ) -> RunConfig:
     """A valid run configuration. Every lane is bound to a scoped identity.
 
@@ -397,13 +502,28 @@ def make_config(
         "visual_qa_required": visual_qa_required,
         "gates": list(gates),
         "reviewers": [
-            {"name": "A", "argv": ["lane-reviewer-A", "--head", "{head}", "--repo", "{repo}"]},
-            {"name": "B", "argv": ["lane-reviewer-B", "--head", "{head}", "--pr", "{pr}"]},
+            {
+                "name": "A",
+                "argv": [lane_program(tmp, "lane-reviewer-A"), "--head", "{head}", "--repo", "{repo}"],
+            },
+            {
+                "name": "B",
+                "argv": [lane_program(tmp, "lane-reviewer-B"), "--head", "{head}", "--pr", "{pr}"],
+            },
         ],
         "builder": {
-            "argv": ["lane-builder", "--blockers", "{blockers_file}", "--mode", "{mode}", "--head", "{head}"],
+            "argv": [
+                lane_program(tmp, "lane-builder"),
+                "--blockers",
+                "{blockers_file}",
+                "--mode",
+                "{mode}",
+                "--head",
+                "{head}",
+            ],
             "signature": SIGNATURE,
             "comment_author": comment_author,
+            "allowed_paths": list(allowed_paths),
         },
     }
     if branch is None:
@@ -453,6 +573,7 @@ def legacy_unscoped_payload(tmp: Path, *, source_repo: Path) -> dict[str, object
             "argv": ["lane-builder", "--head", "{head}"],
             "signature": SIGNATURE,
             "comment_author": BUILDER_LOGIN,
+            "allowed_paths": ["**"],
         },
     }
 

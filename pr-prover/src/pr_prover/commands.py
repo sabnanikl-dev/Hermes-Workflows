@@ -9,6 +9,14 @@ reviewer-supplied value can ever be re-parsed as syntax.
 :class:`SubprocessRunner` with a credential-scoped launcher; PAPI-88 only
 requires that the boundary exists and that argv discipline is enforced here.
 
+**In-flight children are cancellable.** :class:`LaunchWatch` is an optional
+handle a caller passes in to learn which process groups a runner currently has
+open, and to tear all of them down at once. The capability broker uses it so
+that closing a lane's channel does not return while a ``git push`` or a ``gh
+api`` it accepted is still running (see :mod:`.capabilities`). A runner that
+supports it advertises ``supports_watch``; one that does not — every test double
+in this package, for instance — is simply called without it.
+
 **A lane is a process group, not a process.** An agent lane runs shells, which
 run build tools, which run servers. Killing only the process the runner started
 leaves those descendants alive holding the lane's working directory, its
@@ -43,6 +51,70 @@ _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 # torn down the run has already decided it is finished with that lane.
 TERM_GRACE_SECONDS = 5.0
 KILL_GRACE_SECONDS = 5.0
+
+
+class LaunchWatch:
+    """The process groups one owner currently has open, and a way to end them.
+
+    A runner registers each group as it starts and forgets it once the group is
+    gone. :meth:`cancel` latches: after it returns, every group registered so far
+    has been terminated and any group registered later is terminated as soon as
+    it appears, so there is no window in which a caller that has already decided
+    to stop can still acquire a live child.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._open: dict[int, "subprocess.Popen[str] | None"] = {}
+        self._cancelled = False
+        self.terminated: list[int] = []
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    @property
+    def open_groups(self) -> tuple[int, ...]:
+        with self._lock:
+            return tuple(sorted(self._open))
+
+    def opened(self, group: int | None, process: "subprocess.Popen[str] | None" = None) -> bool:
+        """Register a group. False when the owner has already cancelled."""
+        if group is None:
+            return not self.cancelled
+        with self._lock:
+            if not self._cancelled:
+                self._open[group] = process
+                return True
+        # Cancelled while this child was starting, so it never gets to run.
+        terminate_group(group, process)
+        with self._lock:
+            self.terminated.append(group)
+        return False
+
+    def closed(self, group: int | None) -> None:
+        if group is None:
+            return
+        with self._lock:
+            self._open.pop(group, None)
+
+    def cancel(
+        self,
+        *,
+        term_grace: float = TERM_GRACE_SECONDS,
+        kill_grace: float = KILL_GRACE_SECONDS,
+    ) -> tuple[int, ...]:
+        """Terminate every open group and refuse every future one. Returns the groups."""
+        with self._lock:
+            self._cancelled = True
+            pending = dict(self._open)
+            self._open.clear()
+        for group, process in pending.items():
+            terminate_group(group, process, term_grace=term_grace, kill_grace=kill_grace)
+        with self._lock:
+            self.terminated.extend(pending)
+        return tuple(sorted(pending))
 
 
 @dataclass(frozen=True)
@@ -133,7 +205,12 @@ def render_argv(
 
 
 class CommandRunner(Protocol):
-    """Injection seam for launching children."""
+    """Injection seam for launching children.
+
+    ``watch`` is deliberately absent from this signature: it is an optional
+    extension a runner opts into by setting ``supports_watch``, so that the
+    doubles in this package's tests stay the two-line objects they are.
+    """
 
     def run(
         self,
@@ -145,6 +222,21 @@ class CommandRunner(Protocol):
     ) -> CommandResult: ...
 
 
+def run_watched(
+    runner: CommandRunner,
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    watch: LaunchWatch | None = None,
+) -> CommandResult:
+    """Call ``runner.run``, passing ``watch`` only to a runner that accepts it."""
+    if watch is not None and getattr(runner, "supports_watch", False):
+        return runner.run(argv, cwd=cwd, env=env, timeout=timeout, watch=watch)  # type: ignore[call-arg]
+    return runner.run(argv, cwd=cwd, env=env, timeout=timeout)
+
+
 class SubprocessRunner:
     """Default runner: one process group per child, torn down on every exit path.
 
@@ -153,6 +245,11 @@ class SubprocessRunner:
     group — not just the child — is what gets terminated, and :meth:`run` waits
     for it to be gone before returning.
     """
+
+    # Callers may hand this runner a :class:`LaunchWatch`. Advertised as an
+    # attribute so a caller can ask rather than guess, and so the test doubles
+    # in this package keep working untouched.
+    supports_watch = True
 
     def __init__(
         self,
@@ -172,9 +269,15 @@ class SubprocessRunner:
         cwd: Path | str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        watch: LaunchWatch | None = None,
     ) -> CommandResult:
         checked = validate_argv(argv)
         effective_timeout = self.default_timeout if timeout is None else timeout
+        if watch is not None and watch.cancelled:
+            raise CommandContractError(
+                "refusing to launch a child for an owner that has already been cancelled",
+                evidence={"argv": list(checked)},
+            )
         try:
             process = subprocess.Popen(  # noqa: S603 - argv array, shell=False
                 list(checked),
@@ -194,6 +297,16 @@ class SubprocessRunner:
             ) from exc
 
         group = _group_of(process)
+        if watch is not None and not watch.opened(group, process):
+            # The owner cancelled between the Popen and the registration. The
+            # group has already been torn down by the watch; report it as a
+            # cancelled child rather than waiting on something that is gone.
+            for handle in (process.stdout, process.stderr):
+                if handle is not None:
+                    handle.close()
+            return CommandResult(
+                argv=checked, returncode=125, stdout="", stderr="cancelled before start\n"
+            )
         # Drain both pipes in threads and wait on the *process*, not on end of
         # output. A backgrounded descendant inherits the lane's stdout, so
         # waiting for EOF would block until that descendant exited — which is
@@ -217,6 +330,8 @@ class SubprocessRunner:
             # unexpected exception. A lane that returned cleanly can still have
             # left a descendant holding its worktree and capability channel.
             terminate_group(group, process, term_grace=self.term_grace, kill_grace=self.kill_grace)
+            if watch is not None:
+                watch.closed(group)
             for reader in readers:
                 reader.join(timeout=self.term_grace + self.kill_grace + 5.0)
             for handle in (process.stdout, process.stderr):

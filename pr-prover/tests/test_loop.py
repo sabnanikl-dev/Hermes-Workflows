@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from _support import (
     builder_output,
     fix_comment,
     make_broker,
+    lane_program,
     make_config,
     make_source_repo,
     review_body,
@@ -27,6 +29,7 @@ from _support import (
 )
 from pr_prover.findings import Finding
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop
+from pr_prover.runtime import TRUSTED_SYSTEM_PATH
 from pr_prover.state import MAX_ATTEMPTS, RunState
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
 
@@ -145,7 +148,7 @@ class CleanPassTests(LoopHarness):
         loop = self.build()
         self.review_round(HEAD_A)
         loop.run()
-        lane_calls = [call for call in self.runner.calls if call.argv[0].startswith("lane-")]
+        lane_calls = [call for call in self.runner.calls if call.program.startswith("lane-")]
         self.assertTrue(lane_calls)
         for call in lane_calls:
             self.assertTrue(
@@ -157,8 +160,43 @@ class CleanPassTests(LoopHarness):
         loop = self.build()
         self.review_round(HEAD_A)
         loop.run()
-        reviewer_a = next(call for call in self.runner.calls if call.argv[0] == "lane-reviewer-A")
-        self.assertEqual(list(reviewer_a.argv), ["lane-reviewer-A", "--head", HEAD_A, "--repo", "example/repo"])
+        reviewer_a = next(call for call in self.runner.calls if call.program == "lane-reviewer-A")
+        # argv[0] is the trusted absolute path the launcher resolved the
+        # configured program to; every argument after it is the rendered
+        # template, with the exact head substituted in.
+        self.assertEqual(
+            reviewer_a.argv[0],
+            str(Path(lane_program(self.tmp, "lane-reviewer-A")).resolve()),
+        )
+        self.assertEqual(
+            list(reviewer_a.argv[1:]), ["--head", HEAD_A, "--repo", "example/repo"]
+        )
+
+    def test_a_lane_is_launched_from_a_trusted_absolute_path(self) -> None:
+        """PAPI-90 item 3: the child's PATH is not the operator's, so the
+        launcher decides which file a configured program name means."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+        loop.run()
+        lanes = [call for call in self.runner.calls if call.program.startswith("lane-")]
+        self.assertTrue(lanes)
+        runtimes = []
+        for call in lanes:
+            with self.subTest(lane=call.program):
+                self.assertTrue(Path(call.argv[0]).is_absolute(), call.argv[0])
+                self.assertTrue(Path(call.argv[0]).is_file(), call.argv[0])
+                path = dict(call.env or {})["PATH"].split(os.pathsep)
+                # This lane's own runtime first, then trusted system paths, and
+                # nothing the operator had on theirs.
+                self.assertEqual(path[1:], list(TRUSTED_SYSTEM_PATH))
+                self.assertNotIn("/usr/local/bin", path)
+                runtimes.append(path[0])
+        # A runtime directory is never shared, so nothing a lane could have
+        # written into its own is on the next lane's PATH. The directories
+        # themselves are gone by now: the broker removes its scratch on close.
+        self.assertEqual(len(set(runtimes)), len(runtimes))
+        for runtime in runtimes:
+            self.assertFalse(Path(runtime).exists(), runtime)
 
 
 class NeedsKaranClassificationTests(LoopHarness):
@@ -230,7 +268,7 @@ class FixCycleTests(LoopHarness):
         captured: dict[str, str] = {}
 
         def capture() -> None:
-            call = next(call for call in self.runner.calls if call.argv[0] == "lane-builder")
+            call = next(call for call in self.runner.calls if call.program == "lane-builder")
             captured["path"] = call.argv[2]
             captured["body"] = Path(call.argv[2]).read_text(encoding="utf-8")
             self.push_after_builder(HEAD_B)
@@ -305,7 +343,7 @@ class CorrectiveRerunTests(LoopHarness):
         captured: dict[str, object] = {}
 
         def capture() -> None:
-            call = [call for call in self.runner.calls if call.argv[0] == "lane-builder"][-1]
+            call = [call for call in self.runner.calls if call.program == "lane-builder"][-1]
             captured["mode"] = call.argv[4]
             captured["payload"] = json.loads(Path(call.argv[2]).read_text(encoding="utf-8"))
             self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
@@ -559,10 +597,16 @@ class StaleHeadTests(LoopHarness):
 
 class GateTests(LoopHarness):
     def gates(self, *, visual: bool = False) -> list[dict]:
-        gates = [{"name": "tests", "argv": ["lane-gate-tests", "--head", "{head}"]}]
+        gates = [
+            {"name": "tests", "argv": [lane_program(self.tmp, "lane-gate-tests"), "--head", "{head}"]}
+        ]
         if visual:
             gates.append(
-                {"name": "visual", "kind": "visual", "argv": ["lane-gate-visual", "--head", "{head}"]}
+                {
+                    "name": "visual",
+                    "kind": "visual",
+                    "argv": [lane_program(self.tmp, "lane-gate-visual"), "--head", "{head}"],
+                }
             )
         return gates
 
@@ -574,7 +618,7 @@ class GateTests(LoopHarness):
         result = loop.run()
 
         self.assertEqual(result.outcome, MERGE_READY)
-        programs = [call.argv[0] for call in self.runner.calls if call.argv[0].startswith("lane-")]
+        programs = [call.program for call in self.runner.calls if call.program.startswith("lane-")]
         self.assertLess(programs.index("lane-gate-tests"), programs.index("lane-reviewer-A"))
 
     def test_a_failing_gate_becomes_a_blocker_and_skips_the_reviewers(self) -> None:
@@ -592,7 +636,7 @@ class GateTests(LoopHarness):
 
         self.assertEqual(result.outcome, MERGE_READY)
         self.assertEqual(result.attempts_used, 1)
-        programs = [call.argv[0] for call in self.runner.calls if call.argv[0].startswith("lane-")]
+        programs = [call.program for call in self.runner.calls if call.program.startswith("lane-")]
         self.assertLess(programs.index("lane-builder"), programs.index("lane-reviewer-A"))
 
     def test_visual_gates_are_skipped_unless_the_pr_requires_visual_qa(self) -> None:
@@ -869,7 +913,7 @@ class FinalFreshnessTests(LoopHarness):
         self.assertEqual(result.evidence["evidence"]["before"], "open a fix attempt")
         self.assertEqual(result.attempts_used, 0, "no attempt may be spent on a stale head")
         self.assertFalse(
-            any(call.argv[0] == "lane-builder" for call in self.runner.calls),
+            any(call.program == "lane-builder" for call in self.runner.calls),
             "the builder must not run against a head that already drifted",
         )
         self.assertEqual(self.state()["attempt"], 0)
@@ -1067,7 +1111,7 @@ class LaneResultAgreementTests(LoopHarness):
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "lane-failure")
         self.assertEqual(result.attempts_used, 0)
-        self.assertFalse(any(call.argv[0] == "lane-builder" for call in self.runner.calls))
+        self.assertFalse(any(call.program == "lane-builder" for call in self.runner.calls))
 
     def test_a_reviewer_that_times_out_with_a_zero_exit_still_fails_closed(self) -> None:
         loop = self.build()
@@ -1155,7 +1199,14 @@ class LaneResultAgreementTests(LoopHarness):
 
     def test_a_gate_that_times_out_is_still_a_blocking_finding(self) -> None:
         """Gates already fold a timeout into the blocker set; that behaviour holds."""
-        loop = self.build(gates=[{"name": "tests", "argv": ["lane-gate-tests", "--head", "{head}"]}])
+        loop = self.build(
+            gates=[
+                {
+                    "name": "tests",
+                    "argv": [lane_program(self.tmp, "lane-gate-tests"), "--head", "{head}"],
+                }
+            ]
+        )
         self.script.add("lane-gate-tests", "", returncode=124, timed_out=True)
         self.script.add("lane-builder", builder_output(HEAD_B, addressed=["gate-tests"], status="failure"))
 
@@ -1313,6 +1364,253 @@ class ReviewerIdentityTests(LoopHarness):
         self.assertEqual(result.attempts_used, 1)
 
 
+class ReviewerWorktreeIntegrityTests(LoopHarness):
+    """PAPI-90 item 5: `git status` is not proof of the exact reviewed bytes.
+
+    Status is computed from the index, and the index is exactly what a
+    ``skip-worktree`` or ``assume-unchanged`` bit tells git to stop consulting.
+    Every probe here leaves ``git status`` clean and is caught anyway.
+    """
+
+    def test_the_worktree_is_proved_exact_before_and_after_every_reviewer(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        for role in ("A", "B"):
+            for when in ("before", "after"):
+                self.assertIn(
+                    f"reviewer {role}: worktree proved exact at {HEAD_A} ({when} the lane)",
+                    result.events,
+                )
+
+    def test_a_skip_worktree_index_entry_fails_closed(self) -> None:
+        """Former-red: a hidden entry makes status a statement about the index."""
+        loop = self.build()
+        self.runner.reviewer_index_flags = "S src/secret.py\nH src/other.py\n"
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "scope-contamination")
+        self.assertIn("skip-worktree", result.evidence["message"])
+        self.assertIn("src/secret.py", result.evidence["evidence"]["entries"])
+        self.assertNotIn("src/other.py", result.evidence["evidence"]["entries"])
+
+    def test_an_assume_unchanged_index_entry_fails_closed(self) -> None:
+        loop = self.build()
+        self.runner.reviewer_index_flags = "h src/quiet.py\n"
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "scope-contamination")
+        self.assertIn("assume-unchanged", result.evidence["message"])
+
+    def test_a_tracked_byte_that_differs_from_the_bound_commit_fails_closed(self) -> None:
+        """Former-red: the content comparison runs through a fresh scratch index.
+
+        ``read-tree`` writes an index straight from the commit, so it carries no
+        stat information for git to trust and every path has to be compared by
+        content — which is what catches a modification whose size and timestamp
+        were carefully restored.
+        """
+        loop = self.build()
+        self.runner.reviewer_divergence = ("src/loop.py",)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "scope-contamination")
+        self.assertIn("byte for byte", result.evidence["message"])
+        self.assertIn("src/loop.py", result.evidence["evidence"]["paths"])
+
+    def test_a_head_that_names_another_tree_fails_closed(self) -> None:
+        """HEAD being the right commit is not the same as HEAD naming the right tree."""
+        loop = self.build()
+        # Every reviewer worktree answers `rev-parse HEAD^{tree}` with a tree
+        # that is not the bound commit's, while HEAD itself still looks right.
+        self.runner.worktree_tree_overrides = _AlwaysDivergentTrees()
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "scope-contamination")
+        self.assertIn("bound commit's tree", result.evidence["message"])
+
+    def test_worktree_git_config_that_can_redirect_a_read_fails_closed(self) -> None:
+        """A hooks path, a content filter, or a suppressed untracked listing."""
+        for setting in (
+            "core.hookspath=/tmp/hooks",
+            "filter.lfs.smudge=cat /etc/passwd",
+            "status.showuntrackedfiles=no",
+            "include.path=/tmp/extra",
+            "diff.external=/tmp/fake-diff",
+            "credential.helper=store",
+        ):
+            with self.subTest(setting=setting):
+                self.setUp()
+                loop = self.build()
+                self.runner.reviewer_git_config = setting + "\n"
+                self.review_round(HEAD_A)
+
+                result = loop.run()
+
+                self.assertEqual(result.outcome, NEEDS_KARAN)
+                self.assertEqual(result.reason, "scope-contamination")
+                self.assertIn("redirect a read", result.evidence["message"])
+                self.assertIn(setting, result.evidence["evidence"]["settings"])
+
+    def test_ordinary_worktree_git_config_is_not_treated_as_tampering(self) -> None:
+        """Exactly what `git clone` writes for itself, on a macOS checkout.
+
+        A check that stops every run on a perfectly ordinary clone is a way of
+        having no check at all, so this is the list `git config --local --list`
+        actually prints for a fresh clone with a linked worktree.
+        """
+        loop = self.build()
+        self.runner.reviewer_git_config = "".join(
+            line + "\n"
+            for line in (
+                "core.repositoryformatversion=0",
+                "core.filemode=true",
+                "core.bare=false",
+                "core.logallrefupdates=true",
+                "core.ignorecase=true",
+                "core.precomposeunicode=true",
+                "remote.origin.url=/tmp/origin.git",
+                "remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*",
+                "branch.main.remote=origin",
+                "branch.main.merge=refs/heads/main",
+                "user.email=builder@users.noreply.github.com",
+                "user.name=builder",
+            )
+        )
+        self.review_round(HEAD_A)
+
+        self.assertEqual(loop.run().outcome, MERGE_READY)
+
+    def test_per_worktree_configuration_this_check_cannot_see_fails_closed(self) -> None:
+        """`--local` does not list per-worktree config, so its presence stops the run."""
+        loop = self.build()
+        self.runner.reviewer_git_config = "extensions.worktreeconfig=true\n"
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "scope-contamination")
+
+
+class _AlwaysDivergentTrees(dict):
+    """Answers every reviewer worktree with a tree that is not the bound one."""
+
+    WRONG = "t" + "9" * 39
+
+    def get(self, key, default=None):  # type: ignore[no-untyped-def]
+        return self.WRONG if "-review-" in str(key) else default
+
+
+class CommittedPathContainmentTests(LoopHarness):
+    """PAPI-90 item 6: a clean worktree does not make a stray commit in scope."""
+
+    def fix_attempt(self, *, allowed_paths, committed):  # type: ignore[no-untyped-def]
+        loop = self.build(allowed_paths=allowed_paths)
+        self.runner.committed_paths = tuple(committed)
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+        self.review_round(HEAD_B)
+        return loop.run()
+
+    def test_a_commit_inside_the_contract_is_allowed_through(self) -> None:
+        result = self.fix_attempt(
+            allowed_paths=["src/"], committed=["src/fix.py", "src/deep/also.py"]
+        )
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.head, HEAD_B)
+        self.assertIn(
+            f"committed 2 path(s) between {HEAD_A[:12]} and {HEAD_B[:12]}, "
+            "all inside the frozen packet's allowed paths",
+            result.events,
+        )
+
+    def test_one_authorised_file_plus_one_unrelated_file_fails_closed(self) -> None:
+        """Former-red: the exact shape the ledger names.
+
+        The worktree is clean, the marker is valid, the push resolves to one new
+        head, and the fix comment reads back — and the attempt still stops,
+        because the commit carries a file the frozen packet never allowed.
+        """
+        result = self.fix_attempt(
+            allowed_paths=["src/"], committed=["src/fix.py", "deploy/production.yaml"]
+        )
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "scope-contamination")
+        evidence = result.evidence["evidence"]
+        self.assertEqual(evidence["outside_contract"], ["deploy/production.yaml"])
+        self.assertIn("src/fix.py", evidence["committed_paths"])
+        self.assertEqual(evidence["allowed_paths"], ["src/"])
+        self.assertEqual(evidence["old_head"], HEAD_A)
+        self.assertEqual(evidence["new_head"], HEAD_B)
+
+    def test_the_check_runs_before_the_new_head_is_re_reviewed(self) -> None:
+        """The stray commit stops the run before that head reaches a reviewer."""
+        result = self.fix_attempt(
+            allowed_paths=["src/"], committed=["src/fix.py", "unrelated.py"]
+        )
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        reviewed_heads = [
+            call for call in self.runner.calls if call.program.startswith("lane-reviewer-")
+        ]
+        # Two reviewer lanes ran on HEAD_A; none ran on HEAD_B.
+        self.assertEqual(len(reviewed_heads), 2)
+
+    def test_an_explicit_whole_repository_allowance_is_honoured(self) -> None:
+        result = self.fix_attempt(
+            allowed_paths=["**"], committed=["src/fix.py", "anything/else.txt"]
+        )
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertIn(
+            f"committed 2 path(s) between {HEAD_A[:12]} and {HEAD_B[:12]}; "
+            "the frozen packet allows the whole repository",
+            result.events,
+        )
+
+    def test_the_frozen_packet_carries_the_contract_the_check_uses(self) -> None:
+        captured: list[dict] = []
+
+        def read_packet() -> None:
+            call = self.runner.calls[-1]
+            path = Path(call.argv[call.argv.index("--blockers") + 1])
+            captured.append(json.loads(path.read_text(encoding="utf-8")))
+            self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+
+        loop = self.build(allowed_paths=["src/", "README.md"])
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=read_packet,
+        )
+        self.review_round(HEAD_B)
+
+        self.assertEqual(loop.run().outcome, MERGE_READY)
+        contract = captured[0]["contract"]
+        self.assertEqual(contract["allowed_paths"], ["src/", "README.md"])
+        self.assertIs(contract["whole_repository"], False)
+
+
 class ReviewerIsolationTests(LoopHarness):
     """PAPI90-P1-005: one reviewer cannot reach, or contaminate, another."""
 
@@ -1320,7 +1618,7 @@ class ReviewerIsolationTests(LoopHarness):
         return [
             call.cwd
             for call in self.runner.calls
-            if call.argv[0].startswith("lane-reviewer-") and call.cwd is not None
+            if call.program.startswith("lane-reviewer-") and call.cwd is not None
         ]
 
     def test_each_reviewer_runs_in_a_fresh_worktree_of_its_own(self) -> None:

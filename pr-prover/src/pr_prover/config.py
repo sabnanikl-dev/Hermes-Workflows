@@ -38,6 +38,15 @@ themselves are never in this file: an identity names an environment variable or
 a protected file to read one from, and the credential is used only by the
 launcher, never handed to a child.
 
+``builder.allowed_paths`` is required, and it is the contract a fix attempt's
+*commits* are held to. After the builder reports a new head and the loop has
+read that head back from GitHub, the committed old-head-to-new-head path set is
+compared against it, and any path outside stops the run — even when the worktree
+is clean and the marker and readback are both valid. A configuration that wants
+no restriction has to say so, with the single entry ``"**"``; there is no
+permissive default, because the whole point is that "the packet did not say"
+must not mean "anything goes". See :mod:`.paths` for the vocabulary.
+
 ``launch.model_auth`` names one of the launcher's code-owned model-access
 *channels* (see :data:`~.childenv.MODEL_AUTH_CHANNELS`). It is not an
 environment variable name, so no GitHub, deploy, client, live-system, account,
@@ -65,6 +74,7 @@ from .launchers import (
     REVIEWER_TOOLS,
     AgentSpec,
 )
+from .paths import PathContract
 
 SCHEMA_VERSION = 1
 GATE_KINDS = ("baseline", "visual")
@@ -94,7 +104,9 @@ _TOP_LEVEL_KEYS = frozenset(
 )
 _GATE_KEYS = frozenset({"name", "argv", "kind", "timeout"})
 _REVIEWER_KEYS = frozenset({"name", "argv", "timeout", "identity", "agent"})
-_BUILDER_KEYS = frozenset({"argv", "signature", "comment_author", "timeout", "identity", "agent"})
+_BUILDER_KEYS = frozenset(
+    {"argv", "signature", "comment_author", "timeout", "identity", "agent", "allowed_paths"}
+)
 _LAUNCH_KEYS = frozenset({"identities", "env_allow", "model_auth"})
 _IDENTITY_KEYS = frozenset({"login", "capabilities", "token_env", "token_file"})
 _AGENT_KEYS = frozenset({"program", "model", "tools", "permission_mode"})
@@ -159,6 +171,7 @@ class BuilderConfig:
 
     signature: str
     comment_author: str
+    allowed_paths: PathContract
     argv: tuple[str, ...] | None = None
     timeout: float | None = None
     identity: str | None = None
@@ -605,6 +618,7 @@ def _builder(item: object) -> BuilderConfig:
     return BuilderConfig(
         signature=signature.strip(),
         comment_author=author,
+        allowed_paths=PathContract.parse(item.get("allowed_paths"), what="builder"),
         argv=_lane_argv(item, what="builder", agent=agent),
         timeout=_lane_timeout(item, what="builder", agent=agent),
         identity=_optional_text(item, "identity"),

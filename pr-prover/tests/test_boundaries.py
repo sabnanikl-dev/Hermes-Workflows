@@ -399,6 +399,7 @@ class ConfigTests(unittest.TestCase):
                 "argv": ["builder", "{blockers_file}"],
                 "signature": "Fixed by: Claude Code",
                 "comment_author": BUILDER_LOGIN,
+                "allowed_paths": ["src/"],
             },
             "launch": {
                 "identities": {
@@ -511,6 +512,7 @@ class ConfigTests(unittest.TestCase):
                 "argv": ["builder"],
                 "signature": "Fixed by: Claude Code",
                 "comment_author": "hermes-builder[bot]",
+                "allowed_paths": ["src/"],
             },
         )
         self.assertEqual(config.builder.comment_author, "hermes-builder[bot]")
@@ -558,6 +560,7 @@ class CliTests(unittest.TestCase):
                         "argv": ["builder", "{blockers_file}"],
                         "signature": "Fixed by: Claude Code",
                         "comment_author": BUILDER_LOGIN,
+                        "allowed_paths": ["src/"],
                     },
                     "launch": {
                         "identities": {

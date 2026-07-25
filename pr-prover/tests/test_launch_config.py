@@ -18,6 +18,9 @@ from pr_prover.childenv import MODEL_AUTH_CHANNELS
 from pr_prover.cli import main
 from pr_prover.config import RunConfig
 from pr_prover.errors import ConfigError
+from pr_prover.launchers import BUILDER_TOOLS, REVIEWER_TOOLS
+from pr_prover.paths import WHOLE_REPOSITORY
+from pr_prover.sandbox import OUTSIDE_SANDBOX_TOOLS, SANDBOXED_TOOLS
 
 
 def payload(tmp: Path, source_repo: Path) -> dict:
@@ -48,13 +51,13 @@ def payload(tmp: Path, source_repo: Path) -> dict:
             {
                 "name": "A",
                 "identity": "reviewer",
-                "agent": {"program": "claude", "model": "opus", "tools": ["Read", "Bash"]},
+                "agent": {"program": "claude", "model": "opus", "tools": ["Bash", "TodoWrite"]},
                 "timeout": 1500,
             },
             {
                 "name": "B",
                 "identity": "reviewer",
-                "agent": {"program": "claude", "model": "sonnet", "tools": ["Read", "Bash"]},
+                "agent": {"program": "claude", "model": "sonnet", "tools": ["Bash", "TodoWrite"]},
                 "timeout": 1500,
             },
         ],
@@ -63,10 +66,11 @@ def payload(tmp: Path, source_repo: Path) -> dict:
             "agent": {
                 "program": "claude",
                 "model": "opus",
-                "tools": ["Read", "Edit", "Write", "Bash"],
+                "tools": ["Bash", "TodoWrite"],
             },
             "signature": "Fixed by: Claude Code via Hermes orchestration",
             "comment_author": BUILDER_LOGIN,
+            "allowed_paths": ["pr-prover/"],
             "timeout": 1500,
         },
     }
@@ -103,7 +107,7 @@ class ValidConfigTests(LaunchConfigTestCase):
         self.assertEqual(config.builder.identity, "builder")
         self.assertIsNone(config.builder.argv)
         self.assertEqual(config.builder.agent.program, "claude")
-        self.assertEqual(config.reviewers[0].agent.tools, ("Read", "Bash"))
+        self.assertEqual(config.reviewers[0].agent.tools, ("Bash", "TodoWrite"))
 
     def test_a_script_lane_configuration_still_loads(self) -> None:
         def script_lanes(raw: dict) -> None:
@@ -175,19 +179,70 @@ class LaneCommandTests(LaunchConfigTestCase):
         self.refuses(lambda raw: raw["builder"]["agent"].update(model="not a model"))
 
 
-class BoundedAuthorityTests(LaunchConfigTestCase):
-    def test_a_reviewer_cannot_be_given_a_file_writing_tool(self) -> None:
-        error = self.refuses(
-            lambda raw: raw["reviewers"][0]["agent"].update(tools=["Read", "Write"])
+class AllowedPathsConfigTests(LaunchConfigTestCase):
+    """PAPI-90 item 6: the packet's path contract is a required security field."""
+
+    def test_a_builder_with_no_allowed_paths_is_refused(self) -> None:
+        """Former-red: there is no permissive default to fall into."""
+        error = self.refuses(lambda raw: raw["builder"].pop("allowed_paths"))
+        self.assertIn("declares no allowed_paths", error.message)
+        self.assertIn(WHOLE_REPOSITORY, error.message)
+
+    def test_an_unparsable_contract_is_refused(self) -> None:
+        for value in ([], "src/", ["/etc"], ["../up"], ["src/*"], [WHOLE_REPOSITORY, "src/"]):
+            with self.subTest(allowed_paths=value):
+                self.refuses(lambda raw, value=value: raw["builder"].update(allowed_paths=value))
+
+    def test_a_specific_contract_loads(self) -> None:
+        config = self.load(
+            lambda raw: raw["builder"].update(allowed_paths=["src/", "README.md"])
         )
-        self.assertIn("narrow", error.message)
+        self.assertEqual(config.builder.allowed_paths.entries, ("src/", "README.md"))
+        self.assertFalse(config.builder.allowed_paths.whole_repository)
+
+    def test_the_whole_repository_allowance_must_be_written_down(self) -> None:
+        config = self.load(
+            lambda raw: raw["builder"].update(allowed_paths=[WHOLE_REPOSITORY])
+        )
+        self.assertTrue(config.builder.allowed_paths.whole_repository)
+
+    def test_the_shipped_examples_declare_a_contract(self) -> None:
+        for name in ("run.example.json", "run.script-lanes.example.json"):
+            with self.subTest(example=name):
+                path = Path(__file__).resolve().parents[1] / "examples" / name
+                config = RunConfig.from_mapping(
+                    json.loads(path.read_text(encoding="utf-8")), base_dir=path.parent
+                )
+                self.assertTrue(config.builder.allowed_paths.entries)
+
+
+class BoundedAuthorityTests(LaunchConfigTestCase):
+    def test_a_lane_cannot_be_given_a_tool_that_bypasses_the_bash_sandbox(self) -> None:
+        """PAPI-90 item 1: the client's own file and network tools are not sandboxed.
+
+        ``Read``, ``Edit``, ``Write``, ``Glob``, ``Grep``, ``WebFetch``, and
+        ``WebSearch`` are implemented by the model client, not run through the
+        Bash sandbox, so a lane holding one of them could read the operator's
+        home however tightly the sandbox were drawn. None is configurable.
+        """
+        for tool in OUTSIDE_SANDBOX_TOOLS:
+            error = self.refuses(
+                lambda raw, tool=tool: raw["reviewers"][0]["agent"].update(tools=["Bash", tool])
+            )
+            self.assertIn("narrow", error.message)
 
     def test_a_lane_cannot_ask_for_a_tool_outside_the_built_in_set(self) -> None:
-        self.refuses(lambda raw: raw["builder"]["agent"].update(tools=["Read", "MergePullRequest"]))
+        self.refuses(lambda raw: raw["builder"]["agent"].update(tools=["Bash", "MergePullRequest"]))
 
     def test_tools_may_be_narrowed(self) -> None:
-        config = self.load(lambda raw: raw["builder"]["agent"].update(tools=["Read"]))
-        self.assertEqual(config.builder.agent.tools, ("Read",))
+        config = self.load(lambda raw: raw["builder"]["agent"].update(tools=["Bash"]))
+        self.assertEqual(config.builder.agent.tools, ("Bash",))
+
+    def test_both_roles_share_the_sandboxed_maximum(self) -> None:
+        self.assertEqual(BUILDER_TOOLS, SANDBOXED_TOOLS)
+        self.assertEqual(REVIEWER_TOOLS, SANDBOXED_TOOLS)
+        for tool in OUTSIDE_SANDBOX_TOOLS:
+            self.assertNotIn(tool, SANDBOXED_TOOLS)
 
     def test_a_permission_mode_that_bypasses_the_boundary_is_refused(self) -> None:
         for mode in ("bypassPermissions", "auto", "whatever"):

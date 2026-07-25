@@ -7,9 +7,12 @@ from _support import FORBIDDEN_VALUES, parent_env
 
 from pr_prover.childenv import (
     CAPABILITY_CHANNEL,
+    CAPABILITY_SECRET,
+    CLAUDE_TMPDIR,
     DEFAULT_ALLOW,
     HOME_GUARDS,
     INJECTABLE,
+    LAUNCHER_OVERRIDES,
     MODEL_AUTH_CHANNELS,
     EnvironmentPolicy,
     assert_scoped,
@@ -173,16 +176,61 @@ class BuildTests(unittest.TestCase):
                 self.policy.build(self.parent, inject={**GUARDS, name: "ghp_" + "z" * 36})
             self.assertEqual(caught.exception.reason, "launch-policy")
 
-    def test_the_injectable_set_holds_no_credential_shaped_name(self) -> None:
-        self.assertEqual(INJECTABLE, frozenset({"HOME", "PATH", CAPABILITY_CHANNEL, *HOME_GUARDS}))
+    def test_the_injectable_set_is_exactly_the_closed_list(self) -> None:
+        """The set is closed, and the one credential-shaped name in it is ours.
+
+        ``PR_PROVER_CAPABILITY_SECRET`` matches the credential-shaped deny rules
+        by design — it is a secret. It is on this list anyway because it grants
+        nothing except the right to be heard on one lane's own capability
+        socket, which the launcher created, and it is the only way that socket
+        means anything at all. Nothing a *parent* environment supplies can reach
+        a child under that name: the launcher mints the value, and a parent
+        variable of the same name is denied like any other.
+        """
+        self.assertEqual(
+            INJECTABLE,
+            frozenset({"HOME", "PATH", CAPABILITY_CHANNEL, CAPABILITY_SECRET, *HOME_GUARDS}),
+        )
         self.assertNotIn("GH_TOKEN", INJECTABLE)
+        self.assertTrue(is_denied(CAPABILITY_SECRET))
 
     def test_the_capability_channel_is_the_one_internal_channel(self) -> None:
         env = self.policy.build(
-            self.parent, inject={**GUARDS, CAPABILITY_CHANNEL: "/tmp/prcap-x/lane.sock"}
+            self.parent,
+            inject={
+                **GUARDS,
+                CAPABILITY_CHANNEL: "/tmp/prcap-x/lane.sock",
+                CAPABILITY_SECRET: "f" * 64,
+            },
         )
         self.assertEqual(env[CAPABILITY_CHANNEL], "/tmp/prcap-x/lane.sock")
         self.assertTrue(carries_none_of(env, FORBIDDEN_VALUES))
+
+    def test_a_channel_without_its_secret_is_refused(self) -> None:
+        """PAPI-90 item 2: a socket path on its own is not an authenticator."""
+        with self.assertRaises(LaunchPolicyError) as caught:
+            self.policy.build(
+                self.parent, inject={**GUARDS, CAPABILITY_CHANNEL: "/tmp/prcap-x/lane.sock"}
+            )
+        self.assertIn("secret", caught.exception.message)
+
+    def test_a_secret_without_its_channel_is_refused(self) -> None:
+        with self.assertRaises(LaunchPolicyError) as caught:
+            self.policy.build(self.parent, inject={**GUARDS, CAPABILITY_SECRET: "f" * 64})
+        self.assertIn("secret", caught.exception.message)
+
+    def test_a_short_channel_secret_is_refused(self) -> None:
+        """An authenticator short enough to guess is not one."""
+        with self.assertRaises(LaunchPolicyError) as caught:
+            self.policy.build(
+                self.parent,
+                inject={
+                    **GUARDS,
+                    CAPABILITY_CHANNEL: "/tmp/prcap-x/lane.sock",
+                    CAPABILITY_SECRET: "short",
+                },
+            )
+        self.assertIn("too short", caught.exception.message)
 
     def test_an_override_cannot_collide_with_an_injected_name(self) -> None:
         """PAPI90-P1-008: one variable cannot have two owners."""
@@ -351,6 +399,46 @@ class ScopeAssertionTests(unittest.TestCase):
 
     def test_the_default_allowlist_carries_nothing_with_authority(self) -> None:
         self.assertFalse([name for name in DEFAULT_ALLOW if is_denied(name)])
+
+
+
+class LaneTemporaryDirectoryTests(unittest.TestCase):
+    """``CLAUDE_CODE_TMPDIR`` is the launcher's to write, and nobody else's."""
+
+    def test_it_is_a_launcher_owned_name(self) -> None:
+        self.assertIn(CLAUDE_TMPDIR, LAUNCHER_OVERRIDES)
+        self.assertNotIn(CLAUDE_TMPDIR, DEFAULT_ALLOW)
+        self.assertNotIn(CLAUDE_TMPDIR, INJECTABLE)
+
+    def test_a_configuration_cannot_claim_it(self) -> None:
+        """Former-red: a run config that named it could point a lane's temp anywhere."""
+        for name in (CLAUDE_TMPDIR, "TMPDIR"):
+            with self.subTest(name=name), self.assertRaises(LaunchPolicyError) as caught:
+                EnvironmentPolicy(extra_allow=frozenset({name}))
+            self.assertIn("launcher-owned", caught.exception.message)
+
+    def lane_injection(self) -> dict[str, str]:
+        home = {name: f"/lane/home/{name.lower()}" for name in HOME_GUARDS}
+        home["HOME"] = "/lane/home"
+        return home
+
+    def test_a_parent_value_cannot_shadow_it(self) -> None:
+        child = EnvironmentPolicy().build(
+            {"HOME": "/operator", CLAUDE_TMPDIR: "/operator/tmp", "TMPDIR": "/operator/tmp"},
+            inject=self.lane_injection(),
+            overrides={CLAUDE_TMPDIR: "/lane/scratch/tmp", "TMPDIR": "/lane/scratch/tmp"},
+        )
+        self.assertEqual(child[CLAUDE_TMPDIR], "/lane/scratch/tmp")
+        self.assertEqual(child["TMPDIR"], "/lane/scratch/tmp")
+
+    def test_it_cannot_be_injected_instead_of_overridden(self) -> None:
+        """The injectable set is closed; a temp directory is not authority material."""
+        with self.assertRaises(LaunchPolicyError) as caught:
+            EnvironmentPolicy().build(
+                {"HOME": "/operator"},
+                inject={**self.lane_injection(), CLAUDE_TMPDIR: "/lane/scratch/tmp"},
+            )
+        self.assertIn("outside the closed injectable set", caught.exception.message)
 
 
 if __name__ == "__main__":  # pragma: no cover

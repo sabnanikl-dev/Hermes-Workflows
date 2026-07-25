@@ -46,7 +46,7 @@
       "agent": {
         "program": "claude",
         "model": "opus",
-        "tools": ["Read", "Grep", "Glob", "Bash"]
+        "tools": ["Bash", "TodoWrite"]
       },
       "timeout": 1800
     },
@@ -56,7 +56,7 @@
       "agent": {
         "program": "claude",
         "model": "sonnet",
-        "tools": ["Read", "Grep", "Glob", "Bash"]
+        "tools": ["Bash", "TodoWrite"]
       },
       "timeout": 1800
     }
@@ -66,10 +66,11 @@
     "agent": {
       "program": "claude",
       "model": "opus",
-      "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+      "tools": ["Bash", "TodoWrite"]
     },
     "signature": "Fixed by: Claude Code via Hermes orchestration",
     "comment_author": "the-builder-login",
+    "allowed_paths": ["src/", "tests/", "README.md"],
     "timeout": 1500
   }
 }

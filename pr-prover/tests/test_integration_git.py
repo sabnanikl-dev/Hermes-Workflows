@@ -8,6 +8,7 @@ branch came through untouched.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -17,13 +18,14 @@ from pathlib import Path
 import _support  # noqa: F401 - inserts the package on sys.path
 from pr_prover.commands import SubprocessRunner
 from pr_prover.errors import StaleHead, WorktreeError
+from pr_prover.loop import _hidden_index_entries, _redirecting_git_config
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
 
 GIT = shutil.which("git")
 BRANCH = "feat/example"
 
 
-def git(*args: str, cwd: Path) -> str:
+def git(*args: str, cwd: Path, env: dict[str, str] | None = None) -> str:
     completed = subprocess.run(
         [GIT, *args],
         cwd=str(cwd),
@@ -31,6 +33,7 @@ def git(*args: str, cwd: Path) -> str:
         text=True,
         check=True,
         stdin=subprocess.DEVNULL,
+        env=env,
     )
     return completed.stdout.strip()
 
@@ -115,6 +118,57 @@ class RealGitTests(unittest.TestCase):
         self.assertEqual(self.clone_state(), before)
         self.assertEqual(before[1], "main", "the clone must stay on its own branch")
         self.assertEqual(before[2], "", "the clone must stay clean")
+
+    def test_a_pristine_worktree_passes_every_exact_tree_check(self) -> None:
+        """PAPI-90 item 5, against real git: the checks do not stop an honest run.
+
+        A check that fires on an ordinary clone is a way of having no check at
+        all. ``core.filemode`` and ``core.ignorecase`` are written by ``git
+        clone`` itself, so they cannot be read as tampering — this asserts that
+        against the config a real clone actually produces, plus the plumbing the
+        loop uses to prove a tree exact.
+        """
+        worktree = self.provider.create("pristine", self.head)
+
+        self.assertEqual(git("rev-parse", "HEAD", cwd=worktree), self.head)
+        self.assertEqual(
+            git("rev-parse", "--verify", "HEAD^{tree}", cwd=worktree),
+            git("rev-parse", "--verify", f"{self.head}^{{tree}}", cwd=worktree),
+        )
+        self.assertEqual(_hidden_index_entries(git("ls-files", "-v", cwd=worktree)), ())
+        self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=worktree), "")
+        listing = git("config", "--local", "--list", cwd=worktree)
+        self.assertIn("core.filemode", listing)
+        self.assertEqual(_redirecting_git_config(listing), ())
+
+    def test_the_exact_tree_diff_sees_a_change_a_hidden_index_would_conceal(self) -> None:
+        """The scratch index has no stat cache, so content is what is compared."""
+        worktree = self.provider.create("probed", self.head)
+        index = self.tmp / "scratch.index"
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+
+        def diff() -> str:
+            index.unlink(missing_ok=True)
+            git("read-tree", self.head, cwd=worktree, env=env)
+            # Nonzero here just means "a path needs updating", which is the
+            # answer this check is after rather than a failure to get one.
+            subprocess.run(
+                [GIT, "update-index", "-q", "--refresh"],
+                cwd=str(worktree), capture_output=True, text=True, env=env, check=False,
+            )
+            return git(
+                "diff-index", "--name-only", "-z", self.head, "--", cwd=worktree, env=env
+            )
+
+        self.assertEqual(diff(), "")
+
+        # Hide the file from the real index the way a reviewer would, then change
+        # it. `git status` is quiet about it; the scratch-index diff is not.
+        git("update-index", "--skip-worktree", "feature.txt", cwd=worktree)
+        (worktree / "feature.txt").write_text("tampered\n", encoding="utf-8")
+        self.assertEqual(git("status", "--porcelain", cwd=worktree), "")
+        self.assertIn("feature.txt", diff())
+        self.assertIn("feature.txt", _hidden_index_entries(git("ls-files", "-v", cwd=worktree)))
 
     def test_the_clone_cannot_be_checked_out_through_the_source_repo(self) -> None:
         with self.assertRaises(WorktreeError):

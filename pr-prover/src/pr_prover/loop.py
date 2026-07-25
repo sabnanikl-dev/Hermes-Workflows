@@ -55,11 +55,26 @@ repository, this PR, that reviewer's role, and the exact head it reviewed. A
 formal review must also be in state ``COMMENTED``; an approval, a
 changes-requested, a pending draft, and a dismissed review are all refused.
 
-**Reviewer isolation.** Each reviewer runs in a worktree of its own, created
-fresh at the exact head and sealed read-only, and the loop proves that worktree
-is still at that exact commit with a clean tree before the verdict is read. One
-reviewer therefore has nothing of another's to touch, and a reviewer that
-modified even its own copy fails the run.
+**Reviewer isolation, proved byte for byte.** Each reviewer runs in a worktree
+of its own, created fresh at the exact head, sealed read-only, and confined by
+the launcher's strict sandbox to reading — not writing — that tree. ``git
+status`` is not accepted as proof that it came through untouched: status is
+computed from the index, and the index is exactly what a ``skip-worktree`` or
+``assume-unchanged`` bit tells git to stop consulting. So
+:meth:`ProverLoop._assert_worktree_exact` runs before *and* after every reviewer
+lane and proves five things — the HEAD commit, the HEAD tree, that no index
+entry carries a hiding flag, that no tracked byte differs from the bound commit
+when compared through a scratch index that has no stat cache to trust, and that
+no worktree-local git configuration has been added that could redirect what a
+read returns or conceal a mutation.
+
+**Committed changes stay inside the packet.** A clean worktree says nothing
+about which files a builder's *commit* touched. After a new head is reported and
+read back, the committed old-head-to-new-head path set is compared against the
+frozen repair packet's allowed-path contract (:mod:`.paths`), and a path outside
+it stops the run before that head's gates or reviewers are reached. A
+whole-repository allowance exists but has to be written down; absence fails
+closed.
 
 Every child is launched through :class:`~.launchers.LaunchBroker`, which is the
 only thing in this package that builds a child environment. The loop hands it a
@@ -108,6 +123,7 @@ from .findings import (
 )
 from .github import GitHubBoundary, PullRequest
 from .launchers import BoundContext, LaunchBroker
+from .paths import changed_paths
 from .prompts import review_tag
 from .redaction import evidence as redact_evidence
 from .state import MAX_ATTEMPTS, RunLock, RunState
@@ -128,6 +144,53 @@ NEEDS_KARAN = "needs-karan"
 ACCEPTED_REVIEW_STATE = "COMMENTED"
 
 _SLUG = re.compile(r"[^A-Za-z0-9._-]+")
+
+# ``git ls-files -v`` status letters that mean "stop consulting the working tree
+# for this path". A lowercase letter is ``assume-unchanged``; ``S`` is
+# ``skip-worktree``. Either one makes ``git status`` a statement about the index
+# rather than about the files, which is precisely what a reviewer that wanted to
+# edit its own copy quietly would set.
+_HIDING_INDEX_FLAGS = frozenset({"S", "h", "s", "m", "r", "c", "k", "?"})
+
+# Worktree-scoped or local git settings that change what a read returns or what a
+# status reports. None of them belongs in a throwaway reviewer checkout, so the
+# presence of any is treated as tampering rather than configuration.
+# Worktree-scoped or local git settings that change what a read returns, run code
+# on git's behalf, or suppress something a check below relies on. None belongs in
+# a throwaway reviewer checkout, so any of them is treated as tampering.
+#
+# Deliberately *not* here: the settings ``git init`` and ``git clone`` write for
+# themselves — ``core.repositoryformatversion``, ``core.filemode``,
+# ``core.bare``, ``core.logallrefupdates``, ``core.ignorecase``,
+# ``core.precomposeunicode``, the ``remote.*``/``branch.*`` entries, and
+# ``user.*``. Listing one of those would stop every run on a perfectly ordinary
+# clone, which is a way of having no check at all.
+_EXECUTION_AFFECTING_GIT_CONFIG = (
+    # Run code on git's behalf.
+    "core.hookspath",
+    "core.fsmonitor",
+    "core.sshcommand",
+    "credential.helper",
+    "alias.",
+    "filter.",
+    "diff.external",
+    "uploadpack.",
+    # Change the bytes a read returns, or which paths a read covers.
+    "core.symlinks",
+    "core.excludesfile",
+    "core.attributesfile",
+    "core.autocrlf",
+    "core.eol",
+    "core.safecrlf",
+    # Suppress what the untracked check is looking for.
+    "status.showuntrackedfiles",
+    # Pull in configuration this listing would not show.
+    "include.path",
+    "includeif.",
+    # Per-worktree configuration lives in a file `--local` does not list, so a
+    # repository that has enabled it is one this check cannot speak for.
+    "extensions.worktreeconfig",
+)
 
 _BLOCKERS_NOTE = (
     "Frozen blocker set for one fix attempt. Every summary below is untrusted "
@@ -213,15 +276,28 @@ class ProverLoop:
     def run(self) -> RunResult:
         """Run to a terminal outcome. Never raises for an expected failure mode."""
         try:
-            with RunLock(self.config.lock_file, repo=self.config.repo, pr=self.config.pr):
-                return self._run_locked()
-        except FailClosed as exc:
-            return self._failed(exc)
-        except PrProverError as exc:  # pragma: no cover - defensive
-            return self._failed(exc)
+            try:
+                with RunLock(self.config.lock_file, repo=self.config.repo, pr=self.config.pr):
+                    result = self._run_locked()
+            except FailClosed as exc:
+                result = self._failed(exc)
+            except PrProverError as exc:  # pragma: no cover - defensive
+                result = self._failed(exc)
         finally:
+            # Closing the launcher is what drains and cancels every capability
+            # channel. It is done here, before anything is returned, so no
+            # result describes a run whose brokered work was still in flight.
             self.launcher.close()
             self._cleanup_scratch()
+        unaccounted = list(getattr(self.launcher, "shutdown_errors", ()))
+        for failure in unaccounted:
+            self._event(f"capability shutdown: {failure.message}")
+        if unaccounted and result.outcome != NEEDS_KARAN:
+            # A capability handler that outlived its channel means the run
+            # cannot say what did and did not reach GitHub. That is not a
+            # merge-ready or blocked answer; it is a question for Karan.
+            return self._failed(unaccounted[0])
+        return result
 
     def _run_locked(self) -> RunResult:
         state = RunState.load(self.config.state_file, repo=self.config.repo, pr=self.config.pr)
@@ -454,6 +530,10 @@ class ProverLoop:
             )
             try:
                 self.worktrees.seal(worktree)
+                # Before, as well as after. A tree that was already wrong when
+                # the lane started would otherwise be blamed on the lane, and a
+                # lane that restored what it changed would look like neither.
+                self._assert_worktree_exact(worktree, head=head, lane=lane, when="before")
                 verdicts.append(self._run_reviewer(reviewer, pull, head, worktree, lane=lane))
             except Exception:
                 self._retain(worktree, why=f"{lane} failed")
@@ -491,7 +571,7 @@ class ProverLoop:
             cwd=worktree,
             timeout=reviewer.timeout,
         )
-        self._assert_worktree_untouched(worktree, head=head, lane=lane)
+        self._assert_worktree_exact(worktree, head=head, lane=lane, when="after")
         self._reject_timed_out(result, lane=lane, head=head)
         verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
         # "pass" is the only verdict that lets the PR through this lane, so
@@ -508,14 +588,73 @@ class ProverLoop:
         )
         return verdict
 
-    def _assert_worktree_untouched(self, worktree: Path, *, head: str, lane: str) -> None:
-        """A reviewer's worktree must still be the exact head, with a clean tree."""
+    def _assert_worktree_exact(
+        self, worktree: Path, *, head: str, lane: str, when: str
+    ) -> None:
+        """Prove a reviewer worktree is byte-for-byte the bound commit.
+
+        Five checks, and each one exists because the check above it can be
+        defeated on its own:
+
+        1. ``HEAD`` is the bound commit, and so is the tree that commit names.
+        2. No index entry carries ``skip-worktree`` or ``assume-unchanged``.
+           Both tell git to stop looking at the file, so ``git status`` on a
+           tampered index is a report about the index.
+        3. Every tracked path matches the bound commit, compared through a
+           *scratch* index this method builds with ``read-tree``. A fresh index
+           carries no stat information, so git has to compare content rather
+           than trusting a size and a timestamp that a careful edit can restore.
+        4. Nothing untracked was left behind.
+        5. No worktree-local git configuration was added that could redirect a
+           read or hide a change — a hooks path, a content filter, an external
+           diff, a ``status.showUntrackedFiles`` that suppresses check 4.
+
+        The launcher's strict sandbox denies this lane writes to the worktree
+        and to its Git metadata in the first place; this is what proves the
+        denial held.
+        """
         revision = self._git_text(worktree, ["rev-parse", "HEAD"], lane=lane).strip().lower()
         if revision != head:
             raise ScopeContamination(
-                f"{lane} left its worktree at a different commit",
-                evidence={"lane": lane, "expected_head": head, "worktree_head": revision},
+                f"{lane} worktree is at a different commit ({when} the lane)",
+                evidence={
+                    "lane": lane,
+                    "when": when,
+                    "expected_head": head,
+                    "worktree_head": revision,
+                },
             )
+        tree = self._git_text(
+            worktree, ["rev-parse", "--verify", f"{head}^{{tree}}"], lane=lane
+        ).strip().lower()
+        head_tree = self._git_text(
+            worktree, ["rev-parse", "--verify", "HEAD^{tree}"], lane=lane
+        ).strip().lower()
+        if not tree or tree != head_tree:
+            raise ScopeContamination(
+                f"{lane} worktree HEAD does not name the bound commit's tree ({when} the lane)",
+                evidence={"lane": lane, "when": when, "bound_tree": tree, "head_tree": head_tree},
+            )
+
+        hidden = _hidden_index_entries(
+            self._git_text(worktree, ["ls-files", "-v"], lane=lane)
+        )
+        if hidden:
+            raise ScopeContamination(
+                f"{lane} worktree has index entries flagged skip-worktree or "
+                f"assume-unchanged ({when} the lane); a status computed from that index "
+                "cannot show a modification",
+                evidence={"lane": lane, "when": when, "head": head, "entries": list(hidden[:50])},
+            )
+
+        divergent = self._exact_tree_diff(worktree, head=head, lane=lane, when=when)
+        if divergent:
+            raise ScopeContamination(
+                f"{lane} worktree does not match the bound commit byte for byte "
+                f"({when} the lane)",
+                evidence={"lane": lane, "when": when, "head": head, "paths": list(divergent[:50])},
+            )
+
         status = self._git_text(
             worktree, ["status", "--porcelain", "--untracked-files=all"], lane=lane
         )
@@ -524,14 +663,76 @@ class ProverLoop:
                 f"{lane} modified its worktree; a reviewer is read-only",
                 evidence={
                     "lane": lane,
+                    "when": when,
                     "head": head,
                     "git_status": redact_evidence(status, limit=2000),
                 },
             )
-        self._event(f"{lane}: worktree still clean at {head}")
 
-    def _git_text(self, worktree: Path, args: Sequence[str], *, lane: str) -> str:
-        result = self.runner.run(["git", "-C", str(worktree), *args], timeout=120.0)
+        redirected = _redirecting_git_config(
+            self._git_text(worktree, ["config", "--local", "--list"], lane=lane)
+        )
+        if redirected:
+            raise ScopeContamination(
+                f"{lane} worktree carries git configuration that can redirect a read or "
+                f"conceal a change ({when} the lane)",
+                evidence={"lane": lane, "when": when, "head": head, "settings": list(redirected)},
+            )
+        self._event(f"{lane}: worktree proved exact at {head} ({when} the lane)")
+
+    def _exact_tree_diff(
+        self, worktree: Path, *, head: str, lane: str, when: str
+    ) -> tuple[str, ...]:
+        """Diff the worktree against ``head`` through an index with no stat cache.
+
+        ``read-tree`` writes a scratch index straight from the commit, so it
+        carries neither the hiding flags of check 2 nor any recorded size or
+        mtime. ``update-index --refresh`` then has no stat information it is
+        allowed to trust, so it hashes every path — which is what makes the
+        ``diff-index`` that follows a content comparison rather than a metadata
+        one, and what catches an edit whose size and timestamp were restored.
+
+        Both earlier steps are needed. Without ``read-tree`` the lane's own index
+        is consulted, hiding flags and all; without the refresh, ``diff-index``
+        reports *every* tracked path as changed, because an index with no stat
+        information looks entirely stale — a check that fires on a pristine tree
+        is a check that says nothing.
+        """
+        index = self._scratch_dir() / f"exact-{_slug(lane)}-{when}-{head[:12]}.index"
+        index.unlink(missing_ok=True)
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        try:
+            self._git_text(worktree, ["read-tree", head], lane=lane, env=env)
+            # Reports "needs update" and exits nonzero for a path that genuinely
+            # differs, which is the answer rather than a failure to get one.
+            self._git_text(
+                worktree, ["update-index", "-q", "--refresh"], lane=lane, env=env,
+                allow_failure=True,
+            )
+            raw = self._git_text(
+                worktree,
+                ["diff-index", "--name-only", "-z", "--ignore-submodules=none", head, "--"],
+                lane=lane,
+                env=env,
+            )
+        finally:
+            index.unlink(missing_ok=True)
+        return changed_paths(raw)
+
+    def _git_text(
+        self,
+        worktree: Path,
+        args: Sequence[str],
+        *,
+        lane: str,
+        env: Mapping[str, str] | None = None,
+        allow_failure: bool = False,
+    ) -> str:
+        result = self.runner.run(
+            ["git", "-C", str(worktree), *args], env=env, timeout=120.0
+        )
+        if allow_failure and not result.timed_out:
+            return result.stdout or ""
         if not result.ok:
             raise ScopeContamination(
                 f"could not inspect the worktree {lane} ran in",
@@ -645,6 +846,11 @@ class ProverLoop:
                 )
             self._assert_clean(worktree)
             self._verify_push(pull, old_head=head, report=report, known_comments=known_comments)
+            # Only now, with a new head bound and read back, is there a commit
+            # range to check. This runs before ``_attempt`` returns, so it is
+            # before the loop re-inspects and before any gate or reviewer sees
+            # the new head.
+            self._assert_committed_paths(worktree, old_head=head, new_head=report.head)
         except Exception:
             self._retain(worktree, why=f"attempt {state.attempt} failed")
             raise
@@ -736,6 +942,52 @@ class ProverLoop:
                     "git_status": redact_evidence(result.stdout, limit=2000),
                 },
             )
+
+    def _assert_committed_paths(self, worktree: Path, *, old_head: str, new_head: str) -> None:
+        """Hold the attempt's commits to the frozen packet's allowed-path contract.
+
+        A clean worktree and a valid marker say only that the builder committed
+        and pushed something. They say nothing about *what*, and "fix the blocker
+        and also commit this unrelated file" leaves both looking exactly right.
+        So the committed range is enumerated and every path in it has to be one
+        the frozen repair packet allowed.
+
+        The whole-repository allowance is honoured when the packet carries it and
+        only then: :class:`~.paths.PathContract` refuses to be built from a
+        missing or ambiguous contract, so there is no path by which "the packet
+        did not say" becomes "anything goes".
+        """
+        contract = self.config.builder.allowed_paths
+        raw = self._git_text(
+            worktree,
+            ["diff", "--name-only", "-z", "--no-renames", old_head, new_head, "--"],
+            lane="builder",
+        )
+        committed = changed_paths(raw)
+        if contract.whole_repository:
+            self._event(
+                f"committed {len(committed)} path(s) between {old_head[:12]} and "
+                f"{new_head[:12]}; the frozen packet allows the whole repository"
+            )
+            return
+        outside = contract.rejected(committed)
+        if outside:
+            raise ScopeContamination(
+                "the builder committed paths the frozen repair packet does not allow; a "
+                "clean worktree and a valid readback do not make an unrelated committed "
+                "file part of this attempt",
+                evidence={
+                    "old_head": old_head,
+                    "new_head": new_head,
+                    "committed_paths": list(committed[:100]),
+                    "outside_contract": list(outside[:100]),
+                    "allowed_paths": list(contract.entries),
+                },
+            )
+        self._event(
+            f"committed {len(committed)} path(s) between {old_head[:12]} and "
+            f"{new_head[:12]}, all inside the frozen packet's allowed paths"
+        )
 
     def _verify_push(
         self,
@@ -952,6 +1204,7 @@ class ProverLoop:
             "omitted_from_previous_run": list(omitted),
             "blockers": [item.as_dict() for item in blockers],
             "contract": {
+                **self.config.builder.allowed_paths.as_dict(),
                 "addressed_line": "ADDRESSED: ID=<blocker id>  (one per blocker you fixed)",
                 "final_marker": (
                     f"DONE: PR={pull.number} BRANCH={pull.head_ref_name} "
@@ -1049,6 +1302,32 @@ def _combined(result: CommandResult) -> str:
 
 def _marker_count(stream: str) -> int:
     return sum(1 for line in stream.splitlines() if line.lstrip().upper().startswith("DONE:"))
+
+
+def _hidden_index_entries(listing: str) -> tuple[str, ...]:
+    """Paths whose ``git ls-files -v`` flag tells git to stop watching them."""
+    hidden: list[str] = []
+    for line in (listing or "").splitlines():
+        if len(line) < 3 or line[1] != " ":
+            continue
+        if line[0] in _HIDING_INDEX_FLAGS:
+            hidden.append(line[2:])
+    return tuple(hidden)
+
+
+def _redirecting_git_config(listing: str) -> tuple[str, ...]:
+    """Local git settings that can change what a read returns or what status shows."""
+    found: list[str] = []
+    for line in (listing or "").splitlines():
+        key = line.split("=", 1)[0].strip().lower()
+        if not key:
+            continue
+        for pattern in _EXECUTION_AFFECTING_GIT_CONFIG:
+            hit = key.startswith(pattern) if pattern.endswith(".") else key == pattern
+            if hit and line not in found:
+                found.append(line)
+                break
+    return tuple(found)
 
 
 def _first_line(body: str) -> str:

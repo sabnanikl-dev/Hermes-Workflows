@@ -74,6 +74,7 @@
     ],
     "signature": "Fixed by: Claude Code via Hermes orchestration",
     "comment_author": "the-builder-login",
+    "allowed_paths": ["src/", "tests/"],
     "timeout": 2400
   }
 }
