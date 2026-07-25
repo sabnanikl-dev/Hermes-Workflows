@@ -1,5 +1,9 @@
 # Hermes Workflows
 
+## Tools
+
+- `pr-prover/` — the repository-owned executable loop that proves an existing pull request merge-ready, blocked, or in need of Karan. Standard library only, no install step. See [`pr-prover/README.md`](pr-prover/README.md) for the run commands, lane contracts, and isolation guarantees.
+
 ## Skill snapshots
 
 - `Karan-skills/` — Hermes skills that are both classified as **local/custom** and recorded as used during the rolling last **60 days**. Usage means a successful `skill_view` load in the default or a specialist-profile session, or attachment to a cron job that ran in the window. Bundled and hub-installed skills are excluded. `scripts/sync_karan_skills.py` produces a deterministic manifest without timestamps or usage counts, so an unchanged selected set and unchanged source bytes produce no weekly commit.
