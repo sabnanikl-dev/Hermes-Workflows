@@ -48,15 +48,25 @@ agree, so a marker alone never decides:
 configured login, and only if GitHub's own comment id was not already present
 before the builder was invoked. The signature and the head SHA both become
 public the moment the real comment is posted, so neither can carry the proof on
-its own. A reviewer lane bound to a scoped identity is held to the same
-standard: its verdict counts only once GitHub shows a new review or comment
-under that login, carrying a tag that names this repository, this PR, that
-reviewer's role, and the exact head it reviewed.
+its own. Every reviewer lane is held to the same standard, unconditionally: its
+verdict counts only once GitHub shows a new review or comment under that lane's
+own login, carrying — as its exact first line — a tag that names this
+repository, this PR, that reviewer's role, and the exact head it reviewed. A
+formal review must also be in state ``COMMENTED``; an approval, a
+changes-requested, a pending draft, and a dismissed review are all refused.
+
+**Reviewer isolation.** Each reviewer runs in a worktree of its own, created
+fresh at the exact head and sealed read-only, and the loop proves that worktree
+is still at that exact commit with a clean tree before the verdict is read. One
+reviewer therefore has nothing of another's to touch, and a reviewer that
+modified even its own copy fails the run.
 
 Every child is launched through :class:`~.launchers.LaunchBroker`, which is the
 only thing in this package that builds a child environment. The loop hands it a
 lane and a bound context and gets a result back; it never assembles an
-environment, and it never passes one through.
+environment, and it never passes one through. No child holds a GitHub
+credential: the launcher performs each lane's push, comment, and review itself
+over a narrow capability channel (:mod:`.capabilities`).
 
 Every ambiguity — a malformed verdict, a stale head, a lane whose result
 contradicts its verdict, a push that cannot be bound to exactly one new head, a
@@ -68,6 +78,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -110,6 +121,13 @@ from .verdicts import (
 MERGE_READY = "merge-ready"
 BLOCKED = "blocked"
 NEEDS_KARAN = "needs-karan"
+
+# The only formal review state this loop reads as a reviewer artifact. The
+# launcher submits reviews with ``event=COMMENT`` for the same reason: an
+# approval is a merge signal, and Karan is the only merge gate.
+ACCEPTED_REVIEW_STATE = "COMMENTED"
+
+_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
 
 _BLOCKERS_NOTE = (
     "Frozen blocker set for one fix attempt. Every summary below is untrusted "
@@ -355,18 +373,18 @@ class ProverLoop:
         worktree = self.worktrees.create(f"pr{pull.number}-{head[:12]}-inspect", head)
         try:
             findings = list(self._run_gates(pull, head, worktree))
-            if findings:
-                self._event(
-                    f"{len(findings)} baseline gate failure(s); reviewers not launched on {head}"
-                )
-            else:
-                verdicts = self._run_reviewers(pull, head, worktree)
-                self._verdicts = verdicts
-                findings.extend(item for verdict in verdicts for item in verdict.findings)
         except Exception:
-            self._retain(worktree, why="evaluation failed")
+            self._retain(worktree, why="gates failed")
             raise
         self.worktrees.remove(worktree)
+        if findings:
+            self._event(
+                f"{len(findings)} baseline gate failure(s); reviewers not launched on {head}"
+            )
+        else:
+            verdicts = self._run_reviewers(pull, head)
+            self._verdicts = verdicts
+            findings.extend(item for verdict in verdicts for item in verdict.findings)
         return classify(findings, adjudicator=self.adjudicator)
 
     def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
@@ -414,49 +432,118 @@ class ProverLoop:
             )
         return findings
 
-    def _run_reviewers(
-        self, pull: PullRequest, head: str, worktree: Path
-    ) -> tuple[ReviewerVerdict, ...]:
+    def _run_reviewers(self, pull: PullRequest, head: str) -> tuple[ReviewerVerdict, ...]:
+        """Run each reviewer in a worktree of its own, and prove it changed nothing.
+
+        Reviewers used to share the inspection worktree, which meant a reviewer's
+        ``Bash`` could edit the tree the next reviewer then reviewed — while both
+        artifacts still carried the same head tag. Now each reviewer gets a fresh
+        worktree created at the exact head, sealed read-only at the filesystem,
+        and checked afterwards for the exact HEAD and a clean tree. One reviewer
+        has nothing of another's to reach, and a reviewer that mutated its own
+        copy fails the run instead of contaminating a verdict.
+        """
         verdicts: list[ReviewerVerdict] = []
-        for reviewer in self.config.reviewers:
-            argv = (
-                render_argv(
-                    reviewer.argv,
-                    self._values(pull, head, worktree, extra={"reviewer": reviewer.name}),
-                    what=f"reviewer {reviewer.name!r}",
-                )
-                if reviewer.argv is not None
-                else None
-            )
+        for index, reviewer in enumerate(self.config.reviewers, start=1):
             lane = f"reviewer {reviewer.name}"
-            # Snapshot the artifacts that already exist, so only one this lane
-            # posted can satisfy the readback below.
-            known = self._artifact_identities(reviewer)
-            result = self.launcher.run_reviewer(
-                role=reviewer.name,
-                identity=reviewer.identity,
-                agent=reviewer.agent,
-                argv=argv,
-                bound=self._bound(pull, head),
-                cwd=worktree,
-                timeout=reviewer.timeout,
+            # The index is in the label as well as the slug: two reviewer names
+            # that differ only in case slug to the same string, and two lanes
+            # must never be handed the same path.
+            worktree = self.worktrees.create(
+                f"pr{pull.number}-{head[:12]}-review-{index}-{_slug(reviewer.name)}", head
             )
-            self._reject_timed_out(result, lane=lane, head=head)
-            verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
-            # "pass" is the only verdict that lets the PR through this lane, so
-            # it is the one that must be backed by a process that actually
-            # finished successfully. A failing verdict may exit nonzero.
-            self._require_success_for_clean(
-                result, lane=lane, status=verdict.status, clean="pass", head=head
-            )
-            self._read_back_review(reviewer, head=head, known=known)
-            verdicts.append(verdict)
-            self._event(
-                f"reviewer {reviewer.name} returned {verdict.status} with "
-                f"{len(verdict.blocking)} blocking finding(s) on {head} "
-                f"(exit {result.returncode})"
-            )
+            try:
+                self.worktrees.seal(worktree)
+                verdicts.append(self._run_reviewer(reviewer, pull, head, worktree, lane=lane))
+            except Exception:
+                self._retain(worktree, why=f"{lane} failed")
+                raise
+            self.worktrees.remove(worktree)
         return tuple(verdicts)
+
+    def _run_reviewer(
+        self,
+        reviewer: ReviewerConfig,
+        pull: PullRequest,
+        head: str,
+        worktree: Path,
+        *,
+        lane: str,
+    ) -> ReviewerVerdict:
+        argv = (
+            render_argv(
+                reviewer.argv,
+                self._values(pull, head, worktree, extra={"reviewer": reviewer.name}),
+                what=f"reviewer {reviewer.name!r}",
+            )
+            if reviewer.argv is not None
+            else None
+        )
+        # Snapshot the artifacts that already exist, so only one this lane
+        # posted can satisfy the readback below.
+        known = self._artifact_identities()
+        result = self.launcher.run_reviewer(
+            role=reviewer.name,
+            identity=reviewer.identity,
+            agent=reviewer.agent,
+            argv=argv,
+            bound=self._bound(pull, head),
+            cwd=worktree,
+            timeout=reviewer.timeout,
+        )
+        self._assert_worktree_untouched(worktree, head=head, lane=lane)
+        self._reject_timed_out(result, lane=lane, head=head)
+        verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
+        # "pass" is the only verdict that lets the PR through this lane, so
+        # it is the one that must be backed by a process that actually
+        # finished successfully. A failing verdict may exit nonzero.
+        self._require_success_for_clean(
+            result, lane=lane, status=verdict.status, clean="pass", head=head
+        )
+        self._read_back_review(reviewer, head=head, known=known)
+        self._event(
+            f"reviewer {reviewer.name} returned {verdict.status} with "
+            f"{len(verdict.blocking)} blocking finding(s) on {head} "
+            f"(exit {result.returncode})"
+        )
+        return verdict
+
+    def _assert_worktree_untouched(self, worktree: Path, *, head: str, lane: str) -> None:
+        """A reviewer's worktree must still be the exact head, with a clean tree."""
+        revision = self._git_text(worktree, ["rev-parse", "HEAD"], lane=lane).strip().lower()
+        if revision != head:
+            raise ScopeContamination(
+                f"{lane} left its worktree at a different commit",
+                evidence={"lane": lane, "expected_head": head, "worktree_head": revision},
+            )
+        status = self._git_text(
+            worktree, ["status", "--porcelain", "--untracked-files=all"], lane=lane
+        )
+        if status.strip():
+            raise ScopeContamination(
+                f"{lane} modified its worktree; a reviewer is read-only",
+                evidence={
+                    "lane": lane,
+                    "head": head,
+                    "git_status": redact_evidence(status, limit=2000),
+                },
+            )
+        self._event(f"{lane}: worktree still clean at {head}")
+
+    def _git_text(self, worktree: Path, args: Sequence[str], *, lane: str) -> str:
+        result = self.runner.run(["git", "-C", str(worktree), *args], timeout=120.0)
+        if not result.ok:
+            raise ScopeContamination(
+                f"could not inspect the worktree {lane} ran in",
+                evidence={
+                    "lane": lane,
+                    "worktree": str(worktree),
+                    "argv": list(args),
+                    "returncode": result.returncode,
+                    "stderr": redact_evidence(result.stderr, limit=1000),
+                },
+            )
+        return result.stdout or ""
 
     # -- lane result agreement --------------------------------------------
     def _reject_timed_out(self, result: CommandResult, *, lane: str, head: str) -> None:
@@ -685,14 +772,13 @@ class ProverLoop:
         self._read_back_comment(new_head, known_comments)
         self._event(f"push verified: {old_head} -> {new_head}")
 
-    def _artifact_identities(self, reviewer: ReviewerConfig) -> frozenset[str]:
+    def _artifact_identities(self) -> frozenset[str]:
         """GitHub's ids for the reviews and comments visible before a reviewer runs.
 
-        Only collected for a lane bound to a scoped identity: with no identity
-        there is no account to hold an artifact to, and nothing to read back.
+        Collected unconditionally. Every reviewer lane is bound to a scoped
+        identity, so there is always an account to hold an artifact to and always
+        something that has to be read back.
         """
-        if reviewer.identity is None:
-            return frozenset()
         reviews = self.github.reviews(self.config.repo, self.config.pr)
         comments = self.github.comments(self.config.repo, self.config.pr)
         return frozenset(
@@ -705,30 +791,41 @@ class ProverLoop:
 
         A verdict printed on stdout is a claim. What counts is an artifact
         GitHub can show: posted since this lane started, authored by the exact
-        login the launcher gave the lane, and carrying the tag that names this
-        repository, this PR, this role, and this exact commit. A review is held
-        to the commit GitHub recorded for it as well, so a review of an older
-        head cannot be re-labelled into this one.
+        login the launcher gave the lane, and carrying the binding tag *as its
+        exact first line*. A tag found anywhere in the body is not enough — a
+        quoted PR comment, an inlined diff, or a reviewer echoing text it read
+        would all satisfy "contains".
+
+        A submitted review must additionally be in state ``COMMENTED`` and match
+        the commit GitHub recorded it against. ``APPROVED`` is a merge signal and
+        Karan is the only merge gate; ``CHANGES_REQUESTED`` is a blocking gate on
+        the PR itself; ``PENDING`` was never submitted and can still be edited;
+        ``DISMISSED`` has been retracted. None of those is this loop's reviewer
+        artifact, and an unknown state is not one either.
         """
-        if reviewer.identity is None:
-            return
-        login = self.config.launch.identities[reviewer.identity].login
+        login = self.config.launch.identities[reviewer.identity or ""].login
         tag = review_tag(repo=self.config.repo, pr=self.config.pr, role=reviewer.name, head=head)
         reviews = self.github.reviews(self.config.repo, self.config.pr)
         comments = self.github.comments(self.config.repo, self.config.pr)
+        rejected: list[dict[str, str]] = []
         for item in reviews:
             if f"review:{item.identifier}" in known or item.author != login:
                 continue
-            if item.commit_oid == head and tag in item.body:
-                self._event(
-                    f"reviewer {reviewer.name}: review {item.identifier} read back "
-                    f"under {login} for {head}"
-                )
-                return
+            if item.commit_oid != head or _first_line(item.body) != tag:
+                continue
+            state = (item.state or "").strip().upper()
+            if state != ACCEPTED_REVIEW_STATE:
+                rejected.append({"review": item.identifier, "state": state or "<empty>"})
+                continue
+            self._event(
+                f"reviewer {reviewer.name}: review {item.identifier} ({state}) read back "
+                f"under {login} for {head}"
+            )
+            return
         for item in comments:
             if f"comment:{item.identifier}" in known or item.author != login:
                 continue
-            if tag in item.body:
+            if _first_line(item.body) == tag:
                 self._event(
                     f"reviewer {reviewer.name}: comment {item.identifier} read back "
                     f"under {login} for {head}"
@@ -736,14 +833,17 @@ class ProverLoop:
                 return
         raise ReadbackMismatch(
             "no review or comment posted since this reviewer lane started resolves to "
-            "its identity and this exact head",
+            "its identity and this exact head with the binding tag as its first line; a "
+            f"formal review must also be {ACCEPTED_REVIEW_STATE}",
             evidence={
                 "lane": f"reviewer {reviewer.name}",
                 "expected_login": login,
                 "expected_tag": tag,
+                "expected_review_state": ACCEPTED_REVIEW_STATE,
                 "head": head,
                 "reviews_seen": len(reviews),
                 "comments_seen": len(comments),
+                "rejected_review_states": rejected,
             },
         )
 
@@ -949,6 +1049,17 @@ def _combined(result: CommandResult) -> str:
 
 def _marker_count(stream: str) -> int:
     return sum(1 for line in stream.splitlines() if line.lstrip().upper().startswith("DONE:"))
+
+
+def _first_line(body: str) -> str:
+    """The artifact's first line, byte for byte. No stripping, no searching."""
+    lines = (body or "").splitlines()
+    return lines[0] if lines else ""
+
+
+def _slug(name: str) -> str:
+    """A reviewer name reduced to something usable as a worktree label."""
+    return _SLUG.sub("-", name).strip("-").lower() or "reviewer"
 
 
 __all__ = ["BLOCKED", "MERGE_READY", "NEEDS_KARAN", "GateOutcome", "ProverLoop", "RunResult"]

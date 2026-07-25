@@ -62,22 +62,61 @@ gate is a configuration error, so browser/visual QA is never silently skipped.
 A reviewer or builder lane is **either** a repository-owned script (`argv`) or a
 launcher-composed agent (`agent`). Declaring both is a configuration error:
 two answers to "what command runs here" is exactly the ambiguity that fails
-closed. An `agent` lane must name one `identity`.
+closed.
+
+**Every builder and reviewer lane must name one `identity`** — script lanes
+included. A lane with no identity gets no capability channel, so it can neither
+push nor post, and there would be no GitHub artifact to read its claims back
+against. A configuration that omits one is refused with a migration error rather
+than run in a weaker mode.
+
+A script lane reaches GitHub exactly the way an agent lane does: through
+`pr-prover-cap`, which the launcher puts first on the lane's `PATH`. A lane
+script that calls `gh` or `git push` directly finds no credential and fails.
 
 ## Launchers, identities, and credential scope
 
 One broker launches every child. It builds the child's environment from nothing,
-hands over at most the single scoped identity that lane owns, and — for an agent
-lane — composes the whole argv array itself.
+opens the one narrow capability channel that lane is entitled to, and — for an
+agent lane — composes the whole argv array itself.
 
-| Lane | Identity | May do | Tool maximum |
+| Lane | Identity | May ask the launcher to do | Tool maximum |
 |---|---|---|---|
-| gate | none | run repository commands | whatever the gate's argv is |
-| reviewer A/B | `comment-pr`, `review-pr` | comment and review on the bound PR | `Bash Glob Grep Read TodoWrite` |
+| gate | none | nothing; it has no channel | whatever the gate's argv is |
+| reviewer A/B | `comment-pr`, `review-pr` | comment on, and file a COMMENT review against, the bound PR | `Bash Glob Grep Read TodoWrite` |
 | builder | `push-branch`, `comment-pr` | push the bound branch, comment on the bound PR | `Bash Edit Glob Grep Read TodoWrite Write` |
 
-The capability vocabulary is closed and has no merge, approval, deploy, or admin
-form, so an identity that could merge cannot be *expressed*, let alone granted.
+### No child holds a credential
+
+A capability is not a claim about a token; it is the list of operations the
+launcher will perform on a lane's behalf. A child is given the path of a
+launcher-owned unix socket (`PR_PROVER_CAPABILITY_SOCKET`) and one shim on its
+`PATH`:
+
+```text
+pr-prover-cap push                       push this worktree's HEAD to the bound branch
+pr-prover-cap comment --body-file FILE   post one comment on the bound PR
+pr-prover-cap review  --body-file FILE   submit one COMMENT review on the bound PR
+```
+
+The shim carries no authority either. It serialises one request; the launcher,
+on the other side, holds the scoped credential and composes each operation's
+whole `git`/`gh` argv array from the bound repository, PR, branch, and head. A
+request names an operation and, for the two that post text, a body — it cannot
+name a repository, a pull request, a ref, a branch, a commit, or a force flag,
+because those are not fields of the request.
+
+So a child cannot merge, cannot push another ref or another repository, and
+cannot approve a review — not because it was told not to, but because none of
+those is an operation it can express. The push target is always
+`https://github.com/<bound repo>.git` with refspec
+`<worktree HEAD>:refs/heads/<bound branch>` and no `--force`; a review is always
+submitted with `event=COMMENT` against the bound head. The number of operations
+one lane may perform is capped, so a lane that loops cannot post without bound.
+
+The capability vocabulary — `push-branch`, `comment-pr`, `review-pr` — is closed
+and has no merge, approval, deploy, or admin form, so an identity that could
+merge cannot be *expressed*, let alone granted.
 
 **Credentials are never in the config.** An identity names either a parent
 environment variable (`token_env`) or an owner-only file (`token_file`) to read
@@ -86,27 +125,74 @@ holds more than one line fails closed.
 
 **Every credential is verified before it is used.** The broker asks GitHub which
 account the credential resolves to and what it may do on the bound repository,
-using the environment the child is about to get. The login must match exactly;
-`admin` or `maintain` — the permissions that merge and change branch protection
-— are refused outright; a builder credential must be able to push and a reviewer
-credential must not.
+using the launcher-side environment it will act with. The login must match
+exactly; `admin` or `maintain` — the permissions that merge and change branch
+protection — are refused outright; a builder credential must be able to push and
+a reviewer credential must not. This is defence in depth *behind* the capability
+broker, not the thing standing between a child and a merge.
 
-**The child environment is built from nothing.** Names are allowlisted, and
-anything credential-shaped is denied by name — `GH_TOKEN`, `GITHUB_TOKEN`,
-`SSH_AUTH_SOCK`, anything containing `TOKEN`/`SECRET`/`PASSWORD`/`API_KEY`, and
-whole vendor prefixes (`JMD_`, `AWS_`, `VERCEL_`, `SANITY_`, `N8N_`, …) — so an
-unfamiliar `ACME_DEPLOY_TOKEN` is refused without anyone enumerating it.
-`launch.env_allow` can widen the allowlist only to names that are *not* denied;
-`launch.model_auth_env` permits exactly one model-access variable by name and
-can never name GitHub authority.
+### The child environment is built from nothing
 
-`HOME` is allowed, because the toolchain needs it — and on its own it is a hole,
-since `gh` falls back to `~/.config/gh/hosts.yml` and `git` to `~/.gitconfig`
-and the OS keychain. So every child also gets a launcher-written `GH_CONFIG_DIR`
-and `GIT_CONFIG_GLOBAL` (with `GIT_CONFIG_SYSTEM=/dev/null`). Credential helpers
-are cleared there; a lane that may push gets exactly one back — `gh`, which can
-only offer the token the launcher injected — and a lane that may not push gets
-none, so an attempted push fails for want of a credential rather than on trust.
+Names are allowlisted, and anything credential-shaped is denied by name —
+`GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, anything containing
+`TOKEN`/`SECRET`/`PASSWORD`/`API_KEY`, and whole vendor prefixes (`JMD_`, `AWS_`,
+`VERCEL_`, `SANITY_`, `N8N_`, `KARAN_`, …) — so an unfamiliar `ACME_DEPLOY_TOKEN`
+is refused without anyone enumerating it. `launch.env_allow` can widen the
+allowlist only to names that are *not* denied and do not shadow launcher-owned
+material.
+
+**Injection is a closed set.** A launcher does not get to name what it writes
+into a child: `HOME`, `PATH`, the configuration-discovery guards, and the one
+capability channel, and nothing else. There is no `inject_as` any more, because
+there is no credential to inject.
+
+**Model access is a channel, not a variable name.** `launch.model_auth` names one
+of the launcher's code-owned channels:
+
+| `launch.model_auth` | Variable passed through |
+|---|---|
+| `anthropic-api-key` | `ANTHROPIC_API_KEY` |
+| `claude-code-oauth-token` | `CLAUDE_CODE_OAUTH_TOKEN` |
+
+A configuration cannot name the variable, so `GH_TOKEN`, `JMD_DEPLOY_KEY`,
+`VERCEL_TOKEN`, `AWS_SECRET_ACCESS_KEY`, and `KARAN_APPROVAL_TOKEN` are not
+expressible there rather than merely rejected there.
+
+### A synthetic HOME
+
+No child inherits the operator's home directory. `HOME` is denied like a
+credential, because it *is* one: `gh` reads `~/.config/gh/hosts.yml`, `git` reads
+`~/.gitconfig` and the OS keychain, `ssh` reads `~/.ssh`, and the model client
+keeps its own stored credentials under its config directory.
+
+The launcher builds a home per lane under its own mode-0700 scratch and points
+every configuration-discovery variable it knows about inside it:
+`CLAUDE_CONFIG_DIR`, `GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM=/dev/null`, `GNUPGHOME`, and `XDG_{CONFIG,CACHE,DATA,STATE}_HOME`.
+A child that is missing any one of them is refused before it launches. Only
+material named in the code-owned `REVIEWED_HOME_MATERIAL` list is copied in, and
+that list is empty — widening it is a code change that shows up in review, not a
+configuration key.
+
+Credential helpers are cleared in the launcher-written gitconfig and none is put
+back, for any lane. A direct `git push` from a child fails for want of a
+credential; the only push that can succeed is the one the launcher performs.
+
+### A lane is a process group
+
+Every child is started in its own session, and the **group** — not just the
+process the runner started — is terminated on every exit path: normal
+completion, timeout, cancellation, and any other exception. `SIGTERM` first, a
+bounded wait, then `SIGKILL`, and the call does not return until the group is
+gone. Output is drained in threads and the runner waits on the process rather
+than on end-of-output, so a backgrounded descendant holding the lane's stdout
+cannot stall the teardown that is meant to kill it.
+
+That is what lets the launcher remove a lane's scratch, synthetic home, and
+capability socket knowing nothing is still holding them. A descendant that calls
+`setsid` for itself leaves the group and is outside this guarantee; catching that
+needs an OS-level container or cgroup, which is not something this
+standard-library-only package can create.
 
 ### Launch discipline, in code
 
@@ -218,20 +304,43 @@ is mandatory configuration rather than an optional tightening.
 The builder's `identity` and its `comment_author` must be the same account, or
 the run would launch as one login and then accept a fix comment from another.
 
+## Reviewer isolation
+
+Each reviewer runs in a worktree of its own, created fresh at the exact head. The
+tree is sealed read-only at the filesystem, and after the lane finishes the loop
+proves that worktree is still at that exact commit with a clean tree — any
+difference is `scope-contamination`, and the worktree is retained as evidence.
+
+One reviewer therefore has nothing of another's to touch: reviewer A's worktree
+is removed before reviewer B's is created. The seal is a guard rather than a
+jail — on POSIX the owner of a file may always restore its write bit, so a
+same-user process can undo it, and true read-only confinement would need an OS
+sandbox or a second uid. What holds is structural: separate worktrees make
+cross-contamination impossible, and the after-the-fact check catches a reviewer
+that mutated even its own copy.
+
 ## Reviewer artifact readback
 
-A reviewer lane bound to a scoped identity is held to the same standard as the
-builder. Its printed verdict counts only once GitHub shows an artifact that is:
+Every reviewer lane is held to the builder's standard, unconditionally. Its
+printed verdict counts only once GitHub shows an artifact that is:
 
 1. **New** — a review or comment id that was not there before the lane started;
 2. **Under its own login** — the identity the launcher gave that lane, exactly;
-3. **Bound to this exact work** — carrying the tag line
+3. **Tagged on its exact first line** — the whole first line, byte for byte:
 
    ```text
    PR-PROVER-REVIEW: repo=<owner/name> pr=<number> role=<A|B> head=<40-hex sha>
    ```
 
-   and, for a submitted review, matching the commit GitHub recorded it against.
+   Not "contains the tag": a quoted comment, an inlined diff, or a reviewer
+   echoing text it read would all satisfy "contains".
+4. **`COMMENTED`, for a submitted review** — and matching the commit GitHub
+   recorded it against. `APPROVED` is a merge signal and Karan is the only merge
+   gate; `CHANGES_REQUESTED` is a blocking gate on the PR itself; `PENDING` was
+   never submitted and can still be edited; `DISMISSED` has been retracted. An
+   unknown state is not this loop's artifact either. The launcher submits reviews
+   with `event=COMMENT` for the same reason, so a child cannot produce any of the
+   refused states in the first place.
 
 Anything else is a `readback-mismatch`. A review of an older head cannot be
 re-labelled into this one, and one reviewer's artifact cannot stand in for the
@@ -250,13 +359,16 @@ held, the run stops and asks. After confirming no run is active, remove it with
 `invalid-config` · `invalid-command` · `lock-contention` · `unexpected-state` ·
 `malformed-verdict` · `lane-failure` · `stale-head` · `ambiguous-push` ·
 `readback-mismatch` · `scope-contamination` · `builder-refusal` ·
-`github-error` · `worktree-error` · `identity-error` · `launch-policy`
+`github-error` · `worktree-error` · `identity-error` · `launch-policy` ·
+`capability-refused`
 
 `identity-error` covers ambiguous auth, the wrong account, and a credential that
 holds more authority than its capabilities declare. `launch-policy` covers a
 child environment that still carries something it should not, a lane launched
 outside the run's worktree root, a budget outside the window, and any attempt to
-broaden authority at launch time.
+broaden authority at launch time. `capability-refused` covers a child asking the
+launcher for an operation outside its bound capability — an unknown verb, a field
+it does not get to name, or a push from a lane that cannot push.
 
 Each carries evidence, and the worktree plus scratch directory are retained so
 the failure can be inspected.
@@ -281,14 +393,38 @@ bounded with explicit markers.
   cannot be removed.
 - The frozen blocker set is written under the OS temp directory, never inside a
   repository, so a builder's inputs cannot contaminate the diff.
-- The loop never pushes, comments, approves, or merges. The builder pushes and
-  comments under its own identity; this loop only verifies what landed.
+- Each reviewer gets a worktree of its own, sealed read-only and checked for the
+  exact HEAD and a clean tree afterwards; one reviewer cannot contaminate
+  another.
+- The loop never pushes, comments, approves, or merges. The launcher performs
+  each lane's push and comment on its behalf, bound to the exact repo, PR,
+  branch, and head; this loop only verifies what landed.
 - Every child is launched in a worktree this run created, inside the configured
   worktree root; a lane pointed anywhere else is refused.
-- No child environment carries merge, Karan-approval, JMD, deploy, client, or
-  live-system credentials — including the operator's own `gh` login and the OS
-  keychain, which are unreachable because `GH_CONFIG_DIR` and
-  `GIT_CONFIG_GLOBAL` point at launcher-owned files.
+- **No child holds a GitHub credential at all**, so merge, Karan-approval, JMD,
+  deploy, client, and live-system authority are not in a child environment to
+  begin with — and neither is the operator's own `gh` login, OS keychain, or
+  model-client credential store, because `HOME` is synthetic and every
+  configuration-discovery variable points inside it.
+- A lane's whole process group is terminated and reaped before its scratch,
+  synthetic home, and capability socket are removed.
+
+### What this package cannot enforce on its own
+
+Stated precisely, because a limit that is left vague reads as a claim:
+
+- **Filesystem confinement.** A lane's `Bash` runs as the operator's own uid, so
+  it can still read an absolute path such as `~/.ssh/id_rsa` even though nothing
+  points there. Closing that needs an OS-level sandbox — `sandbox-exec`,
+  `bwrap`, a container, or a second uid — which is an external prerequisite, not
+  something a standard-library-only package can create. What is enforced here is
+  that no *discovery* path leads to the operator's credentials and that no
+  credential is in the environment.
+- **Read-only worktrees against a determined process.** See
+  [Reviewer isolation](#reviewer-isolation): the seal is undoable by the file's
+  owner, and the after-the-fact HEAD/tree check is what actually fails the run.
+- **A descendant that calls `setsid` for itself** leaves the lane's process group
+  and outlives the teardown. Catching that needs a cgroup or job object.
 
 ## Verify
 
@@ -298,5 +434,11 @@ python3 -m compileall -q pr-prover/src pr-prover/tests
 git diff --check origin/main...HEAD
 ```
 
-The suite runs entirely against deterministic doubles: no network, no `gh`, and
-no real `git`.
+Most of the suite runs against deterministic doubles: no network, no `gh`, and no
+launched agent. Four files touch the real machine on purpose, because the
+properties they assert are not properties of a double —
+`test_commands.ProcessGroupTests` starts real processes that background real
+descendants and asserts the whole group is gone; `test_capabilities.ShimTests`
+runs the real capability shim over a real unix socket; `test_worktrees.SealTests`
+asserts the filesystem actually refuses a write; and `test_integration_git.py`
+drives real `git` against a throwaway bare repo and clone in a temp directory.

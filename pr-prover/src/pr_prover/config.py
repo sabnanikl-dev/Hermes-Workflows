@@ -17,20 +17,31 @@ Reviewer templates also get ``{reviewer}``; builder templates also get
 anything if the expected commenter is pinned, so there is no "any author will
 do" configuration to fall into.
 
-The optional ``launch`` section names the scoped identities this run's launcher
-owns and how far the child environment allowlist may be widened. A lane then
-either keeps its own ``argv`` array — a repository-owned script, run with a
-hardened environment — or declares an ``agent`` block, in which case the
-launcher composes the whole child argv itself and the lane must name one
-identity. Declaring both is refused: two sources for one command line is
-exactly the ambiguity that fails closed.
+The ``launch`` section is required, and so is an ``identity`` on the builder and
+on every reviewer — script lane and agent lane alike. A lane with no identity
+has no capability channel, so it could neither push nor post, and nothing it
+claimed could be read back from GitHub; a configuration that omits one is
+rejected with a migration error rather than run in a mode where a lane can reach
+merge-ready without leaving a verifiable artifact.
+
+A lane then either keeps its own ``argv`` array — a repository-owned script, run
+with a hardened environment and the capability shim on its ``PATH`` — or declares
+an ``agent`` block, in which case the launcher composes the whole child argv
+itself. Declaring both is refused: two sources for one command line is exactly
+the ambiguity that fails closed.
 
 Everything the configuration may say about an agent lane can only *narrow* it.
 Tool sets are checked against a code-owned maximum per role, permission modes
 against a closed list, capabilities against a vocabulary with no merge or
 deploy form, and the budget against the 20-30 minute window. Credentials
 themselves are never in this file: an identity names an environment variable or
-a protected file to read one from.
+a protected file to read one from, and the credential is used only by the
+launcher, never handed to a child.
+
+``launch.model_auth`` names one of the launcher's code-owned model-access
+*channels* (see :data:`~.childenv.MODEL_AUTH_CHANNELS`). It is not an
+environment variable name, so no GitHub, deploy, client, live-system, account,
+or approval credential can be named there at all.
 """
 from __future__ import annotations
 
@@ -41,7 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .childenv import EnvironmentPolicy
+from .childenv import MODEL_AUTH_CHANNELS, EnvironmentPolicy
 from .commands import validate_argv
 from .errors import ConfigError, IdentityError, LaunchPolicyError
 from .identities import BUILDER_CAPABILITIES, REVIEWER_CAPABILITIES, IdentitySpec
@@ -84,10 +95,27 @@ _TOP_LEVEL_KEYS = frozenset(
 _GATE_KEYS = frozenset({"name", "argv", "kind", "timeout"})
 _REVIEWER_KEYS = frozenset({"name", "argv", "timeout", "identity", "agent"})
 _BUILDER_KEYS = frozenset({"argv", "signature", "comment_author", "timeout", "identity", "agent"})
-_LAUNCH_KEYS = frozenset({"identities", "env_allow", "model_auth_env"})
-_IDENTITY_KEYS = frozenset({"login", "capabilities", "token_env", "token_file", "inject_as"})
+_LAUNCH_KEYS = frozenset({"identities", "env_allow", "model_auth"})
+_IDENTITY_KEYS = frozenset({"login", "capabilities", "token_env", "token_file"})
 _AGENT_KEYS = frozenset({"program", "model", "tools", "permission_mode"})
 _MODEL = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+# Keys an earlier revision of this package accepted that are now refusals rather
+# than renames. Each one named a boundary that turned out not to hold, so a
+# configuration carrying one is stopped with an explanation instead of being
+# migrated silently into a shape that no longer means what it used to.
+_RETIRED_KEYS: Mapping[str, str] = {
+    "launch.model_auth_env": (
+        "launch.model_auth_env named an arbitrary environment variable, which let a "
+        "configuration hand a child GitHub, deploy, client, live-system, or approval "
+        "credentials. Use launch.model_auth with one of the code-owned channels instead"
+    ),
+    "identity.inject_as": (
+        "an identity's inject_as named the variable a credential was injected into. No "
+        "credential is injected into a child any more: the launcher performs the lane's "
+        "push, comment, and review itself over the capability channel. Remove the key"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -422,6 +450,11 @@ def _launch(item: object, *, base_dir: Path) -> LaunchConfig:
         return LaunchConfig()
     if not isinstance(item, Mapping):
         raise ConfigError("config launch must be an object")
+    if "model_auth_env" in item:
+        raise ConfigError(
+            _RETIRED_KEYS["launch.model_auth_env"],
+            evidence={"key": "launch.model_auth_env", "channels": sorted(MODEL_AUTH_CHANNELS)},
+        )
     unknown = sorted(set(item) - _LAUNCH_KEYS)
     if unknown:
         raise ConfigError("config launch has unknown keys", evidence={"unknown_keys": unknown})
@@ -429,17 +462,9 @@ def _launch(item: object, *, base_dir: Path) -> LaunchConfig:
     allow = item.get("env_allow", [])
     if not isinstance(allow, list) or any(not isinstance(entry, str) for entry in allow):
         raise ConfigError("launch.env_allow must be a list of variable names", evidence={"env_allow": allow})
-    model_auth = item.get("model_auth_env")
-    if model_auth is not None and not isinstance(model_auth, str):
-        raise ConfigError(
-            "launch.model_auth_env must name one environment variable",
-            evidence={"model_auth_env": model_auth},
-        )
+    model_auth = item.get("model_auth")
     try:
-        policy = EnvironmentPolicy(
-            extra_allow=frozenset(allow),
-            permit=frozenset({model_auth} if model_auth else ()),
-        )
+        policy = EnvironmentPolicy(extra_allow=frozenset(allow), model_auth=model_auth)
     except LaunchPolicyError as exc:
         raise ConfigError(exc.message, evidence=exc.evidence) from exc
 
@@ -457,6 +482,11 @@ def _launch(item: object, *, base_dir: Path) -> LaunchConfig:
 def _identity(name: str, item: object, *, base_dir: Path) -> IdentitySpec:
     if not isinstance(item, Mapping):
         raise ConfigError(f"launch.identities.{name} must be an object")
+    if "inject_as" in item:
+        raise ConfigError(
+            _RETIRED_KEYS["identity.inject_as"],
+            evidence={"key": f"launch.identities.{name}.inject_as"},
+        )
     unknown = sorted(set(item) - _IDENTITY_KEYS)
     if unknown:
         raise ConfigError(
@@ -483,7 +513,6 @@ def _identity(name: str, item: object, *, base_dir: Path) -> IdentitySpec:
             capabilities=frozenset(capabilities),
             token_env=item.get("token_env"),
             token_file=token_file,
-            inject_as=item.get("inject_as", "GH_TOKEN"),
         )
     except IdentityError as exc:
         raise ConfigError(exc.message, evidence=exc.evidence) from exc
@@ -494,23 +523,27 @@ def _bind_identities(
 ) -> None:
     """Cross-check that every lane names an identity the launcher owns and may use.
 
-    The builder's identity and its expected comment author must be the same
+    Every builder and reviewer lane must name one, whether it is a script lane or
+    an agent lane. An unscoped lane has no capability channel, so it can neither
+    push nor post; it would produce no GitHub artifact to read back, and a run
+    could reach merge-ready on a printed claim alone. That is the hole this
+    requirement closes, so there is no legacy shape to fall back to.
+
+    The builder's identity and its expected comment author must also be the same
     account. Otherwise the run would launch as one login and then accept a fix
     comment from another, and the readback would prove nothing about the child
     that actually ran.
     """
-    _require_identity(builder.identity, builder.agent, launch, what="builder", allowed=BUILDER_CAPABILITIES)
-    if builder.identity is not None:
-        login = launch.identities[builder.identity].login
-        if login != builder.comment_author:
-            raise ConfigError(
-                "the builder's identity and its expected comment author are different accounts",
-                evidence={"identity_login": login, "comment_author": builder.comment_author},
-            )
+    _require_identity(builder.identity, launch, what="builder", allowed=BUILDER_CAPABILITIES)
+    login = launch.identities[builder.identity or ""].login
+    if login != builder.comment_author:
+        raise ConfigError(
+            "the builder's identity and its expected comment author are different accounts",
+            evidence={"identity_login": login, "comment_author": builder.comment_author},
+        )
     for reviewer in reviewers:
         _require_identity(
             reviewer.identity,
-            reviewer.agent,
             launch,
             what=f"reviewer {reviewer.name!r}",
             allowed=REVIEWER_CAPABILITIES,
@@ -519,19 +552,19 @@ def _bind_identities(
 
 def _require_identity(
     identity: str | None,
-    agent: AgentSpec | None,
     launch: LaunchConfig,
     *,
     what: str,
     allowed: frozenset[str],
 ) -> None:
     if identity is None:
-        if agent is not None:
-            raise ConfigError(
-                f"{what} declares an agent launch but no scoped identity to run as",
-                evidence={"lane": what},
-            )
-        return
+        raise ConfigError(
+            f"{what} declares no scoped identity. Every builder and reviewer lane now "
+            "needs one — script lanes included — because the launcher performs that "
+            "lane's push, comment, and review itself and the loop reads the resulting "
+            "GitHub artifact back. Add launch.identities and an 'identity' key to this lane",
+            evidence={"lane": what, "known": sorted(launch.identities), "required": sorted(allowed)},
+        )
     spec = launch.identities.get(identity)
     if spec is None:
         raise ConfigError(

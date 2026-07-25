@@ -64,7 +64,7 @@ def fix_comment(head: str) -> str:
 
 
 def review_body(role: str, head: str, *, repo: str = "example/repo", pr: int = 7) -> str:
-    """A reviewer artifact carrying the tag that binds repo, PR, role, and head."""
+    """A reviewer artifact whose exact first line is the binding tag."""
     return f"{review_tag(repo=repo, pr=pr, role=role, head=head)}\n\nLooks fine to me.\n"
 
 
@@ -98,14 +98,21 @@ class FakeRemote:
         self.comments.append(posted)
         return posted
 
-    def review(self, body: str, *, head: str, author: str = REVIEWER_LOGIN) -> Review:
+    def review(
+        self,
+        body: str,
+        *,
+        head: str,
+        author: str = REVIEWER_LOGIN,
+        state: str = "COMMENTED",
+    ) -> Review:
         """Append a submitted review with a fresh id, bound to the commit it reviewed."""
         posted = Review(
             identifier=f"PRR_review{self._next_review_id}",
             author=author,
             body=body,
             commit_oid=head,
-            state="COMMENTED",
+            state=state,
         )
         self._next_review_id += 1
         self.reviews.append(posted)
@@ -243,8 +250,16 @@ class FakeRunner:
         self.remote = remote
         self.script = script or LaneScript()
         self.calls: list[Call] = []
+        # Porcelain status per worktree kind. A worktree is a checkout of one
+        # commit, so an attempt worktree and a reviewer worktree are different
+        # trees and answer separately — which is the whole point of giving each
+        # reviewer its own.
         self.worktree_status = ""
+        self.reviewer_status = ""
         self.fetch_failures = 0
+        # The commit each worktree was created at. A worktree does not follow
+        # the remote, so `rev-parse HEAD` inside one must not answer with it.
+        self.worktree_heads: dict[str, str] = {}
 
     def run(
         self,
@@ -270,6 +285,7 @@ class FakeRunner:
     def _git(self, argv: tuple[str, ...]) -> CommandResult:
         if argv[1] != "-C":
             raise AssertionError(f"git call is not pinned to a directory: {list(argv)}")
+        target = str(Path(argv[2]).resolve())
         rest = argv[3:]
         if rest[0] == "fetch":
             if self.fetch_failures:
@@ -277,17 +293,22 @@ class FakeRunner:
                 return CommandResult(argv=argv, returncode=1, stdout="", stderr="fetch refused")
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         if rest[0] == "rev-parse":
-            return CommandResult(argv=argv, returncode=0, stdout=self.remote.head + "\n", stderr="")
+            head = self.worktree_heads.get(target, self.remote.head)
+            return CommandResult(argv=argv, returncode=0, stdout=head + "\n", stderr="")
         if rest[0] == "worktree" and rest[1] == "add":
             path = Path(rest[3])
             path.mkdir(parents=True, exist_ok=False)
             (path / ".git").write_text("gitdir: fake\n", encoding="utf-8")
+            self.worktree_heads[str(path.resolve())] = rest[4]
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         if rest[0] == "worktree" and rest[1] == "remove":
-            shutil.rmtree(Path(rest[3]), ignore_errors=True)
+            path = Path(rest[3])
+            self.worktree_heads.pop(str(path.resolve()), None)
+            shutil.rmtree(path, ignore_errors=True)
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         if rest[0] == "status":
-            return CommandResult(argv=argv, returncode=0, stdout=self.worktree_status, stderr="")
+            dirty = self.reviewer_status if "-review-" in Path(target).name else self.worktree_status
+            return CommandResult(argv=argv, returncode=0, stdout=dirty, stderr="")
         raise AssertionError(f"unexpected git call: {list(argv)}")
 
     # -- assertions -------------------------------------------------------
@@ -355,9 +376,14 @@ def make_config(
     visual_qa_required: bool = False,
     comment_author: str = BUILDER_LOGIN,
     branch: str | None = BRANCH,
-    scoped: bool = False,
     reviewer_login: str = REVIEWER_LOGIN,
 ) -> RunConfig:
+    """A valid run configuration. Every lane is bound to a scoped identity.
+
+    There is no unscoped variant, because there is no unscoped configuration the
+    loader will accept any more; :func:`legacy_unscoped_payload` builds the
+    rejected shape for the migration tests.
+    """
     payload: dict[str, object] = {
         "schema_version": 1,
         "repo": "example/repo",
@@ -382,25 +408,53 @@ def make_config(
     }
     if branch is None:
         payload.pop("branch")
-    if scoped:
-        payload["launch"] = {
-            "identities": {
-                "builder": {
-                    "login": comment_author,
-                    "capabilities": ["push-branch", "comment-pr"],
-                    "token_env": "PR_PROVER_BUILDER_TOKEN",
-                },
-                "reviewer": {
-                    "login": reviewer_login,
-                    "capabilities": ["comment-pr", "review-pr"],
-                    "token_env": "PR_PROVER_REVIEWER_TOKEN",
-                },
-            }
+    payload["launch"] = {
+        "identities": {
+            "builder": {
+                "login": comment_author,
+                "capabilities": ["push-branch", "comment-pr"],
+                "token_env": "PR_PROVER_BUILDER_TOKEN",
+            },
+            "reviewer": {
+                "login": reviewer_login,
+                "capabilities": ["comment-pr", "review-pr"],
+                "token_env": "PR_PROVER_REVIEWER_TOKEN",
+            },
         }
-        payload["builder"]["identity"] = "builder"  # type: ignore[index]
-        for reviewer in payload["reviewers"]:  # type: ignore[attr-defined]
-            reviewer["identity"] = "reviewer"
+    }
+    payload["builder"]["identity"] = "builder"  # type: ignore[index]
+    for reviewer in payload["reviewers"]:  # type: ignore[attr-defined]
+        reviewer["identity"] = "reviewer"
     return RunConfig.from_mapping(payload, base_dir=tmp)
+
+
+def legacy_unscoped_payload(tmp: Path, *, source_repo: Path) -> dict[str, object]:
+    """The pre-PAPI-90 shape: script lanes with no identities at all.
+
+    Kept so the migration refusal is tested against the exact configuration
+    operators may still have on disk, rather than against an invented one.
+    """
+    return {
+        "schema_version": 1,
+        "repo": "example/repo",
+        "pr": 7,
+        "branch": BRANCH,
+        "base": "main",
+        "source_repo": str(source_repo),
+        "worktree_root": str(tmp / "worktrees"),
+        "state_file": str(tmp / "state.json"),
+        "lock_file": str(tmp / "run.lock"),
+        "gates": [],
+        "reviewers": [
+            {"name": "A", "argv": ["lane-reviewer-A", "--head", "{head}"]},
+            {"name": "B", "argv": ["lane-reviewer-B", "--head", "{head}"]},
+        ],
+        "builder": {
+            "argv": ["lane-builder", "--head", "{head}"],
+            "signature": SIGNATURE,
+            "comment_author": BUILDER_LOGIN,
+        },
+    }
 
 
 def make_source_repo(tmp: Path) -> Path:

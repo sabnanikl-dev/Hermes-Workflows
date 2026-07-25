@@ -11,6 +11,7 @@
   "visual_qa_required": false,
   "launch": {
     "env_allow": ["NODE_ENV"],
+    "model_auth": "anthropic-api-key",
     "identities": {
       "builder": {
         "login": "the-builder-login",

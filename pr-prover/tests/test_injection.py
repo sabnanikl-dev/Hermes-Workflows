@@ -33,7 +33,7 @@ from _support import (
     reviewer_output,
 )
 
-from pr_prover.childenv import carries_none_of
+from pr_prover.childenv import CAPABILITY_CHANNEL, carries_none_of
 from pr_prover.launchers import AgentSpec, BoundContext
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN, ProverLoop
 from pr_prover.prompts import builder_prompt, reviewer_prompt
@@ -69,7 +69,7 @@ class LaunchFixtureTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
-        self.config = make_config(self.tmp, source_repo=make_source_repo(self.tmp), scoped=True)
+        self.config = make_config(self.tmp, source_repo=make_source_repo(self.tmp))
         self.worktree = self.config.worktree_root / "attempt1"
         self.worktree.mkdir(parents=True)
         self.runner = RecordingRunner()
@@ -122,8 +122,16 @@ class LaunchFixtureTests(unittest.TestCase):
         for fixture in FIXTURES:
             self.launch_builder(self.blockers_file(fixture))
             env: dict[str, str] = self.runner.calls[-1]["env"]  # type: ignore[assignment]
-            self.assertEqual(env["GH_TOKEN"], BUILDER_TOKEN)
+            self.assertNotIn("GH_TOKEN", env)
+            self.assertNotIn(BUILDER_TOKEN, json.dumps(env))
             self.assertTrue(carries_none_of(env, FORBIDDEN_VALUES))
+
+    def test_no_fixture_can_reach_a_credential_through_the_capability_channel(self) -> None:
+        for fixture in FIXTURES:
+            self.launch_builder(self.blockers_file(fixture))
+            env: dict[str, str] = self.runner.calls[-1]["env"]  # type: ignore[assignment]
+            self.assertTrue(env[CAPABILITY_CHANNEL].endswith(".sock"))
+            self.assertNotIn(BUILDER_TOKEN, env[CAPABILITY_CHANNEL])
 
     def test_a_fixture_cannot_swap_which_identity_a_role_runs_as(self) -> None:
         for fixture in FIXTURES:
@@ -137,7 +145,9 @@ class LaunchFixtureTests(unittest.TestCase):
                 timeout=None,
             )
             env: dict[str, str] = self.runner.calls[-1]["env"]  # type: ignore[assignment]
-            self.assertEqual(env["GH_TOKEN"], REVIEWER_TOKEN)
+            self.assertNotIn("GH_TOKEN", env)
+            self.assertNotIn(REVIEWER_TOKEN, json.dumps(env))
+            self.assertNotIn(BUILDER_TOKEN, json.dumps(env))
 
 
 class PromptContractTests(unittest.TestCase):
@@ -186,8 +196,9 @@ class PromptContractTests(unittest.TestCase):
 
     def test_the_builder_is_bound_to_one_branch_and_one_pull_request(self) -> None:
         prompt = self.builder()
-        self.assertIn("push it to feat/example in example/repo", prompt)
-        self.assertIn("Push nothing else, nowhere else", prompt)
+        self.assertIn("it can only reach feat/example in example/repo", prompt)
+        self.assertIn("pr-prover-cap push", prompt)
+        self.assertIn("You have no GitHub token", prompt)
 
     def test_the_reviewer_is_told_it_is_read_only_and_not_the_merge_gate(self) -> None:
         prompt = self.reviewer()
@@ -217,7 +228,7 @@ class WholeRunFixtureTests(unittest.TestCase):
         self.script = LaneScript()
         self.runner = FakeRunner(self.remote, self.script)
         self.github = FakeGitHub(self.remote)
-        self.config = make_config(self.tmp, source_repo=make_source_repo(self.tmp), scoped=True)
+        self.config = make_config(self.tmp, source_repo=make_source_repo(self.tmp))
         self.broker = make_broker(self.config, self.runner, scratch_root=self.tmp / "scratch")
         self.addCleanup(self.broker.close)
         source = SourceRepo(runner=self.runner, path=self.config.source_repo)

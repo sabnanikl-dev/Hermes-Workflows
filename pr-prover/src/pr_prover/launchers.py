@@ -2,12 +2,28 @@
 
 Every lane the loop runs — a baseline gate, a reviewer, the builder — is
 launched through :class:`LaunchBroker`. The broker builds the child's
-environment from nothing (:mod:`.childenv`), hands over at most the one scoped
-identity that lane owns (:mod:`.identities`), and, for an agent lane, builds the
-whole argv array itself from a code-owned prompt (:mod:`.prompts`).
+environment from nothing (:mod:`.childenv`), opens the one narrow capability
+channel that lane is entitled to (:mod:`.capabilities`), and, for an agent lane,
+builds the whole argv array itself from a code-owned prompt (:mod:`.prompts`).
 
 Launch discipline lives here as code rather than as instructions somebody
 remembers to follow:
+
+**No credential in any child.** A lane is never handed a GitHub token under any
+name. It gets the path of a launcher-owned unix socket and a shim on its
+``PATH``; the launcher, on the other side of that socket, performs exactly
+``push-branch``, ``comment-pr``, and ``review-pr`` against the bound repository,
+pull request, branch, and head. A child cannot merge, cannot push another ref or
+another repository, and cannot approve a review, because none of those is an
+operation it can name.
+
+**A synthetic HOME.** No child inherits the operator's home directory. The
+launcher builds one per lane under its own scratch and points every
+configuration-discovery variable it knows about — ``GH_CONFIG_DIR``,
+``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM``, ``CLAUDE_CONFIG_DIR``,
+``GNUPGHOME``, and the four XDG directories — inside it. Only material named in
+:data:`REVIEWED_HOME_MATERIAL` is copied in, and that list is empty: adding to it
+is a code change, not a configuration one.
 
 **Empty MCP.** Every agent lane is launched with ``--strict-mcp-config`` and an
 ``--mcp-config`` file this module wrote containing no servers, so a project or
@@ -30,12 +46,15 @@ parses it. A spinner frame must not be able to hide, or forge, the final line.
 :mod:`.verdicts` — unchanged — is what reads it. Nothing here interprets a
 lane's claims.
 
-Two refusals are worth naming. A caller may not pass an environment into
+Three refusals are worth naming. A caller may not pass an environment into
 :meth:`LaunchBroker.run_gate` and friends: an environment assembled anywhere
-else is exactly the runtime override that would put the authority back. And a
+else is exactly the runtime override that would put the authority back. A
 composed agent argv is re-scanned for authority-broadening flags before launch,
 so a future edit that threads ``--dangerously-skip-permissions`` or
-``--add-dir`` in from configuration fails closed instead of shipping.
+``--add-dir`` in from configuration fails closed instead of shipping. And a
+reviewer or builder lane without a scoped identity is refused outright, script
+lane or agent lane alike — a lane with nothing to act as has nothing to prove
+afterwards.
 
 Nothing here trusts a child's own account of what it did. The broker proves
 which account a credential is *before* the launch; the loop proves what landed
@@ -44,6 +63,7 @@ on GitHub *after* it.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import stat
@@ -52,7 +72,14 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .childenv import EnvironmentPolicy
+from .capabilities import (
+    SHIM_NAME,
+    CapabilityBroker,
+    CapabilityChannel,
+    CapabilityScope,
+    write_shim,
+)
+from .childenv import CAPABILITY_CHANNEL, HOME_GUARDS, EnvironmentPolicy
 from .commands import CommandResult, CommandRunner, validate_argv
 from .errors import LaunchPolicyError
 from .identities import (
@@ -81,6 +108,12 @@ REVIEWER_TOOLS = ("Bash", "Glob", "Grep", "Read", "TodoWrite")
 # absent on purpose: both dissolve the tool boundary the allowlist just drew.
 PERMISSION_MODES = ("acceptEdits", "dontAsk", "manual", "plan")
 
+# What may be copied from the operator's home into a synthetic one, as paths
+# relative to both. Empty, and meant to stay that way: every candidate is a file
+# somebody has to read and certify carries no credential and no client data.
+# Widening this is a code change that shows up in review, not a config key.
+REVIEWED_HOME_MATERIAL: tuple[str, ...] = ()
+
 # Flags that would widen a child's authority past what this module grants,
 # whatever composed them.
 FORBIDDEN_FLAGS = (
@@ -104,6 +137,7 @@ FORBIDDEN_FLAGS = (
 _EMPTY_MCP = {"mcpServers": {}}
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
 _SLUG = re.compile(r"[^a-z0-9_-]+")
+_FALLBACK_PATH = "/usr/bin:/bin"
 
 
 @dataclass(frozen=True)
@@ -134,6 +168,9 @@ class BoundContext:
             "PR_PROVER_BASE": self.base,
             "PR_PROVER_HEAD": self.head,
         }
+
+    def scope(self) -> CapabilityScope:
+        return CapabilityScope(repo=self.repo, pr=self.pr, branch=self.branch, head=self.head)
 
 
 def quiet(text: str) -> str:
@@ -202,15 +239,20 @@ class LaunchBroker:
         self._scratch_root = Path(scratch_root) if scratch_root else None
         self._on_event = on_event
         self._scratch: Path | None = None
+        self._shim: Path | None = None
         self._resolved: dict[str, ResolvedIdentity] = {}
         self._verified: set[str] = set()
+        self._open_channels: list[CapabilityChannel] = []
+        self.channels: list[CapabilityChannel] = []
 
     # -- lanes -------------------------------------------------------------
     def run_gate(
         self, *, name: str, argv: Sequence[str], cwd: Path, timeout: float | None
     ) -> CommandResult:
-        """Run a repository gate with no GitHub identity at all."""
-        env = self._environment(identity=None, cwd=cwd, bound=None, lane=f"gate {name}")
+        """Run a repository gate with no GitHub identity and no capability channel."""
+        lane = f"gate {name}"
+        self._assert_isolated(cwd, lane=lane)
+        env = self._environment(identity=None, cwd=cwd, bound=None, lane=lane, channel=None)
         return self._launch(assert_launchable(argv), cwd=cwd, env=env, timeout=timeout)
 
     def run_reviewer(
@@ -226,24 +268,37 @@ class LaunchBroker:
     ) -> CommandResult:
         """Run one fresh reviewer lane against the exact head."""
         lane = f"reviewer {role}"
+        self._assert_isolated(cwd, lane=lane)
         resolved = self._identity_for(lane, identity, required=REVIEWER_CAPABILITIES)
-        env = self._environment(
-            identity=resolved, cwd=cwd, bound=bound, lane=lane, extra={"PR_PROVER_ROLE": role}
-        )
-        if agent is None:
-            return self._launch(
-                assert_launchable(_required(argv, lane=lane)), cwd=cwd, env=env, timeout=timeout
+        self._verify(resolved, lane=lane, repo=bound.repo)
+        with self._channel(lane=lane, identity=resolved, bound=bound, cwd=cwd) as channel:
+            env = self._environment(
+                identity=resolved,
+                cwd=cwd,
+                bound=bound,
+                lane=lane,
+                channel=channel,
+                extra={"PR_PROVER_ROLE": role},
             )
-        prompt = reviewer_prompt(
-            repo=bound.repo,
-            pr=bound.pr,
-            branch=bound.branch,
-            head=bound.head,
-            worktree=str(cwd),
-            login=_identified(resolved, lane=lane).login,
-            role=role,
-        )
-        return self._launch_agent(agent, prompt=prompt, cwd=cwd, env=env, timeout=timeout, lane=lane)
+            if agent is None:
+                return self._launch(
+                    assert_launchable(_required(argv, lane=lane)),
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout,
+                )
+            prompt = reviewer_prompt(
+                repo=bound.repo,
+                pr=bound.pr,
+                branch=bound.branch,
+                head=bound.head,
+                worktree=str(cwd),
+                login=resolved.login,
+                role=role,
+            )
+            return self._launch_agent(
+                agent, prompt=prompt, cwd=cwd, env=env, timeout=timeout, lane=lane
+            )
 
     def run_builder(
         self,
@@ -261,42 +316,55 @@ class LaunchBroker:
     ) -> CommandResult:
         """Run the direct-write fix lane against the bound branch."""
         lane = f"builder ({mode})"
+        self._assert_isolated(cwd, lane=lane)
         resolved = self._identity_for(lane, identity, required=BUILDER_CAPABILITIES)
-        env = self._environment(
-            identity=resolved,
-            cwd=cwd,
-            bound=bound,
-            lane=lane,
-            extra={
-                "PR_PROVER_ATTEMPT": str(attempt),
-                "PR_PROVER_MODE": mode,
-                "PR_PROVER_BLOCKERS_FILE": str(blockers_file),
-            },
-        )
-        if agent is None:
-            return self._launch(
-                assert_launchable(_required(argv, lane=lane)), cwd=cwd, env=env, timeout=timeout
+        self._verify(resolved, lane=lane, repo=bound.repo)
+        with self._channel(lane=lane, identity=resolved, bound=bound, cwd=cwd) as channel:
+            env = self._environment(
+                identity=resolved,
+                cwd=cwd,
+                bound=bound,
+                lane=lane,
+                channel=channel,
+                extra={
+                    "PR_PROVER_ATTEMPT": str(attempt),
+                    "PR_PROVER_MODE": mode,
+                    "PR_PROVER_BLOCKERS_FILE": str(blockers_file),
+                },
             )
-        prompt = builder_prompt(
-            repo=bound.repo,
-            pr=bound.pr,
-            branch=bound.branch,
-            head=bound.head,
-            worktree=str(cwd),
-            login=_identified(resolved, lane=lane).login,
-            attempt=attempt,
-            mode=mode,
-            blockers_file=str(blockers_file),
-            signature=signature,
-        )
-        return self._launch_agent(agent, prompt=prompt, cwd=cwd, env=env, timeout=timeout, lane=lane)
+            if agent is None:
+                return self._launch(
+                    assert_launchable(_required(argv, lane=lane)),
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout,
+                )
+            prompt = builder_prompt(
+                repo=bound.repo,
+                pr=bound.pr,
+                branch=bound.branch,
+                head=bound.head,
+                worktree=str(cwd),
+                login=resolved.login,
+                attempt=attempt,
+                mode=mode,
+                blockers_file=str(blockers_file),
+                signature=signature,
+            )
+            return self._launch_agent(
+                agent, prompt=prompt, cwd=cwd, env=env, timeout=timeout, lane=lane
+            )
 
     # -- identities --------------------------------------------------------
     def _identity_for(
         self, lane: str, name: str | None, *, required: frozenset[str]
-    ) -> ResolvedIdentity | None:
+    ) -> ResolvedIdentity:
         if name is None:
-            return None
+            raise LaunchPolicyError(
+                "a reviewer or builder lane must be bound to one scoped identity; a lane "
+                "with no identity has no capability channel and nothing to read back",
+                evidence={"lane": lane, "known": sorted(self._identities)},
+            )
         spec = self._identities.get(name)
         if spec is None:
             raise LaunchPolicyError(
@@ -318,7 +386,7 @@ class LaunchBroker:
             self._event(f"{lane}: resolved identity {name} ({spec.login}) from {spec.source_name}")
         return self._resolved[name]
 
-    def _verify(self, identity: ResolvedIdentity, env: Mapping[str, str], *, lane: str, repo: str) -> None:
+    def _verify(self, identity: ResolvedIdentity, *, lane: str, repo: str) -> None:
         """Prove the credential is this account, with no authority beyond its capabilities."""
         if identity.spec.name in self._verified:
             return
@@ -328,13 +396,58 @@ class LaunchBroker:
                 "prove which account it is; refusing to launch on an unverified credential",
                 evidence={"lane": lane, "identity": identity.spec.name},
             )
-        facts = self._verifier.facts(env, repo=repo)
+        facts = self._verifier.facts(self.broker_env(identity), repo=repo)
         assert_scope(identity, facts, repo=repo, lane=lane)
         self._verified.add(identity.spec.name)
         self._event(
             f"{lane}: credential verified as {facts.login} with "
             f"{sorted(name for name, held in facts.permissions.items() if held)} on {repo}"
         )
+
+    def broker_env(self, identity: ResolvedIdentity) -> dict[str, str]:
+        """The launcher-side environment the capability broker acts with.
+
+        Never handed to a child. It carries the scoped credential and points
+        ``gh`` and ``git`` at launcher-owned configuration rather than the
+        operator's, so the broker acts as exactly this identity too.
+        """
+        home = self._home_for(f"broker-{_slug(identity.spec.name)}", identity=identity)
+        return identity.broker_env(
+            {
+                "PATH": self._parent_env.get("PATH", _FALLBACK_PATH),
+                "LANG": self._parent_env.get("LANG", "C"),
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                **{name: value for name, value in home.items() if name != "GIT_CONFIG_SYSTEM"},
+            }
+        )
+
+    # -- capability channel -------------------------------------------------
+    def _channel(
+        self, *, lane: str, identity: ResolvedIdentity, bound: BoundContext, cwd: Path
+    ) -> CapabilityChannel:
+        """Open this lane's capability channel. Closed again when the lane ends."""
+        broker = CapabilityBroker(
+            runner=self._runner,
+            scope=bound.scope(),
+            capabilities=identity.spec.capabilities,
+            worktree=Path(cwd),
+            credential_env=self.broker_env(identity),
+            scratch=self._scratch_dir(),
+            on_event=self._on_event,
+        )
+        channel = _TrackedChannel(broker, label=_slug(lane), broker_owner=self)
+        self._open_channels.append(channel)
+        self.channels.append(channel)
+        self._event(
+            f"{lane}: capability channel open for {sorted(identity.spec.capabilities)} on "
+            f"{bound.repo}#{bound.pr} {bound.branch}@{bound.head[:12]}"
+        )
+        return channel
+
+    def _forget_channel(self, channel: CapabilityChannel) -> None:
+        if channel in self._open_channels:
+            self._open_channels.remove(channel)
 
     # -- environment -------------------------------------------------------
     def _environment(
@@ -344,11 +457,13 @@ class LaunchBroker:
         cwd: Path,
         bound: BoundContext | None,
         lane: str,
+        channel: CapabilityChannel | None,
         extra: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
-        self._assert_isolated(cwd, lane=lane)
-        slug = _slug(identity.spec.name if identity else "anonymous")
-        inject = self._toolchain_guards(slug, identity)
+        inject = self._home_for(_slug(lane), identity=identity)
+        inject["PATH"] = self._child_path()
+        if channel is not None:
+            inject[CAPABILITY_CHANNEL] = str(channel.path)
         overrides: dict[str, str] = {
             "CI": "1",
             "NO_COLOR": "1",
@@ -357,37 +472,91 @@ class LaunchBroker:
             "PAGER": "cat",
             "COLUMNS": "200",
             "GIT_TERMINAL_PROMPT": "0",
+            # A reviewer worktree is marked read-only; bytecode files written
+            # into it would be a mutation the run then has to explain.
+            "PYTHONDONTWRITEBYTECODE": "1",
         }
         if bound is not None:
             overrides.update(bound.env())
         overrides.update(extra or {})
         overrides["PR_PROVER_LANE"] = lane
-        if identity is not None:
-            inject.update(identity.injection())
-        env = self._policy.build(self._parent_env, inject=inject, overrides=overrides)
-        if identity is not None and bound is not None:
-            self._verify(identity, env, lane=lane, repo=bound.repo)
-        return env
+        return self._policy.build(self._parent_env, inject=inject, overrides=overrides)
 
-    def _toolchain_guards(self, slug: str, identity: ResolvedIdentity | None) -> dict[str, str]:
-        """Point ``gh`` and ``git`` at launcher-owned configuration.
+    def _home_for(self, slug: str, *, identity: ResolvedIdentity | None) -> dict[str, str]:
+        """Build one synthetic home and return the variables that point inside it.
 
-        Without this, a child that inherits ``HOME`` reaches the operator's
-        ``gh`` login and the OS keychain, and the scoped credential becomes
-        decoration.
+        A child never sees the operator's home directory. ``gh``, ``git``,
+        ``gpg``, the model client, and everything that follows the XDG
+        convention are all pointed at directories this launcher made, so a
+        toolchain that goes looking for stored credentials finds an empty tree
+        rather than the operator's.
         """
-        home = self._scratch_dir() / slug
-        gh_config = home / "gh"
-        gh_config.mkdir(parents=True, exist_ok=True)
-        gh_config.chmod(0o700)
-        gitconfig = home / "gitconfig"
+        home = self._scratch_dir() / "home" / slug
+        config = home / ".config"
+        gh_config = config / "gh"
+        claude_config = home / ".claude"
+        cache = home / ".cache"
+        data = home / ".local" / "share"
+        state = home / ".local" / "state"
+        gnupg = home / ".gnupg"
+        for directory in (config, gh_config, claude_config, cache, data, state, gnupg):
+            directory.mkdir(parents=True, exist_ok=True)
+            directory.chmod(0o700)
+        home.chmod(0o700)
+        self._copy_reviewed_material(home)
+        gitconfig = home / ".gitconfig"
         gitconfig.write_text(_gitconfig(identity), encoding="utf-8")
         gitconfig.chmod(0o600)
-        return {
+        guards = {
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(claude_config),
             "GH_CONFIG_DIR": str(gh_config),
             "GIT_CONFIG_GLOBAL": str(gitconfig),
             "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GNUPGHOME": str(gnupg),
+            "XDG_CACHE_HOME": str(cache),
+            "XDG_CONFIG_HOME": str(config),
+            "XDG_DATA_HOME": str(data),
+            "XDG_STATE_HOME": str(state),
         }
+        missing = sorted(set(HOME_GUARDS) - set(guards))
+        if missing:  # pragma: no cover - a build-time invariant
+            raise LaunchPolicyError(
+                "a synthetic home was built without every declared guard",
+                evidence={"missing": missing},
+            )
+        return guards
+
+    def _copy_reviewed_material(self, home: Path) -> None:
+        """Copy only what :data:`REVIEWED_HOME_MATERIAL` names, and only files."""
+        source_home = self._parent_env.get("HOME")
+        if not source_home:
+            return
+        for relative in REVIEWED_HOME_MATERIAL:
+            candidate = Path(relative)
+            if candidate.is_absolute() or ".." in candidate.parts:
+                raise LaunchPolicyError(
+                    "reviewed home material must be a relative path inside the home directory",
+                    evidence={"path": relative},
+                )
+            origin = Path(source_home) / candidate
+            if not origin.is_file():
+                continue
+            target = home / candidate
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(origin, target)
+            target.chmod(0o600)
+            self._event(f"synthetic home: copied reviewed material {relative}")
+
+    def _child_path(self) -> str:
+        """The child's ``PATH``: the capability shim first, then the operator's."""
+        inherited = self._parent_env.get("PATH") or _FALLBACK_PATH
+        return os.pathsep.join([str(self._shim_dir()), inherited])
+
+    def _shim_dir(self) -> Path:
+        if self._shim is None:
+            self._shim = write_shim(self._scratch_dir() / "bin").parent
+        return self._shim
 
     def _assert_isolated(self, cwd: Path, *, lane: str) -> None:
         path = Path(cwd).resolve()
@@ -429,7 +598,10 @@ class LaunchBroker:
                 },
             )
         argv = assert_launchable(self._agent_argv(agent, prompt))
-        self._event(f"{lane}: launched with an empty MCP config, tools {list(agent.tools)}, budget {int(budget)}s")
+        self._event(
+            f"{lane}: launched with an empty MCP config, tools {list(agent.tools)}, "
+            f"budget {int(budget)}s"
+        )
         return self._launch(argv, cwd=cwd, env=env, timeout=budget)
 
     def _agent_argv(self, agent: AgentSpec, prompt: str) -> tuple[str, ...]:
@@ -507,11 +679,22 @@ class LaunchBroker:
         return path
 
     def close(self) -> None:
-        """Remove the launcher's scratch directory, credentials on disk included."""
+        """Close every channel, then remove the launcher's scratch directory.
+
+        Order matters. :class:`~.commands.SubprocessRunner` does not return
+        until a lane's whole process group is gone, so by the time this runs no
+        descendant is still holding a socket or a synthetic home — but the
+        channels are closed first regardless, so the scratch tree is removed
+        only after nothing is listening on anything inside it.
+        """
+        for channel in list(self._open_channels):
+            channel.close()
+        self._open_channels.clear()
         if self._scratch is None:
             return
         shutil.rmtree(self._scratch, ignore_errors=True)
         self._scratch = None
+        self._shim = None
 
     def observe(self, on_event: Callable[[str], None]) -> None:
         """Send launch events to a caller's log. Carries names, never credentials."""
@@ -522,14 +705,16 @@ class LaunchBroker:
             self._on_event(message)
 
 
-def _identified(identity: ResolvedIdentity | None, *, lane: str) -> ResolvedIdentity:
-    """An agent lane without a scoped identity has nothing to act as. Fail closed."""
-    if identity is None:
-        raise LaunchPolicyError(
-            "an agent lane must be bound to one scoped identity",
-            evidence={"lane": lane},
-        )
-    return identity
+class _TrackedChannel(CapabilityChannel):
+    """A channel that tells its broker when it closes, so ``close()`` is exact."""
+
+    def __init__(self, broker: CapabilityBroker, *, label: str, broker_owner: LaunchBroker) -> None:
+        self._owner = broker_owner
+        super().__init__(broker, label=label)
+
+    def close(self) -> None:
+        super().close()
+        self._owner._forget_channel(self)
 
 
 def _required(argv: Sequence[str] | None, *, lane: str) -> Sequence[str]:
@@ -544,23 +729,21 @@ def _required(argv: Sequence[str] | None, *, lane: str) -> Sequence[str]:
 def _gitconfig(identity: ResolvedIdentity | None) -> str:
     """The child's whole git configuration.
 
-    Credential helpers are cleared first, so the OS keychain and any inherited
-    helper are unreachable. A lane that may push gets exactly one helper back:
-    ``gh``, which can only offer the scoped token this launcher injected. A lane
-    with no push capability gets no helper at all, so an attempted push fails
-    for want of a credential rather than on trust.
+    Credential helpers are cleared and none is ever put back. A child holds no
+    GitHub credential, so there is nothing for a helper to offer: a direct
+    ``git push`` from a lane fails for want of a credential, and the only push
+    that can succeed is the one the launcher performs over the capability
+    channel, against the bound branch of the bound repository.
     """
     lines = [
         "# Written by pr-prover for one child launch. The child inherits no other",
-        "# git configuration: GIT_CONFIG_SYSTEM is /dev/null and HOME's config is",
-        "# overridden by GIT_CONFIG_GLOBAL.",
+        "# git configuration: GIT_CONFIG_SYSTEM is /dev/null, HOME is a synthetic",
+        "# directory this launcher made, and GIT_CONFIG_GLOBAL points here.",
         "[credential]",
         "\thelper =",
         '[credential "https://github.com"]',
         "\thelper =",
     ]
-    if identity is not None and "push-branch" in identity.spec.capabilities:
-        lines.append("\thelper = !gh auth git-credential")
     if identity is not None:
         lines += [
             "[user]",
@@ -587,7 +770,9 @@ __all__ = [
     "DEFAULT_BUDGET",
     "FORBIDDEN_FLAGS",
     "PERMISSION_MODES",
+    "REVIEWED_HOME_MATERIAL",
     "REVIEWER_TOOLS",
+    "SHIM_NAME",
     "AgentSpec",
     "BoundContext",
     "LaunchBroker",

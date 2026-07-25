@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import fields
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -59,8 +60,10 @@ class SpecTests(unittest.TestCase):
         with self.assertRaises(IdentityError):
             builder_spec(token_file=Path("/tmp/token"))
 
-    def test_an_identity_cannot_be_injected_as_github_authority(self) -> None:
-        with self.assertRaises(IdentityError):
+    def test_an_identity_has_no_injection_name_to_choose(self) -> None:
+        """PAPI90-P1-008: there is no inject_as, because nothing is injected."""
+        self.assertNotIn("inject_as", {field.name for field in fields(IdentitySpec)})
+        with self.assertRaises(TypeError):
             builder_spec(inject_as="GITHUB_TOKEN")
 
     def test_the_source_name_never_carries_the_credential(self) -> None:
@@ -71,7 +74,15 @@ class ResolveTests(unittest.TestCase):
     def test_a_credential_is_read_from_the_named_variable(self) -> None:
         identity = resolve(builder_spec(), {"PR_PROVER_BUILDER_TOKEN": BUILDER_TOKEN})
         self.assertEqual(identity.token, BUILDER_TOKEN)
-        self.assertEqual(identity.injection(), {"GH_TOKEN": BUILDER_TOKEN})
+        self.assertFalse(hasattr(identity, "injection"))
+
+    def test_the_credential_lives_only_in_the_launcher_side_broker_environment(self) -> None:
+        """PAPI90-P1-001: the token is the broker's, never a child's."""
+        identity = resolve(builder_spec(), {"PR_PROVER_BUILDER_TOKEN": BUILDER_TOKEN})
+        broker = identity.broker_env({"PATH": "/usr/bin"})
+        self.assertEqual(broker["GH_TOKEN"], BUILDER_TOKEN)
+        self.assertNotIn(BUILDER_TOKEN, repr(identity))
+        self.assertNotIn(BUILDER_TOKEN, str(identity.as_evidence()))
 
     def test_a_missing_variable_fails_closed(self) -> None:
         with self.assertRaises(IdentityError) as caught:

@@ -391,13 +391,28 @@ class ConfigTests(unittest.TestCase):
             "lock_file": "run.lock",
             "gates": [{"name": "tests", "argv": ["make", "test"]}],
             "reviewers": [
-                {"name": "A", "argv": ["reviewer-a", "{head}"]},
-                {"name": "B", "argv": ["reviewer-b", "{head}"]},
+                {"name": "A", "identity": "reviewer", "argv": ["reviewer-a", "{head}"]},
+                {"name": "B", "identity": "reviewer", "argv": ["reviewer-b", "{head}"]},
             ],
             "builder": {
+                "identity": "builder",
                 "argv": ["builder", "{blockers_file}"],
                 "signature": "Fixed by: Claude Code",
                 "comment_author": BUILDER_LOGIN,
+            },
+            "launch": {
+                "identities": {
+                    "builder": {
+                        "login": BUILDER_LOGIN,
+                        "capabilities": ["push-branch", "comment-pr"],
+                        "token_env": "PR_PROVER_BUILDER_TOKEN",
+                    },
+                    "reviewer": {
+                        "login": "karanagent1",
+                        "capabilities": ["comment-pr", "review-pr"],
+                        "token_env": "PR_PROVER_REVIEWER_TOKEN",
+                    },
+                }
             },
         }
         body.update(overrides)
@@ -487,12 +502,16 @@ class ConfigTests(unittest.TestCase):
                     )
 
     def test_a_bot_login_is_accepted_as_the_builder_comment_author(self) -> None:
+        launch = self.payload()["launch"]
+        launch["identities"]["builder"]["login"] = "hermes-builder[bot]"
         config = self.load(
+            launch=launch,
             builder={
+                "identity": "builder",
                 "argv": ["builder"],
                 "signature": "Fixed by: Claude Code",
                 "comment_author": "hermes-builder[bot]",
-            }
+            },
         )
         self.assertEqual(config.builder.comment_author, "hermes-builder[bot]")
 
@@ -531,14 +550,29 @@ class CliTests(unittest.TestCase):
                     "lock_file": str(self.tmp / "run.lock"),
                     "gates": [],
                     "reviewers": [
-                        {"name": "A", "argv": ["reviewer-a", "{head}"]},
-                        {"name": "B", "argv": ["reviewer-b", "{head}"]},
+                        {"name": "A", "identity": "reviewer", "argv": ["reviewer-a", "{head}"]},
+                        {"name": "B", "identity": "reviewer", "argv": ["reviewer-b", "{head}"]},
                     ],
                     "builder": {
-                "argv": ["builder", "{blockers_file}"],
-                "signature": "Fixed by: Claude Code",
-                "comment_author": BUILDER_LOGIN,
-            },
+                        "identity": "builder",
+                        "argv": ["builder", "{blockers_file}"],
+                        "signature": "Fixed by: Claude Code",
+                        "comment_author": BUILDER_LOGIN,
+                    },
+                    "launch": {
+                        "identities": {
+                            "builder": {
+                                "login": BUILDER_LOGIN,
+                                "capabilities": ["push-branch", "comment-pr"],
+                                "token_env": "PR_PROVER_BUILDER_TOKEN",
+                            },
+                            "reviewer": {
+                                "login": "karanagent1",
+                                "capabilities": ["comment-pr", "review-pr"],
+                                "token_env": "PR_PROVER_REVIEWER_TOKEN",
+                            },
+                        }
+                    },
                 }
             ),
             encoding="utf-8",

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,7 +22,7 @@ from _support import (
     parent_env,
 )
 
-from pr_prover.childenv import carries_none_of
+from pr_prover.childenv import CAPABILITY_CHANNEL, HOME_GUARDS, carries_none_of
 from pr_prover.commands import CommandResult
 from pr_prover.errors import IdentityError, LaunchPolicyError
 from pr_prover.launchers import (
@@ -30,6 +31,7 @@ from pr_prover.launchers import (
     DEFAULT_BUDGET,
     AgentSpec,
     BoundContext,
+    SHIM_NAME,
     LaunchBroker,
     assert_launchable,
     quiet,
@@ -71,7 +73,7 @@ class LauncherTestCase(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
-        self.config = make_config(self.tmp, source_repo=make_source_repo(self.tmp), scoped=True)
+        self.config = make_config(self.tmp, source_repo=make_source_repo(self.tmp))
         self.worktree = self.config.worktree_root / "attempt1"
         self.worktree.mkdir(parents=True)
         self.runner = RecordingRunner()
@@ -195,18 +197,31 @@ class AgentArgvTests(LauncherTestCase):
 
 
 class ChildEnvironmentTests(LauncherTestCase):
-    def test_the_builder_gets_exactly_its_own_scoped_credential(self) -> None:
+    def test_the_builder_gets_no_credential_only_a_capability_channel(self) -> None:
+        """PAPI90-P1-001: a child holds no GitHub token under any name."""
         self.run_builder()
-        self.assertEqual(self.env["GH_TOKEN"], BUILDER_TOKEN)
-
-    def test_the_reviewer_gets_its_own_credential_and_not_the_builders(self) -> None:
-        self.run_reviewer()
-        self.assertEqual(self.env["GH_TOKEN"], REVIEWER_TOKEN)
+        self.assertNotIn("GH_TOKEN", self.env)
+        self.assertNotIn("GITHUB_TOKEN", self.env)
         self.assertNotIn(BUILDER_TOKEN, json.dumps(self.env))
+        self.assertTrue(self.env[CAPABILITY_CHANNEL].endswith(".sock"))
 
-    def test_a_gate_gets_no_github_credential_at_all(self) -> None:
+    def test_the_reviewer_gets_neither_credential(self) -> None:
+        self.run_reviewer()
+        self.assertNotIn("GH_TOKEN", self.env)
+        self.assertNotIn(REVIEWER_TOKEN, json.dumps(self.env))
+        self.assertNotIn(BUILDER_TOKEN, json.dumps(self.env))
+        self.assertIn(CAPABILITY_CHANNEL, self.env)
+
+    def test_the_capability_shim_is_first_on_every_lane_path(self) -> None:
+        self.run_builder()
+        first = self.env["PATH"].split(os.pathsep)[0]
+        self.assertEqual(Path(first).name, "bin")
+        self.assertIn(SHIM_NAME, [entry.name for entry in Path(first).iterdir()])
+
+    def test_a_gate_gets_no_github_credential_and_no_capability_channel(self) -> None:
         self.broker.run_gate(name="tests", argv=["make", "test"], cwd=self.worktree, timeout=60)
         self.assertNotIn("GH_TOKEN", self.env)
+        self.assertNotIn(CAPABILITY_CHANNEL, self.env)
 
     def test_no_child_environment_carries_merge_approval_jmd_or_deploy_credentials(self) -> None:
         self.run_builder()
@@ -241,6 +256,44 @@ class ChildEnvironmentTests(LauncherTestCase):
         self.assertEqual(self.env["TERM"], "dumb")
         self.assertEqual(self.env["GIT_TERMINAL_PROMPT"], "0")
 
+    def test_every_lane_gets_a_synthetic_home_not_the_operators(self) -> None:
+        """PAPI90-P1-002: HOME is the launcher's, and every guard points inside it."""
+        self.run_builder()
+        home = Path(self.env["HOME"])
+        self.assertNotEqual(str(home), parent_env()["HOME"])
+        self.assertTrue(home.is_dir())
+        self.assertTrue(home.is_relative_to(self.tmp))
+        for guard in HOME_GUARDS:
+            self.assertIn(guard, self.env, guard)
+            if guard != "GIT_CONFIG_SYSTEM":
+                self.assertTrue(Path(self.env[guard]).is_relative_to(home), guard)
+
+    def test_a_secret_in_the_operators_home_is_not_reachable_through_the_childs(self) -> None:
+        """PAPI90-P1-002: nothing under the operator's home is copied or pointed at."""
+        operator_home = self.tmp / "operator-home"
+        (operator_home / ".config" / "gh").mkdir(parents=True)
+        (operator_home / ".config" / "gh" / "hosts.yml").write_text(
+            "github.com:\n  oauth_token: ghp_" + "s" * 36 + "\n", encoding="utf-8"
+        )
+        broker = self.make_broker(env=parent_env(HOME=str(operator_home)))
+        broker.run_builder(
+            identity="builder",
+            agent=BUILDER_AGENT,
+            argv=None,
+            bound=BOUND,
+            cwd=self.worktree,
+            timeout=None,
+            attempt=1,
+            mode="initial",
+            blockers_file=self.tmp / "blockers.json",
+            signature="Fixed by: a signature long enough",
+        )
+        env = self.runner.last["env"]
+        self.assertNotEqual(env["HOME"], str(operator_home))
+        self.assertFalse(Path(env["GH_CONFIG_DIR"]).is_relative_to(operator_home))
+        self.assertEqual(list(Path(env["GH_CONFIG_DIR"]).iterdir()), [])
+        self.assertTrue(carries_none_of(env, [str(operator_home)]))
+
     def test_gh_and_git_are_pointed_at_launcher_owned_configuration(self) -> None:
         self.run_builder()
         self.assertTrue(Path(self.env["GH_CONFIG_DIR"]).is_dir())
@@ -249,15 +302,17 @@ class ChildEnvironmentTests(LauncherTestCase):
         self.assertIn("[credential]", gitconfig)
         self.assertIn(BUILDER_LOGIN, gitconfig)
 
-    def test_a_lane_that_may_push_gets_one_credential_helper_and_only_gh(self) -> None:
-        self.run_builder()
-        gitconfig = Path(self.env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
-        self.assertIn("helper = !gh auth git-credential", gitconfig)
+    def test_no_lane_gets_a_credential_helper_at_all(self) -> None:
+        """PAPI90-P1-001: even the pushing lane has nothing for a helper to offer."""
+        for lane in (self.run_builder, self.run_reviewer):
+            lane()
+            gitconfig = Path(self.env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+            self.assertNotIn("gh auth git-credential", gitconfig)
+            self.assertIn("[credential]", gitconfig)
 
-    def test_a_lane_that_may_not_push_gets_no_credential_helper(self) -> None:
+    def test_a_lane_still_commits_under_its_own_login(self) -> None:
         self.run_reviewer()
         gitconfig = Path(self.env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
-        self.assertNotIn("gh auth git-credential", gitconfig)
         self.assertIn(REVIEWER_LOGIN, gitconfig)
 
     def test_the_credential_never_reaches_the_child_through_a_file_anyone_can_read(self) -> None:

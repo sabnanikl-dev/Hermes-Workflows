@@ -117,5 +117,52 @@ class WorktreeProviderTests(unittest.TestCase):
         self.assertEqual(self.provider.created, ())
 
 
+class SealTests(WorktreeProviderTests):
+    """PAPI90-P1-005: a reviewer's worktree is read-only at the filesystem."""
+
+    def sealed(self) -> Path:
+        path = self.provider.create("review-a", HEAD_A)
+        (path / "src").mkdir()
+        (path / "src" / "app.py").write_text("print('hi')\n", encoding="utf-8")
+        self.provider.seal(path)
+        return path
+
+    def test_a_sealed_worktree_refuses_a_write_to_a_tracked_file(self) -> None:
+        path = self.sealed()
+        with self.assertRaises(PermissionError):
+            (path / "src" / "app.py").write_text("mutated\n", encoding="utf-8")
+
+    def test_a_sealed_worktree_refuses_a_new_file(self) -> None:
+        path = self.sealed()
+        with self.assertRaises(PermissionError):
+            (path / "src" / "notes.md").write_text("scratch\n", encoding="utf-8")
+
+    def test_a_sealed_worktree_is_still_readable_and_traversable(self) -> None:
+        path = self.sealed()
+        self.assertEqual((path / "src" / "app.py").read_text(encoding="utf-8"), "print('hi')\n")
+        self.assertEqual([entry.name for entry in (path / "src").iterdir()], ["app.py"])
+
+    def test_unsealing_gives_the_owner_write_access_back(self) -> None:
+        path = self.sealed()
+        self.provider.unseal(path)
+        (path / "src" / "app.py").write_text("mutated\n", encoding="utf-8")
+        self.assertEqual((path / "src" / "app.py").read_text(encoding="utf-8"), "mutated\n")
+
+    def test_a_sealed_worktree_can_still_be_removed(self) -> None:
+        path = self.sealed()
+        self.provider.remove(path)
+        self.assertFalse(path.exists())
+
+    def test_sealing_a_worktree_this_run_did_not_create_is_refused(self) -> None:
+        foreign = self.tmp / "someone-elses-worktree"
+        foreign.mkdir()
+        (foreign / "file").write_text("theirs\n", encoding="utf-8")
+        for change in (self.provider.seal, self.provider.unseal):
+            with self.assertRaises(WorktreeError) as caught:
+                change(foreign)
+            self.assertIn("did not create", caught.exception.message)
+        (foreign / "file").write_text("still writable\n", encoding="utf-8")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

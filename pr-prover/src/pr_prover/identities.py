@@ -15,12 +15,20 @@ There is deliberately no ``merge-pr``, no ``approve``, no ``deploy``, and no
 absence of merge authority is a property of the vocabulary rather than a rule
 somebody has to remember to apply.
 
-The credential itself never appears in the repository. A configuration names
-where to read it from — a parent environment variable or a file the operator
-protects — and :func:`resolve` reads it at launch time. Anything ambiguous
-about that read (missing, empty, unreadable, world-readable, more than one
-source) fails closed, because a launcher that cannot say exactly which identity
-it is about to hand over should not hand one over.
+**A capability is not a claim about a token; it is the list of operations the
+launcher will perform on this lane's behalf.** The credential resolved here
+never enters a child environment under any name. It is held in the launcher
+process and used only by :mod:`.capabilities`, which composes each operation's
+whole argv array from the bound repository, pull request, branch, and head. A
+lane with ``comment-pr`` and ``review-pr`` cannot push because there is nothing
+in its environment to push *with* and no operation it can name that would push.
+
+The credential itself never appears in the repository either. A configuration
+names where to read it from — a parent environment variable or a file the
+operator protects — and :func:`resolve` reads it at launch time. Anything
+ambiguous about that read (missing, empty, unreadable, world-readable, more than
+one source) fails closed, because a launcher that cannot say exactly which
+identity it holds should not act as one.
 
 What the identity can actually do is then checked against GitHub itself.
 :class:`IdentityVerifier` reports the login the credential resolves to and the
@@ -28,7 +36,8 @@ permissions it holds on the bound repository, and :func:`assert_scope` requires
 the login to match and the permissions to be no broader than the declared
 capabilities. A token that carries ``admin`` or ``maintain`` — the ones that
 merge, retarget branch protection, or change settings — is refused however it
-was declared.
+was declared. That check is defence in depth behind the capability broker, not
+the thing standing between a child and a merge.
 """
 from __future__ import annotations
 
@@ -40,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from .childenv import NEVER_PERMITTED, validate_env_name
+from .childenv import validate_env_name
 from .commands import CommandRunner
 from .errors import IdentityError
 
@@ -68,7 +77,6 @@ class IdentitySpec:
     capabilities: frozenset[str]
     token_env: str | None = None
     token_file: Path | None = None
-    inject_as: str = "GH_TOKEN"
 
     def __post_init__(self) -> None:
         if not _LOGIN.match(self.login):
@@ -102,12 +110,6 @@ class IdentitySpec:
             )
         if self.token_env is not None:
             validate_env_name(self.token_env, what=f"identity {self.name} token_env")
-        validate_env_name(self.inject_as, what=f"identity {self.name} inject_as")
-        if self.inject_as.upper() in NEVER_PERMITTED:
-            raise IdentityError(
-                "identity cannot be injected under that variable name",
-                evidence={"identity": self.name, "inject_as": self.inject_as},
-            )
 
     @property
     def source_name(self) -> str:
@@ -132,9 +134,15 @@ class ResolvedIdentity:
     def login(self) -> str:
         return self.spec.login
 
-    def injection(self) -> dict[str, str]:
-        """The one credential variable this identity contributes to a child."""
-        return {self.spec.inject_as: self._token}
+    def broker_env(self, base: Mapping[str, str]) -> dict[str, str]:
+        """The launcher-side environment that lets the broker act as this identity.
+
+        This is the *only* place the credential is put into an environment, and
+        that environment belongs to the launcher process: it is handed to the
+        ``git`` and ``gh`` invocations :mod:`.capabilities` composes, and never
+        to a child. A child gets a socket path and no credential at all.
+        """
+        return {**dict(base), "GH_TOKEN": self._token}
 
     def as_evidence(self) -> dict[str, object]:
         """Everything about this identity that is safe to write down."""
@@ -143,7 +151,6 @@ class ResolvedIdentity:
             "login": self.spec.login,
             "capabilities": sorted(self.spec.capabilities),
             "source": self.spec.source_name,
-            "injected_as": self.spec.inject_as,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - trivial, but it must never print a token
@@ -159,7 +166,10 @@ class IdentityFacts:
 
 
 class IdentityVerifier(Protocol):
-    """Injection seam for proving a credential is the identity it claims to be."""
+    """Injection seam for proving a credential is the identity it claims to be.
+
+    ``env`` is the launcher-side broker environment, not a child environment.
+    """
 
     def facts(self, env: Mapping[str, str], *, repo: str) -> IdentityFacts: ...
 
@@ -275,12 +285,12 @@ def assert_scope(
 
 
 class GhIdentityVerifier:
-    """Default verifier: ``gh api``, run with the child's own environment.
+    """Default verifier: ``gh api``, run with the broker's own credential environment.
 
-    Both calls use the environment the child is about to get, so what is
-    verified is the credential the child will actually hold — not the
-    operator's ambient ``gh`` login, which is precisely the authority this
-    boundary exists to keep away from children.
+    Both calls use the environment :mod:`.capabilities` will act with, so what is
+    verified is the credential the launcher will actually use on this lane's
+    behalf — not the operator's ambient ``gh`` login, which is precisely the
+    authority this boundary exists to keep out of the loop.
     """
 
     def __init__(self, runner: CommandRunner, *, gh: str = "gh", timeout: float = 120.0) -> None:

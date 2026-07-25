@@ -7,8 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _support import BUILDER_LOGIN, REVIEWER_LOGIN, make_source_repo
+from _support import (
+    BUILDER_LOGIN,
+    REVIEWER_LOGIN,
+    legacy_unscoped_payload,
+    make_source_repo,
+)
 
+from pr_prover.childenv import MODEL_AUTH_CHANNELS
 from pr_prover.cli import main
 from pr_prover.config import RunConfig
 from pr_prover.errors import ConfigError
@@ -84,6 +90,11 @@ class LaunchConfigTestCase(unittest.TestCase):
             self.load(mutate)
         return caught.exception
 
+    def refuses_payload(self, raw: dict) -> ConfigError:
+        with self.assertRaises(ConfigError) as caught:
+            RunConfig.from_mapping(raw, base_dir=self.tmp)
+        return caught.exception
+
 
 class ValidConfigTests(LaunchConfigTestCase):
     def test_a_scoped_agent_configuration_loads(self) -> None:
@@ -108,7 +119,9 @@ class ValidConfigTests(LaunchConfigTestCase):
         self.assertEqual(config.builder.argv, ("./builder.sh", "{head}"))
         self.assertEqual(config.builder.identity, "builder")
 
-    def test_a_configuration_with_no_launch_section_is_unchanged(self) -> None:
+    def test_a_legacy_unscoped_configuration_is_refused_with_a_migration_error(self) -> None:
+        """PAPI90-P1-007: an unscoped script lane can no longer be loaded at all."""
+
         def unscoped(raw: dict) -> None:
             raw.pop("launch")
             raw["builder"].pop("identity")
@@ -119,8 +132,26 @@ class ValidConfigTests(LaunchConfigTestCase):
                 reviewer.pop("agent")
                 reviewer["argv"] = ["./reviewer.sh"]
 
-        config = self.load(unscoped)
-        self.assertEqual(config.launch.identities, {})
+        error = self.refuses(unscoped)
+        self.assertIn("declares no scoped identity", error.message)
+        self.assertIn("script lanes included", error.message)
+        self.assertIn("Add launch.identities", error.message)
+
+    def test_an_unscoped_script_reviewer_is_refused_too(self) -> None:
+        def unscoped_reviewer(raw: dict) -> None:
+            for reviewer in raw["reviewers"]:
+                reviewer.pop("identity")
+                reviewer.pop("agent")
+                reviewer["argv"] = ["./reviewer.sh"]
+
+        error = self.refuses(unscoped_reviewer)
+        self.assertIn("declares no scoped identity", error.message)
+
+    def test_the_shipped_legacy_shape_is_refused(self) -> None:
+        error = self.refuses_payload(
+            legacy_unscoped_payload(self.tmp, source_repo=self.source_repo)
+        )
+        self.assertIn("declares no scoped identity", error.message)
 
 
 class LaneCommandTests(LaunchConfigTestCase):
@@ -228,12 +259,50 @@ class EnvironmentAllowlistTests(LaunchConfigTestCase):
         error = self.refuses(lambda raw: raw["launch"].update(env_allow=["DEPLOY_TOKEN"]))
         self.assertIn("credential-shaped", error.message)
 
-    def test_model_access_may_be_permitted_by_name(self) -> None:
-        config = self.load(lambda raw: raw["launch"].update(model_auth_env="ANTHROPIC_API_KEY"))
-        self.assertIn("ANTHROPIC_API_KEY", config.launch.policy.permit)
+    def test_model_access_is_chosen_by_channel_not_by_variable_name(self) -> None:
+        config = self.load(lambda raw: raw["launch"].update(model_auth="anthropic-api-key"))
+        self.assertEqual(config.launch.policy.permit, frozenset({"ANTHROPIC_API_KEY"}))
 
-    def test_github_authority_cannot_be_permitted_by_name(self) -> None:
-        self.refuses(lambda raw: raw["launch"].update(model_auth_env="GITHUB_TOKEN"))
+    def test_every_shipped_channel_loads(self) -> None:
+        for channel in MODEL_AUTH_CHANNELS:
+            config = self.load(lambda raw, channel=channel: raw["launch"].update(model_auth=channel))
+            self.assertEqual(config.launch.policy.permit, frozenset({MODEL_AUTH_CHANNELS[channel]}))
+
+    def test_no_credential_variable_can_be_named_as_a_channel(self) -> None:
+        """PAPI90-P1-003: the exact probes from the blocker, plus their siblings."""
+        for name in (
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "JMD_DEPLOY_KEY",
+            "VERCEL_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "KARAN_APPROVAL_TOKEN",
+            "SANITY_WRITE_TOKEN",
+            "N8N_API_KEY",
+            "STRIPE_SECRET",
+            "SSH_AUTH_SOCK",
+            "GIT_ASKPASS",
+            "ANTHROPIC_API_KEY",
+            "PR_PROVER_CAPABILITY_SOCKET",
+            "PATH",
+            "HOME",
+        ):
+            error = self.refuses(lambda raw, name=name: raw["launch"].update(model_auth=name))
+            self.assertIn("model-access channels", error.message, name)
+
+    def test_the_retired_model_auth_env_key_is_a_migration_error(self) -> None:
+        error = self.refuses(
+            lambda raw: raw["launch"].update(model_auth_env="ANTHROPIC_API_KEY")
+        )
+        self.assertIn("launch.model_auth_env named an arbitrary environment variable", error.message)
+        self.assertIn("code-owned channels", error.message)
+
+    def test_the_retired_inject_as_key_is_a_migration_error(self) -> None:
+        """PAPI90-P1-008: there is no injection name left to configure."""
+        error = self.refuses(
+            lambda raw: raw["launch"]["identities"]["builder"].update(inject_as="MY_TOKEN")
+        )
+        self.assertIn("No credential is injected into a child any more", error.message)
 
     def test_an_unknown_launch_key_fails_closed(self) -> None:
         self.refuses(lambda raw: raw["launch"].update(inherit_environment=True))

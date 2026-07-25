@@ -11,6 +11,8 @@ is never reused: "fresh isolated worktree" means the path did not exist.
 """
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +22,7 @@ from .errors import StaleHead, WorktreeError
 from .redaction import evidence as redact_evidence
 
 _ALLOWED_GIT_SUBCOMMANDS = frozenset({"fetch", "rev-parse", "worktree"})
+_WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
 
 
 def _is_full_sha(value: str) -> bool:
@@ -156,6 +159,31 @@ class WorktreeProvider:
         self._created.append(path)
         return path
 
+    def seal(self, path: Path) -> None:
+        """Clear every write bit under ``path``. Used for reviewer worktrees.
+
+        A linked worktree keeps its index and refs in the main repository's
+        ``.git/worktrees/<name>`` directory, not in the checkout, so ``git
+        status`` and ``git rev-parse`` still work against a sealed tree while an
+        accidental edit, build artefact, or stray ``>`` fails at the filesystem.
+
+        This is a guard, not a jail: on POSIX the owner of a file may always
+        restore its write bit, so a determined same-user process can undo it.
+        What makes reviewer isolation hold is structural — each reviewer gets a
+        worktree of its own, so it has nothing of another reviewer's to touch —
+        and what catches a reviewer that unsealed its own tree is the exact
+        HEAD/tree/cleanliness check the loop runs afterwards.
+        """
+        self._own(path)
+        for target in _walk(path):
+            _chmod(target, lambda mode: mode & ~_WRITE_BITS)
+
+    def unseal(self, path: Path) -> None:
+        """Give the owner write access back, so the worktree can be removed."""
+        self._own(path)
+        for target in _walk(path):
+            _chmod(target, lambda mode: mode | stat.S_IWUSR)
+
     def remove(self, path: Path) -> None:
         """Remove a worktree this provider created. Foreign paths are refused."""
         path = Path(path).resolve()
@@ -164,12 +192,49 @@ class WorktreeProvider:
                 "refusing to remove a worktree this run did not create",
                 evidence={"path": str(path)},
             )
+        if path.exists():
+            self.unseal(path)
         self.source.remove_worktree(path)
         self._created.remove(path)
+
+    def _own(self, path: Path) -> Path:
+        resolved = Path(path).resolve()
+        if resolved not in self._created:
+            raise WorktreeError(
+                "refusing to change permissions on a worktree this run did not create",
+                evidence={"path": str(resolved)},
+            )
+        return resolved
 
     @property
     def created(self) -> tuple[Path, ...]:
         return tuple(self._created)
+
+
+def _walk(path: Path) -> list[Path]:
+    """Every path under ``path``, deepest first, with ``path`` itself last."""
+    root = Path(path)
+    found: list[Path] = []
+    for directory, subdirectories, files in os.walk(root, topdown=False, followlinks=False):
+        base = Path(directory)
+        found.extend(base / name for name in files)
+        found.extend(base / name for name in subdirectories)
+    found.append(root)
+    return found
+
+
+def _chmod(target: Path, change) -> None:
+    """Apply ``change`` to a path's mode, skipping symlinks and vanished paths."""
+    try:
+        info = target.lstat()
+    except OSError:  # pragma: no cover - the path vanished under us
+        return
+    if stat.S_ISLNK(info.st_mode):
+        return
+    try:
+        target.chmod(stat.S_IMODE(change(info.st_mode)))
+    except OSError:  # pragma: no cover - not worth failing a run over one path
+        return
 
 
 __all__ = ["SourceRepo", "WorktreeProvider"]

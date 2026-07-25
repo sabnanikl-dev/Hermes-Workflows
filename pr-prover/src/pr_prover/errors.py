@@ -109,6 +109,12 @@ class LaunchPolicyError(FailClosed):
     reason = "launch-policy"
 
 
+class CapabilityRefused(FailClosed):
+    """A child asked the launcher for an operation outside its bound capability."""
+
+    reason = "capability-refused"
+
+
 class GitHubError(FailClosed):
     """The GitHub boundary failed or returned an unusable payload."""
 
