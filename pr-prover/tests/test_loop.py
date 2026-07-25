@@ -8,6 +8,7 @@ from pathlib import Path
 
 from _support import (
     BRANCH,
+    BUILDER_LOGIN,
     HEAD_A,
     HEAD_B,
     HEAD_C,
@@ -590,6 +591,30 @@ class LockTests(LoopHarness):
         self.assertEqual(self.runner.calls, [])
         self.assertFalse(self.script.exhausted, "no lane may run while another run holds the lock")
 
+    def test_a_contaminated_lockfile_is_redacted_before_it_reaches_the_report(self) -> None:
+        """REVIEW-A-P1-004: a lockfile this run did not write is untrusted text."""
+        from pr_prover import report
+
+        token = "ghp_" + ("A1b2C3d4E5" * 3) + "fg"
+        url = "https://ci-bot:sup3rs3cret@github.com/example/repo.git"
+        loop = self.build()
+        (self.tmp / "run.lock").write_text(
+            f'{{"repo": "example/repo", "pr": 7, "token": "{token}", "origin": "{url}"}}\n',
+            encoding="utf-8",
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.reason, "lock-contention")
+        existing = result.evidence["evidence"]["existing_lock"]
+        self.assertNotIn(token, existing)
+        self.assertNotIn("sup3rs3cret", existing)
+        self.assertIn("example/repo", existing, "the useful part of the lock survives")
+        for rendered in (report.to_json(result), report.to_markdown(result)):
+            self.assertNotIn(token, rendered)
+            self.assertNotIn("sup3rs3cret", rendered)
+
     def test_contention_leaves_the_existing_lock_alone(self) -> None:
         loop = self.build()
         lock = self.tmp / "run.lock"
@@ -701,6 +726,396 @@ class PromptInjectionTests(LoopHarness):
 
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "readback-mismatch")
+
+
+class FinalFreshnessTests(LoopHarness):
+    """REVIEW-A-P1-001: nothing terminal is reported for a head that drifted.
+
+    Every case here moves the world during the *last* reviewer lane — the
+    latest point at which the old code would still have been holding a snapshot
+    it took before any lane ran, and the point at which it would then have gone
+    straight to a terminal report or a fix attempt.
+    """
+
+    def review_round_then(self, head: str, findings=(), *, drift=None) -> None:
+        """A full reviewer round where ``drift`` fires during reviewer B."""
+        self.script.add("lane-reviewer-A", reviewer_output(head, findings))
+        self.script.add("lane-reviewer-B", reviewer_output(head), after=drift)
+
+    def test_a_pr_head_that_moves_during_the_last_reviewer_blocks_merge_ready(self) -> None:
+        loop = self.build()
+        self.review_round_then(HEAD_A, drift=lambda: self.remote.push(HEAD_B))
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        self.assertEqual(
+            result.evidence["evidence"]["drift"]["head"],
+            {"inspected": HEAD_A, "live": HEAD_B},
+        )
+        self.assertEqual(result.evidence["evidence"]["before"], "report merge-ready")
+
+    def test_a_remote_head_that_moves_during_the_last_reviewer_blocks_merge_ready(self) -> None:
+        """The PR still says HEAD_A; the branch it names no longer resolves there."""
+        loop = self.build()
+
+        def drift() -> None:
+            self.runner.remote = FakeRemote(head=HEAD_C)
+
+        self.review_round_then(HEAD_A, drift=drift)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        self.assertEqual(result.evidence["evidence"]["remote_head"], HEAD_C)
+
+    def test_a_pr_closed_during_the_last_reviewer_blocks_merge_ready(self) -> None:
+        loop = self.build()
+
+        def drift() -> None:
+            self.remote.state = "MERGED"
+
+        self.review_round_then(HEAD_A, drift=drift)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        self.assertEqual(result.evidence["evidence"]["drift"]["state"]["live"], "MERGED")
+
+    def test_a_base_retargeted_during_the_last_reviewer_blocks_merge_ready(self) -> None:
+        loop = self.build()
+
+        def drift() -> None:
+            self.remote.base = "release/2.0"
+
+        self.review_round_then(HEAD_A, drift=drift)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        self.assertEqual(result.evidence["evidence"]["drift"]["base_branch"]["live"], "release/2.0")
+
+    def test_a_head_branch_renamed_during_the_last_reviewer_blocks_merge_ready(self) -> None:
+        loop = self.build()
+
+        def drift() -> None:
+            self.remote.branch = "feat/renamed"
+
+        self.review_round_then(HEAD_A, drift=drift)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        self.assertEqual(result.evidence["evidence"]["drift"]["head_branch"]["live"], "feat/renamed")
+
+    def test_drift_during_the_last_reviewer_stops_a_fix_attempt_from_opening(self) -> None:
+        """The blocker path: an attempt must not be spent on a head that moved."""
+        loop = self.build()
+        self.review_round_then(HEAD_A, [BLOCKER], drift=lambda: self.remote.push(HEAD_B))
+        self.script.add("lane-builder", builder_output(HEAD_C, addressed=["null-deref"]))
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        self.assertEqual(result.evidence["evidence"]["before"], "open a fix attempt")
+        self.assertEqual(result.attempts_used, 0, "no attempt may be spent on a stale head")
+        self.assertFalse(
+            any(call.argv[0] == "lane-builder" for call in self.runner.calls),
+            "the builder must not run against a head that already drifted",
+        )
+        self.assertEqual(self.state()["attempt"], 0)
+
+    def test_drift_during_the_last_reviewer_blocks_a_blocked_report(self) -> None:
+        """The attempt-cap path reports BLOCKED, and it is terminal too."""
+        RunState(repo="example/repo", pr=7, path=self.tmp / "state.json", attempt=2, head=HEAD_A).save()
+        loop = self.build()
+        self.review_round_then(HEAD_A, [BLOCKER], drift=lambda: self.remote.push(HEAD_B))
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        self.assertEqual(result.evidence["evidence"]["before"], "report blocked")
+
+    def test_a_needs_karan_report_is_also_held_to_the_live_head(self) -> None:
+        loop = self.build()
+        self.review_round_then(
+            HEAD_A,
+            [("needs-karan", "copy-tone", "headline wording is a product call")],
+            drift=lambda: self.remote.push(HEAD_B),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head", "drift must outrank the needs-karan finding")
+
+    def test_a_clean_pass_records_the_freshness_recheck(self) -> None:
+        """The positive control: with no drift the same assertion passes and says so."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertIn(
+            f"live state re-verified at {HEAD_A} before report merge-ready", result.events
+        )
+
+    def test_a_fix_cycle_rechecks_before_the_attempt_and_before_the_report(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertIn(
+            f"live state re-verified at {HEAD_A} before open a fix attempt", result.events
+        )
+        self.assertIn(
+            f"live state re-verified at {HEAD_B} before report merge-ready", result.events
+        )
+
+
+class CommentIdentityTests(LoopHarness):
+    """REVIEW-A-P1-002: the fix comment must be new, and from the expected login."""
+
+    def _blocked_round(self) -> None:
+        self.review_round(HEAD_A, [BLOCKER])
+
+    def test_a_pre_existing_copy_of_the_fix_comment_does_not_satisfy_readback(self) -> None:
+        """Anyone can copy a real fix comment; a copy already on the PR proves nothing."""
+        loop = self.build()
+        self._blocked_round()
+        # Posted before the run, with the right author, the right signature, and
+        # the SHA the builder is about to push.
+        self.remote.comment(fix_comment(HEAD_B), author=BUILDER_LOGIN)
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        self.assertEqual(result.evidence["evidence"]["comments_since_builder_invoked"], 0)
+
+    def test_a_copy_posted_by_another_login_after_the_push_does_not_satisfy_readback(self) -> None:
+        loop = self.build()
+        self._blocked_round()
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B), author="impostor"),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        self.assertEqual(result.evidence["evidence"]["expected_author"], BUILDER_LOGIN)
+
+    def test_a_login_that_only_differs_in_case_does_not_satisfy_readback(self) -> None:
+        """The author comparison is exact; near-logins are not close enough."""
+        loop = self.build()
+        self._blocked_round()
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(
+                HEAD_B, comment=fix_comment(HEAD_B), author=BUILDER_LOGIN.upper()
+            ),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_a_newly_observed_comment_from_the_expected_author_satisfies_readback(self) -> None:
+        loop = self.build()
+        self._blocked_round()
+        posted: dict[str, str] = {}
+
+        def push_and_comment() -> None:
+            self.remote.push(HEAD_B)
+            posted["id"] = self.remote.comment(fix_comment(HEAD_B), author=BUILDER_LOGIN).identifier
+
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=push_and_comment,
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertIn(
+            f"builder fix comment {posted['id']} read back for {HEAD_B}", result.events
+        )
+
+    def test_a_new_comment_is_still_required_to_carry_the_new_head(self) -> None:
+        loop = self.build()
+        self._blocked_round()
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_A)),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        self.assertEqual(result.evidence["evidence"]["comments_since_builder_invoked"], 1)
+
+
+class LaneResultAgreementTests(LoopHarness):
+    """REVIEW-A-P1-003: a marker never outranks how the process actually ended."""
+
+    def test_a_reviewer_that_passes_with_a_nonzero_exit_fails_closed(self) -> None:
+        loop = self.build()
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A), returncode=1)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lane-failure")
+        self.assertEqual(result.evidence["evidence"]["returncode"], 1)
+        self.assertEqual(result.evidence["evidence"]["status"], "pass")
+
+    def test_a_reviewer_that_times_out_fails_closed_despite_a_pass_marker(self) -> None:
+        loop = self.build()
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A), returncode=124, timed_out=True)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lane-failure")
+        self.assertTrue(result.evidence["evidence"]["timed_out"])
+
+    def test_a_reviewer_that_times_out_fails_closed_despite_a_fail_marker(self) -> None:
+        """A timeout is not a blocker report either: the run stops, it does not fix."""
+        loop = self.build()
+        self.script.add(
+            "lane-reviewer-A",
+            reviewer_output(HEAD_A, [BLOCKER]),
+            returncode=124,
+            timed_out=True,
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lane-failure")
+        self.assertEqual(result.attempts_used, 0)
+        self.assertFalse(any(call.argv[0] == "lane-builder" for call in self.runner.calls))
+
+    def test_a_reviewer_that_times_out_with_a_zero_exit_still_fails_closed(self) -> None:
+        loop = self.build()
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A), returncode=0, timed_out=True)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lane-failure")
+
+    def test_a_reviewer_reporting_blockers_may_exit_nonzero(self) -> None:
+        """The preserved lane: nonzero + a valid fail verdict is how findings arrive."""
+        loop = self.build()
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A, [BLOCKER]), returncode=1)
+        self.script.add("lane-reviewer-B", reviewer_output(HEAD_A))
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.attempts_used, 1, "a nonzero fail verdict must still drive the fix")
+
+    def test_a_builder_claiming_success_with_a_nonzero_exit_fails_closed(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            returncode=1,
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lane-failure")
+        self.assertEqual(result.evidence["evidence"]["status"], "success")
+
+    def test_a_builder_that_times_out_fails_closed(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            returncode=124,
+            timed_out=True,
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lane-failure")
+        self.assertTrue(result.evidence["evidence"]["timed_out"])
+
+    def test_a_builder_reporting_failure_may_exit_nonzero(self) -> None:
+        """A nonzero 'failure' still reaches the corrective-rerun lane, not lane-failure."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER, SECOND_BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_A, addressed=["null-deref"], status="failure"),
+            returncode=2,
+        )
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["bad-copy"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.corrective_reruns, (1,))
+
+    def test_a_gate_that_times_out_is_still_a_blocking_finding(self) -> None:
+        """Gates already fold a timeout into the blocker set; that behaviour holds."""
+        loop = self.build(gates=[{"name": "tests", "argv": ["lane-gate-tests", "--head", "{head}"]}])
+        self.script.add("lane-gate-tests", "", returncode=124, timed_out=True)
+        self.script.add("lane-builder", builder_output(HEAD_B, addressed=["gate-tests"], status="failure"))
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "builder-refusal")
+        self.assertFalse(result.gates[0].passed)
 
 
 class ResumeTests(LoopHarness):

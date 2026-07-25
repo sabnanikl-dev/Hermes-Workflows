@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _support import HEAD_A, make_source_repo
+from _support import BUILDER_LOGIN, HEAD_A, make_source_repo
 from pr_prover import cli, redaction
 from pr_prover.commands import CommandResult
 from pr_prover.config import RunConfig
@@ -140,10 +140,24 @@ class GhBoundaryTests(unittest.TestCase):
             GhCliGitHub(Failing()).pull_request("example/repo", 7)
         self.assertNotIn("ghp_abcdefghij", caught.exception.evidence["stderr"])
 
-    def test_comments_carry_their_author(self) -> None:
-        payload = json.dumps({"comments": [{"author": {"login": "karanagent1"}, "body": "hi"}]})
+    def test_comments_carry_their_author_and_stable_id(self) -> None:
+        payload = json.dumps(
+            {"comments": [{"id": "IC_kwDO123", "author": {"login": "karanagent1"}, "body": "hi"}]}
+        )
         comments = self.boundary(payload).comments("example/repo", 7)
         self.assertEqual(comments[0].author, "karanagent1")
+        self.assertEqual(comments[0].identifier, "IC_kwDO123")
+
+    def test_a_comment_without_a_stable_id_fails_closed(self) -> None:
+        """Without an id there is no way to tell a comment from a copy of it."""
+        payload = json.dumps({"comments": [{"author": {"login": "karanagent1"}, "body": "hi"}]})
+        with self.assertRaises(GitHubError):
+            self.boundary(payload).comments("example/repo", 7)
+
+    def test_a_comment_without_an_author_fails_closed(self) -> None:
+        payload = json.dumps({"comments": [{"id": "IC_kwDO123", "body": "hi"}]})
+        with self.assertRaises(GitHubError):
+            self.boundary(payload).comments("example/repo", 7)
 
 
 class RedactionTests(unittest.TestCase):
@@ -181,6 +195,138 @@ class RedactionTests(unittest.TestCase):
         self.assertLess(len(clipped), 500)
 
 
+# Representative credential shapes, assembled at runtime so the literals in this
+# file are not themselves scannable as secrets.
+GH_TOKEN = "ghp_" + ("A1b2C3d4E5" * 3) + "fg"
+FINE_GRAINED_PAT = "github_pat_" + ("Z9y8X7w6V5" * 3)
+PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+URL_WITH_CREDENTIALS = "https://ci-bot:sup3rs3cret@github.com/example/repo.git"
+SECRETS = (GH_TOKEN, FINE_GRAINED_PAT, "MIIEowIBAAKCAQEA", "sup3rs3cret")
+
+
+class SanitizerTests(unittest.TestCase):
+    """REVIEW-A-P1-004: the recursive final boundary over evidence structures."""
+
+    def test_strings_nested_in_dicts_and_lists_are_scrubbed(self) -> None:
+        payload = {
+            "lock": {"body": f"held with {GH_TOKEN}"},
+            "argv": ["git", "clone", URL_WITH_CREDENTIALS],
+            "keys": [{"pem": PRIVATE_KEY}, {"pat": FINE_GRAINED_PAT}],
+        }
+        rendered = json.dumps(redaction.sanitize(payload))
+        for secret in SECRETS:
+            with self.subTest(secret=secret[:12]):
+                self.assertNotIn(secret, rendered)
+
+    def test_dictionary_keys_are_scrubbed_too(self) -> None:
+        sanitized = redaction.sanitize({f"env {GH_TOKEN}": "value"})
+        self.assertNotIn(GH_TOKEN, json.dumps(sanitized))
+
+    def test_structure_and_scalar_types_survive(self) -> None:
+        payload = {"count": 3, "ok": True, "ratio": 0.5, "missing": None, "items": ["a"]}
+        sanitized = redaction.sanitize(payload)
+        self.assertEqual(sanitized, payload)
+        self.assertIsInstance(sanitized["count"], int)
+        self.assertIsInstance(sanitized["ok"], bool)
+        self.assertIsInstance(sanitized["ratio"], float)
+        self.assertIsNone(sanitized["missing"])
+        self.assertIsInstance(sanitized["items"], list)
+
+    def test_tuples_stay_tuples_and_are_scrubbed(self) -> None:
+        sanitized = redaction.sanitize({"argv": ("gh", "auth", GH_TOKEN)})
+        self.assertIsInstance(sanitized["argv"], tuple)
+        self.assertNotIn(GH_TOKEN, "".join(sanitized["argv"]))
+
+    def test_a_secret_below_many_layers_is_still_scrubbed(self) -> None:
+        value: object = GH_TOKEN
+        for _ in range(redaction.MAX_DEPTH - 1):
+            value = {"next": [value]}
+        self.assertNotIn(GH_TOKEN, json.dumps(redaction.sanitize(value)))
+
+    def test_nesting_past_the_depth_cap_is_elided_not_leaked(self) -> None:
+        value: object = GH_TOKEN
+        for _ in range(redaction.MAX_DEPTH * 3):
+            value = {"next": value}
+        rendered = json.dumps(redaction.sanitize(value))
+        self.assertNotIn(GH_TOKEN, rendered)
+        self.assertIn("nested deeper", rendered)
+
+    def test_a_self_referential_structure_terminates(self) -> None:
+        payload: dict[str, object] = {"token": GH_TOKEN}
+        payload["self"] = payload
+        rendered = json.dumps(redaction.sanitize(payload))
+        self.assertNotIn(GH_TOKEN, rendered)
+        self.assertIn("circular", rendered)
+
+    def test_an_arbitrary_object_is_rendered_as_scrubbed_text(self) -> None:
+        sanitized = redaction.sanitize(Path(f"/tmp/{GH_TOKEN}/run.lock"))
+        self.assertIsInstance(sanitized, str)
+        self.assertNotIn(GH_TOKEN, sanitized)
+
+
+class FinalBoundaryRedactionTests(unittest.TestCase):
+    """A report whose evidence was never scrubbed at its call site still cannot leak."""
+
+    def result_with_nested_evidence(self):
+        from pr_prover.loop import NEEDS_KARAN, RunResult
+
+        return RunResult(
+            outcome=NEEDS_KARAN,
+            reason="lock-contention",
+            head=HEAD_A,
+            branch="feat/example",
+            events=(f"fail-closed: could not authenticate with {GH_TOKEN}",),
+            retained_paths=(f"/tmp/pr-prover-{FINE_GRAINED_PAT}",),
+            evidence={
+                "reason": "lock-contention",
+                "message": "another run holds the lockfile",
+                "evidence": {
+                    "lock_file": "/tmp/run.lock",
+                    "existing_lock": {"raw": f"owner token {GH_TOKEN}"},
+                    "attempts": 2,
+                    "argv": ["git", "push", URL_WITH_CREDENTIALS],
+                    "keys": [PRIVATE_KEY, {"pat": FINE_GRAINED_PAT}],
+                },
+            },
+        )
+
+    def test_the_json_report_carries_no_nested_secret(self) -> None:
+        from pr_prover import report
+
+        rendered = report.to_json(self.result_with_nested_evidence())
+        for secret in SECRETS:
+            with self.subTest(secret=secret[:12]):
+                self.assertNotIn(secret, rendered)
+
+    def test_the_markdown_report_carries_no_nested_secret(self) -> None:
+        from pr_prover import report
+
+        rendered = report.to_markdown(self.result_with_nested_evidence())
+        for secret in SECRETS:
+            with self.subTest(secret=secret[:12]):
+                self.assertNotIn(secret, rendered)
+
+    def test_the_report_keeps_its_useful_structure(self) -> None:
+        """Redaction must not flatten the evidence into one opaque string."""
+        from pr_prover import report
+
+        payload = json.loads(report.to_json(self.result_with_nested_evidence()))
+        evidence = payload["fail_closed"]["evidence"]
+        self.assertEqual(evidence["lock_file"], "/tmp/run.lock")
+        self.assertEqual(evidence["attempts"], 2)
+        self.assertIsInstance(evidence["argv"], list)
+        self.assertEqual(evidence["argv"][:2], ["git", "push"])
+        self.assertIsInstance(evidence["existing_lock"], dict)
+        self.assertIsInstance(evidence["keys"][1], dict)
+
+    def test_markdown_renders_a_nested_evidence_value_as_json_not_python_repr(self) -> None:
+        from pr_prover import report
+
+        rendered = report.to_markdown(self.result_with_nested_evidence())
+        self.assertIn('- argv: ["git", "push"', rendered)
+        self.assertIn("- attempts: 2", rendered)
+
+
 class ConfigTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-config-")
@@ -202,7 +348,11 @@ class ConfigTests(unittest.TestCase):
                 {"name": "A", "argv": ["reviewer-a", "{head}"]},
                 {"name": "B", "argv": ["reviewer-b", "{head}"]},
             ],
-            "builder": {"argv": ["builder", "{blockers_file}"], "signature": "Fixed by: Claude Code"},
+            "builder": {
+                "argv": ["builder", "{blockers_file}"],
+                "signature": "Fixed by: Claude Code",
+                "comment_author": BUILDER_LOGIN,
+            },
         }
         body.update(overrides)
         return body
@@ -254,7 +404,61 @@ class ConfigTests(unittest.TestCase):
 
     def test_a_weak_builder_signature_fails_closed(self) -> None:
         with self.assertRaises(ConfigError):
-            self.load(builder={"argv": ["builder"], "signature": "ok"})
+            self.load(
+                builder={
+                    "argv": ["builder"],
+                    "signature": "ok",
+                    "comment_author": BUILDER_LOGIN,
+                }
+            )
+
+    def test_a_missing_builder_comment_author_fails_closed(self) -> None:
+        """REVIEW-A-P1-002: there is no 'any author will do' configuration."""
+        with self.assertRaises(ConfigError) as caught:
+            self.load(builder={"argv": ["builder"], "signature": "Fixed by: Claude Code"})
+        self.assertIn("comment_author", caught.exception.message)
+
+    def test_a_null_builder_comment_author_fails_closed(self) -> None:
+        with self.assertRaises(ConfigError):
+            self.load(
+                builder={
+                    "argv": ["builder"],
+                    "signature": "Fixed by: Claude Code",
+                    "comment_author": None,
+                }
+            )
+
+    def test_an_unusable_builder_comment_author_fails_closed(self) -> None:
+        for author in ("", "not a login", "-leading-hyphen", "trailing-", "a" * 40):
+            with self.subTest(author=author):
+                with self.assertRaises(ConfigError):
+                    self.load(
+                        builder={
+                            "argv": ["builder"],
+                            "signature": "Fixed by: Claude Code",
+                            "comment_author": author,
+                        }
+                    )
+
+    def test_a_bot_login_is_accepted_as_the_builder_comment_author(self) -> None:
+        config = self.load(
+            builder={
+                "argv": ["builder"],
+                "signature": "Fixed by: Claude Code",
+                "comment_author": "hermes-builder[bot]",
+            }
+        )
+        self.assertEqual(config.builder.comment_author, "hermes-builder[bot]")
+
+    def test_the_shipped_example_config_is_valid(self) -> None:
+        """The example is documentation; it must not model a rejected shape."""
+        example = Path(__file__).resolve().parents[1] / "examples" / "run.example.json"
+        payload = json.loads(example.read_text(encoding="utf-8"))
+        payload["source_repo"] = str(self.clone)
+        self.assertEqual(
+            RunConfig.from_mapping(payload, base_dir=self.tmp).builder.comment_author,
+            "the-builder-login",
+        )
 
 
 class CliTests(unittest.TestCase):
@@ -284,7 +488,11 @@ class CliTests(unittest.TestCase):
                         {"name": "A", "argv": ["reviewer-a", "{head}"]},
                         {"name": "B", "argv": ["reviewer-b", "{head}"]},
                     ],
-                    "builder": {"argv": ["builder", "{blockers_file}"], "signature": "Fixed by: Claude Code"},
+                    "builder": {
+                "argv": ["builder", "{blockers_file}"],
+                "signature": "Fixed by: Claude Code",
+                "comment_author": BUILDER_LOGIN,
+            },
                 }
             ),
             encoding="utf-8",

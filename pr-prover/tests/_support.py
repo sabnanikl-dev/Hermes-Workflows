@@ -26,6 +26,7 @@ HEAD_B = "b" * 40
 HEAD_C = "c" * 40
 SIGNATURE = "Fixed by: Claude Code via Hermes orchestration"
 BRANCH = "feat/example"
+BUILDER_LOGIN = "sabnanikl-dev"
 
 
 # -- lane output builders -------------------------------------------------
@@ -68,14 +69,21 @@ class FakeRemote:
     state: str = "OPEN"
     is_draft: bool = True
     comments: list[Comment] = field(default_factory=list)
+    _next_comment_id: int = 1
 
-    def push(self, head: str, *, comment: str | None = None, author: str = "sabnanikl-dev") -> None:
+    def push(self, head: str, *, comment: str | None = None, author: str = BUILDER_LOGIN) -> None:
         self.head = head
         if comment is not None:
-            self.comments.append(Comment(author=author, body=comment))
+            self.comment(comment, author=author)
 
-    def comment(self, body: str, *, author: str = "sabnanikl-dev") -> None:
-        self.comments.append(Comment(author=author, body=body))
+    def comment(self, body: str, *, author: str = BUILDER_LOGIN) -> Comment:
+        """Append a comment with a fresh, never-reused GitHub-style node id."""
+        posted = Comment(
+            identifier=f"IC_comment{self._next_comment_id}", author=author, body=body
+        )
+        self._next_comment_id += 1
+        self.comments.append(posted)
+        return posted
 
     def pull_request(self) -> PullRequest:
         return PullRequest(
@@ -113,11 +121,22 @@ class Call:
     cwd: str | None
 
 
+@dataclass(frozen=True)
+class ScriptedResult:
+    """One queued lane outcome: what it printed and how the process ended."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+    after: Callable[[], None] | None
+
+
 class LaneScript:
     """Queued outputs per lane program, keyed by ``argv[0]``."""
 
     def __init__(self) -> None:
-        self._queues: dict[str, deque[tuple[int, str, str, Callable[[], None] | None]]] = {}
+        self._queues: dict[str, deque[ScriptedResult]] = {}
 
     def add(
         self,
@@ -126,19 +145,34 @@ class LaneScript:
         *,
         returncode: int = 0,
         stderr: str = "",
+        timed_out: bool = False,
         after: Callable[[], None] | None = None,
     ) -> LaneScript:
-        self._queues.setdefault(program, deque()).append((returncode, stdout, stderr, after))
+        self._queues.setdefault(program, deque()).append(
+            ScriptedResult(
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+                timed_out=timed_out,
+                after=after,
+            )
+        )
         return self
 
     def __call__(self, argv: tuple[str, ...], cwd: str | None) -> CommandResult:
         queue = self._queues.get(argv[0])
         if not queue:
             raise AssertionError(f"unscripted lane call: {list(argv)}")
-        returncode, stdout, stderr, after = queue.popleft()
-        if after is not None:
-            after()
-        return CommandResult(argv=argv, returncode=returncode, stdout=stdout, stderr=stderr)
+        scripted = queue.popleft()
+        if scripted.after is not None:
+            scripted.after()
+        return CommandResult(
+            argv=argv,
+            returncode=scripted.returncode,
+            stdout=scripted.stdout,
+            stderr=scripted.stderr,
+            timed_out=scripted.timed_out,
+        )
 
     @property
     def exhausted(self) -> bool:
@@ -205,7 +239,7 @@ def make_config(
     source_repo: Path,
     gates: Sequence[Mapping[str, object]] = (),
     visual_qa_required: bool = False,
-    comment_author: str | None = None,
+    comment_author: str = BUILDER_LOGIN,
     branch: str | None = BRANCH,
 ) -> RunConfig:
     payload: dict[str, object] = {

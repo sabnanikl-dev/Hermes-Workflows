@@ -46,6 +46,9 @@ tokens, and an unknown token fails the run rather than rendering literally:
 | `{reviewer}` | reviewer lanes | the lane name |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
 
+`builder.comment_author` is **required** and must be the exact GitHub login the
+builder comments under. See [Fix-comment readback](#fix-comment-readback).
+
 The gate, reviewer, and builder commands themselves are supplied by the
 operator — the example's `./scripts/*-lane.sh` names are placeholders. PAPI-90
 replaces them with the hardened, credential-scoped launcher; until then the only
@@ -88,6 +91,59 @@ and `BLOCKING=<count>` must reconcile with the findings above it. Lane output is
 untrusted, so a body that quotes or forges a marker fails the run closed instead
 of being read as a verdict.
 
+### The marker is not the whole verdict
+
+A lane's exit status and its printed marker must agree, so parsing a marker is
+never on its own enough to accept a result:
+
+| Process result | Verdict | Outcome |
+|---|---|---|
+| timed out | anything | **`lane-failure`** — the marker is not read at all |
+| exit ≠ 0 | reviewer `STATUS=pass` / builder `STATUS=success` | **`lane-failure`** |
+| exit 0 | reviewer `STATUS=pass` / builder `STATUS=success` | accepted |
+| exit ≠ 0 | reviewer `STATUS=fail` / builder `STATUS=failure` | **accepted and preserved** |
+| exit 0 | reviewer `STATUS=fail` / builder `STATUS=failure` | accepted |
+
+The last-but-one row is deliberate. A timed-out lane produced a truncated
+stream, and a truncated stream can end on a marker the lane never meant as
+final — so a timeout always fails closed, whatever it claimed. But a lane that
+exits nonzero *while printing a valid failing verdict* is doing the normal
+thing: reviewers and builders conventionally exit nonzero to mean "I found
+blockers" or "I could not finish". Treating that as an infrastructure error
+would discard exactly the findings the frozen blocker set is built from, so
+that lane is preserved and keeps reporting.
+
+Baseline and visual gates are unchanged: a gate that fails *or* times out
+becomes a blocking finding rather than stopping the run.
+
+## Freshness
+
+Gates and reviewer lanes take minutes to hours, and nothing stops a push, a
+close, or a retarget while they run. One reusable assertion re-reads the live
+PR and the verified remote branch **immediately before every terminal outcome
+and immediately before a fix attempt opens**, and requires all of the PR number,
+`OPEN` state, head branch, base branch, and full 40-hex head SHA to still match
+the snapshot the work was measured against. Any difference is `stale-head`: the
+run reports nothing and spends no attempt on a head that has already moved.
+
+## Fix-comment readback
+
+After a push is bound to exactly one new head, the builder's fix comment is read
+back from GitHub. Three conditions are required together, and a comment
+satisfying only some of them is a `readback-mismatch`:
+
+1. **New.** The loop snapshots GitHub's own comment ids before it invokes the
+   builder, and accepts only an id that was not already there.
+2. **From the expected login.** `builder.comment_author` is compared exactly.
+3. **About this head.** The body must carry both the configured signature and
+   the new 40-hex SHA.
+
+The signature and the SHA both become public the moment the real comment is
+posted, so neither proves anything on its own — anybody who can comment on the
+PR can copy them verbatim. The login is the part an arbitrary commenter cannot
+supply, and the comment id is the part they cannot reuse. That is why the author
+is mandatory configuration rather than an optional tightening.
+
 ## State and locking
 
 One JSON state file holds a single attempt integer plus the head, the corrective
@@ -99,12 +155,22 @@ held, the run stops and asks. After confirming no run is active, remove it with
 ## What stops the run and asks Karan
 
 `invalid-config` · `invalid-command` · `lock-contention` · `unexpected-state` ·
-`malformed-verdict` · `stale-head` · `ambiguous-push` · `readback-mismatch` ·
-`scope-contamination` · `builder-refusal` · `github-error` · `worktree-error`
+`malformed-verdict` · `lane-failure` · `stale-head` · `ambiguous-push` ·
+`readback-mismatch` · `scope-contamination` · `builder-refusal` ·
+`github-error` · `worktree-error`
 
 Each carries evidence, and the worktree plus scratch directory are retained so
-the failure can be inspected. Everything captured from a child is scrubbed of
-credential-shaped text first.
+the failure can be inspected.
+
+Redaction happens twice. Output captured from a child is scrubbed of
+credential-shaped text where it is captured, and then the assembled report —
+JSON and Markdown alike — passes through one recursive sanitizer at
+serialization. That final boundary walks nested dicts, lists, and tuples and
+scrubs every string in them, keys included, so a value that reached the report
+without being scrubbed at its call site still cannot leak. Structure and scalar
+types survive the walk, so the report stays readable and machine-usable rather
+than being flattened into one stringified blob; depth and self-reference are
+bounded with explicit markers.
 
 ## Isolation guarantees
 

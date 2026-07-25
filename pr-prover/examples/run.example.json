@@ -62,7 +62,7 @@
       "--worktree", "{worktree}"
     ],
     "signature": "Fixed by: Claude Code via Hermes orchestration",
-    "comment_author": null,
+    "comment_author": "the-builder-login",
     "timeout": 2400
   }
 }

@@ -61,6 +61,12 @@ class MalformedVerdict(FailClosed):
     reason = "malformed-verdict"
 
 
+class LaneFailure(FailClosed):
+    """A lane's child-process result cannot support the verdict it printed."""
+
+    reason = "lane-failure"
+
+
 class StaleHead(FailClosed):
     """A verdict, remote ref, or worktree is not bound to the exact expected head."""
 

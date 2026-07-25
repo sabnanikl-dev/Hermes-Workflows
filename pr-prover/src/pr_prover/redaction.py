@@ -4,10 +4,18 @@ Reviewer, builder, and gate output is untrusted and may echo tokens from the
 environment. Everything that reaches a report or an error's evidence mapping
 goes through :func:`scrub` first, then :func:`clip` so a runaway log cannot
 bury the parts that matter.
+
+:func:`scrub` and :func:`evidence` only handle text, so a value that reaches a
+report nested inside a dict, list, or tuple — an argv array, a git status
+mapping, a lockfile body attached whole — can slip past the call site that was
+supposed to redact it. :func:`sanitize` is the final boundary: it walks a whole
+evidence structure recursively and scrubs every string in it, keys included,
+while leaving the structure and the non-string scalar types intact.
 """
 from __future__ import annotations
 
 import re
+from typing import Any
 
 PLACEHOLDER = "<redacted>"
 
@@ -63,3 +71,62 @@ def clip(text: str, *, limit: int = 4000) -> str:
 def evidence(text: str, *, limit: int = 4000) -> str:
     """Scrub then clip, in that order, for anything stored as run evidence."""
     return clip(scrub(text), limit=limit)
+
+
+MAX_DEPTH = 12
+_TOO_DEEP = "<elided: evidence nested deeper than the sanitizer walks>"
+_CYCLE = "<elided: circular evidence reference>"
+
+
+def sanitize(
+    value: Any,
+    *,
+    limit: int = 4000,
+    _depth: int = 0,
+    _seen: frozenset[int] = frozenset(),
+) -> Any:
+    """Recursively scrub every string in an evidence structure.
+
+    This is the final serialization boundary: no value reaches JSON or Markdown
+    without passing through it, however deeply a caller nested it. Structure and
+    non-string scalar types survive — a mapping stays a mapping, a list stays a
+    list, a tuple stays a tuple, and ``int``/``float``/``bool``/``None`` are
+    returned unchanged — so the report is still readable and machine-usable
+    rather than one blindly stringified blob.
+
+    Depth and identity are bounded: a structure deeper than :data:`MAX_DEPTH` or
+    one that refers back to itself is replaced with a marker instead of being
+    walked forever.
+    """
+    if isinstance(value, str):
+        return evidence(value, limit=limit)
+    if value is None or isinstance(value, (bool, int, float)):
+        # bool is checked with int on purpose: both are safe to pass through.
+        return value
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        if _depth >= MAX_DEPTH:
+            return _TOO_DEEP
+        if id(value) in _seen:
+            return _CYCLE
+        seen = _seen | {id(value)}
+        deeper = {"limit": limit, "_depth": _depth + 1, "_seen": seen}
+        if isinstance(value, dict):
+            # Keys are evidence too: an env-var name can carry the secret's shape.
+            return {
+                evidence(key if isinstance(key, str) else str(key), limit=limit): sanitize(
+                    item, **deeper
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, tuple):
+            return tuple(sanitize(item, **deeper) for item in value)
+        if isinstance(value, list):
+            return [sanitize(item, **deeper) for item in value]
+        # Sets have no JSON form; render them as a stable list.
+        return [sanitize(item, **deeper) for item in sorted(value, key=repr)]
+    # Anything else (a Path, a dataclass, an exception) has no safe structural
+    # form here, so it is rendered as text and scrubbed like text.
+    return evidence(str(value), limit=limit)
+
+
+__all__ = ["MAX_DEPTH", "PLACEHOLDER", "clip", "evidence", "sanitize", "scrub"]
