@@ -3,8 +3,14 @@
 Both forms carry the same facts: the terminal outcome tied to the exact final
 head, how many of the two attempts were used, the four classification buckets,
 gate results, reviewer verdicts, and — when the run stopped and asked — the
-fail-closed reason with its preserved evidence. Everything captured from a
-child has already passed through :mod:`pr_prover.redaction`.
+fail-closed reason with its preserved evidence.
+
+Child output is scrubbed where it is captured, but that only covers the strings
+a call site remembered to pass through :mod:`pr_prover.redaction`. Serialization
+is the last place a value can leak, so both renderers here are built from one
+:func:`pr_prover.redaction.sanitize` pass over the assembled payload: every
+string in it, however deeply nested, is scrubbed, and the structure and scalar
+types survive so the report stays readable and machine-usable.
 """
 from __future__ import annotations
 
@@ -12,9 +18,11 @@ import json
 from typing import Any
 
 from .loop import RunResult
+from .redaction import sanitize
 
 
 def as_dict(result: RunResult) -> dict[str, Any]:
+    """The machine-readable report, sanitized as a whole before it is returned."""
     payload: dict[str, Any] = {
         "outcome": result.outcome,
         "reason": result.reason,
@@ -39,6 +47,7 @@ def as_dict(result: RunResult) -> dict[str, Any]:
                 "reviewer": verdict.reviewer,
                 "status": verdict.status,
                 "head": verdict.head,
+                "blocking": len(verdict.blocking),
                 "findings": [finding.as_dict() for finding in verdict.findings],
             }
             for verdict in result.verdicts
@@ -49,7 +58,7 @@ def as_dict(result: RunResult) -> dict[str, Any]:
     }
     if result.evidence:
         payload["fail_closed"] = result.evidence
-    return payload
+    return sanitize(payload)
 
 
 def to_json(result: RunResult) -> str:
@@ -57,64 +66,74 @@ def to_json(result: RunResult) -> str:
 
 
 def to_markdown(result: RunResult) -> str:
+    """The human report, rendered from the same sanitized payload as the JSON."""
+    payload = as_dict(result)
     lines: list[str] = [
-        f"## pr-prover — {result.outcome}",
+        f"## pr-prover — {payload['outcome']}",
         "",
-        f"**Reason:** {result.reason}",
-        f"**Head:** `{result.head or 'unknown'}`",
-        f"**Branch:** {result.branch or 'unknown'}",
-        f"**Attempts used:** {result.attempts_used}/2",
+        f"**Reason:** {payload['reason']}",
+        f"**Head:** `{payload['head'] or 'unknown'}`",
+        f"**Branch:** {payload['branch'] or 'unknown'}",
+        f"**Attempts used:** {payload['attempts_used']}/{payload['attempt_cap']}",
     ]
-    if result.corrective_reruns:
+    if payload["corrective_reruns"]:
         lines.append(
             "**Corrective reruns:** attempt(s) "
-            + ", ".join(str(attempt) for attempt in result.corrective_reruns)
+            + ", ".join(str(attempt) for attempt in payload["corrective_reruns"])
         )
-    if result.pr_url:
-        lines.append(f"**PR:** {result.pr_url}")
+    if payload["pr_url"]:
+        lines.append(f"**PR:** {payload['pr_url']}")
 
-    if result.gates:
+    if payload["gates"]:
         lines += ["", "### Gates"]
-        for gate in result.gates:
-            status = "pass" if gate.passed else f"FAIL (exit {gate.returncode})"
-            lines.append(f"- `{gate.name}` ({gate.kind}): {status}")
+        for gate in payload["gates"]:
+            status = "pass" if gate["passed"] else f"FAIL (exit {gate['returncode']})"
+            lines.append(f"- `{gate['name']}` ({gate['kind']}): {status}")
 
-    if result.verdicts:
+    if payload["reviewers"]:
         lines += ["", "### Reviewers"]
-        for verdict in result.verdicts:
+        for verdict in payload["reviewers"]:
             lines.append(
-                f"- Reviewer {verdict.reviewer}: {verdict.status}, "
-                f"{len(verdict.blocking)} blocking on `{verdict.head}`"
+                f"- Reviewer {verdict['reviewer']}: {verdict['status']}, "
+                f"{verdict['blocking']} blocking on `{verdict['head']}`"
             )
 
-    if result.classification is not None:
+    if payload["classification"] is not None:
         lines += ["", "### Classification"]
-        for label, items in result.classification.as_dict().items():
+        for label, items in payload["classification"].items():
             if not items:
                 continue
             lines.append(f"- **{label}** ({len(items)})")
             for item in items:
                 lines.append(f"  - `{item['id']}` — {item['summary']} [{', '.join(item['sources'])}]")
 
-    if result.evidence:
+    fail_closed = payload.get("fail_closed")
+    if fail_closed:
         lines += [
             "",
             "### Stopped and asking Karan",
-            f"- reason: `{result.evidence.get('reason')}`",
-            f"- detail: {result.evidence.get('message')}",
+            f"- reason: `{fail_closed.get('reason')}`",
+            f"- detail: {fail_closed.get('message')}",
         ]
-        for key, value in sorted((result.evidence.get("evidence") or {}).items()):
-            lines.append(f"- {key}: {value}")
+        for key, value in sorted((fail_closed.get("evidence") or {}).items()):
+            lines.append(f"- {key}: {_inline(value)}")
 
-    if result.retained_paths:
+    if payload["retained_paths"]:
         lines += ["", "### Retained evidence"]
-        lines += [f"- `{path}`" for path in result.retained_paths]
+        lines += [f"- `{path}`" for path in payload["retained_paths"]]
 
-    if result.events:
+    if payload["events"]:
         lines += ["", "### Run log"]
-        lines += [f"- {event}" for event in result.events]
+        lines += [f"- {event}" for event in payload["events"]]
 
     return "\n".join(lines) + "\n"
+
+
+def _inline(value: Any) -> str:
+    """Render one already-sanitized evidence value on a single Markdown line."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return str(value)
+    return json.dumps(value, sort_keys=True, default=str)
 
 
 __all__ = ["as_dict", "to_json", "to_markdown"]

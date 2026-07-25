@@ -38,8 +38,17 @@ class PullRequest:
 
 @dataclass(frozen=True)
 class Comment:
-    """One PR conversation comment, as untrusted evidence."""
+    """One PR conversation comment, as untrusted evidence.
 
+    ``identifier`` is GitHub's own node id for the comment. It is the only
+    field here that is stable and not attacker-chosen: an author login can be
+    impersonated only by controlling that account, but a body — signature, head
+    SHA and all — can be copied verbatim by anybody who can comment. The loop
+    therefore snapshots these ids before it invokes the builder and accepts only
+    an id it had not already seen.
+    """
+
+    identifier: str
     author: str
     body: str
     url: str = ""
@@ -157,10 +166,28 @@ def _comment_from(payload: object) -> Comment:
         login = str(author.get("login") or "")
     elif isinstance(author, str):
         login = author
+    if not login:
+        raise GitHubError(
+            "comment payload has no author login",
+            evidence={"comment_id": str(payload.get("id") or "")},
+        )
     body = payload.get("body")
     if not isinstance(body, str):
         raise GitHubError("comment payload has no body", evidence={"author": login})
-    return Comment(author=login, body=body, url=str(payload.get("url") or ""))
+    # A comment without a stable id cannot be told apart from a copy of itself,
+    # so there is nothing to fall back to: fail closed rather than compare bodies.
+    identifier = payload.get("id")
+    if not isinstance(identifier, str) or not identifier:
+        raise GitHubError(
+            "comment payload has no stable id",
+            evidence={"author": login},
+        )
+    return Comment(
+        identifier=identifier,
+        author=login,
+        body=body,
+        url=str(payload.get("url") or ""),
+    )
 
 
 __all__ = ["Comment", "GhCliGitHub", "GitHubBoundary", "PullRequest"]

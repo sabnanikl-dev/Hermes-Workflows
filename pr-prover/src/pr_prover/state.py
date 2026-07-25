@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import LockContention, StateError
+from .redaction import evidence as redact_evidence
 
 SCHEMA_VERSION = 1
 MAX_ATTEMPTS = 2
@@ -241,11 +242,17 @@ class RunLock:
             pass
 
     def _peek(self) -> str:
-        """Read the existing lock for evidence only; it is never used to decide."""
+        """Read the existing lock for evidence only; it is never used to decide.
+
+        A lockfile this run did not write is untrusted content of unknown
+        origin — it may have been hand-edited or clobbered by an unrelated tool
+        — so it is scrubbed here rather than attached raw.
+        """
         try:
-            return self.path.read_text(encoding="utf-8").strip()[:200]
+            raw = self.path.read_text(encoding="utf-8").strip()
         except OSError:
             return "<unreadable>"
+        return redact_evidence(raw, limit=200)
 
 
 __all__ = ["MAX_ATTEMPTS", "OUTCOMES", "SCHEMA_VERSION", "RunLock", "RunState"]

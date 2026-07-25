@@ -12,6 +12,10 @@ Placeholders available to every template::
 Reviewer templates also get ``{reviewer}``; builder templates also get
 ``{attempt}``, ``{mode}`` (``initial`` or ``corrective``), and
 ``{blockers_file}`` — a path under the OS temp directory, never inside a repo.
+
+``builder.comment_author`` is required: the fix-comment readback is only worth
+anything if the expected commenter is pinned, so there is no "any author will
+do" configuration to fall into.
 """
 from __future__ import annotations
 
@@ -29,6 +33,9 @@ SCHEMA_VERSION = 1
 GATE_KINDS = ("baseline", "visual")
 _REPO = re.compile(r"\A[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 _NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}\Z")
+# A GitHub login: alphanumerics and single hyphens, 39 characters at most, with
+# the "[bot]" suffix apps carry. Matched exactly, so no near-login gets through.
+_LOGIN = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?\Z")
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -73,11 +80,17 @@ class ReviewerConfig:
 
 @dataclass(frozen=True)
 class BuilderConfig:
-    """The fix lane, plus what its signed PR comment must contain."""
+    """The fix lane, plus who its PR comment must come from and what it must say.
+
+    ``comment_author`` is required, not optional. The signature and the head SHA
+    are both public the moment the builder comments, so on their own they prove
+    only that somebody read the PR. The expected login is the part an arbitrary
+    commenter cannot supply.
+    """
 
     argv: tuple[str, ...]
     signature: str
-    comment_author: str | None = None
+    comment_author: str
     timeout: float | None = None
 
 
@@ -281,8 +294,12 @@ def _builder(item: object) -> BuilderConfig:
             evidence={"signature": signature},
         )
     author = item.get("comment_author")
-    if author is not None and (not isinstance(author, str) or not author):
-        raise ConfigError("config builder.comment_author must be a login when present")
+    if not isinstance(author, str) or not _LOGIN.match(author):
+        raise ConfigError(
+            "config builder.comment_author is required and must be the exact GitHub "
+            "login the builder comments under; a signature alone is public and forgeable",
+            evidence={"comment_author": author},
+        )
     return BuilderConfig(
         argv=validate_argv(item.get("argv"), what="builder.argv"),
         signature=signature.strip(),

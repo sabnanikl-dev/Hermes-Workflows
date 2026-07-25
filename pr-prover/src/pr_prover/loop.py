@@ -22,10 +22,39 @@ increment lives behind :meth:`RunState.begin_attempt`, which refuses past the
 cap, and the corrective rerun completes an open attempt rather than creating a
 new one.
 
-Every ambiguity — a malformed verdict, a stale head, a push that cannot be
-bound to exactly one new head, a missing comment readback, work outside the
-frozen blocker set, a dirty attempt worktree, lock contention, unexpected local
-state — stops the run and asks Karan with the evidence preserved.
+Three rules hold the loop's conclusions to what is still true:
+
+**Freshness.** Gates and reviewer lanes take minutes to hours, and nothing stops
+a push, a close, or a retarget while they run. :meth:`ProverLoop._assert_live_state`
+re-reads the live PR and the verified remote branch immediately before every
+terminal outcome and immediately before a fix attempt opens, and requires the PR
+number, ``OPEN`` state, head branch, base branch, and full head SHA to still
+match the snapshot the work was done against. Any difference is stale-head.
+
+**Lane result agreement.** A lane's exit status and its printed verdict must
+agree, so a marker alone never decides:
+
+* a lane that timed out fails the run closed whatever it printed — a truncated
+  stream can end on a marker that was never meant to be the final one;
+* a clean verdict (reviewer ``STATUS=pass``, builder ``STATUS=success``)
+  requires a successful process result;
+* a nonzero exit *alongside* a valid failing verdict (reviewer ``STATUS=fail``,
+  builder ``STATUS=failure``) is allowed and preserved, because lanes
+  conventionally exit nonzero to mean "I found blockers" or "I could not
+  finish"; swallowing that as an infrastructure error would lose the findings
+  the blocker set is built from.
+
+**Comment identity.** The builder's fix comment is accepted only from the exact
+configured login, and only if GitHub's own comment id was not already present
+before the builder was invoked. The signature and the head SHA both become
+public the moment the real comment is posted, so neither can carry the proof on
+its own.
+
+Every ambiguity — a malformed verdict, a stale head, a lane whose result
+contradicts its verdict, a push that cannot be bound to exactly one new head, a
+missing comment readback, work outside the frozen blocker set, a dirty attempt
+worktree, lock contention, unexpected local state — stops the run and asks Karan
+with the evidence preserved.
 """
 from __future__ import annotations
 
@@ -43,9 +72,11 @@ from .errors import (
     AmbiguousPush,
     BuilderRefusal,
     FailClosed,
+    LaneFailure,
     PrProverError,
     ReadbackMismatch,
     ScopeContamination,
+    StaleHead,
     StateError,
 )
 from .findings import (
@@ -206,6 +237,9 @@ class ProverLoop:
                     classification=classification,
                 )
 
+            # A fix attempt is about to build on this head. Prove it is still the
+            # live one before spending an attempt on it.
+            self._assert_live_state(pull, before="open a fix attempt")
             attempt = state.begin_attempt()
             state.save()
             self._event(f"attempt {attempt}/{MAX_ATTEMPTS} opened on head {head}")
@@ -242,6 +276,48 @@ class ProverLoop:
             + (" (draft)" if pull.is_draft else "")
         )
         return pull
+
+    def _assert_live_state(self, snapshot: PullRequest, *, before: str) -> None:
+        """Prove the live PR and the remote branch still match ``snapshot``.
+
+        The one reusable freshness check, called immediately before every
+        terminal outcome and immediately before a fix attempt opens. Everything
+        the run concluded was measured against ``snapshot``; if GitHub no longer
+        agrees with it — a new push, a close or merge, a retargeted base, a
+        renamed head branch — those conclusions describe a PR that no longer
+        exists, and the run stops as stale-head rather than reporting them.
+        """
+        live = self.github.pull_request(self.config.repo, self.config.pr)
+        drift: dict[str, Any] = {}
+        if live.number != snapshot.number:
+            drift["number"] = {"inspected": snapshot.number, "live": live.number}
+        if live.state != "OPEN":
+            drift["state"] = {"inspected": snapshot.state, "live": live.state}
+        if live.head_ref_name != snapshot.head_ref_name:
+            drift["head_branch"] = {
+                "inspected": snapshot.head_ref_name,
+                "live": live.head_ref_name,
+            }
+        if live.base_ref_name != snapshot.base_ref_name:
+            drift["base_branch"] = {
+                "inspected": snapshot.base_ref_name,
+                "live": live.base_ref_name,
+            }
+        if live.head_ref_oid != snapshot.head_ref_oid:
+            drift["head"] = {"inspected": snapshot.head_ref_oid, "live": live.head_ref_oid}
+        if drift:
+            raise StaleHead(
+                f"the live pull request drifted while this run was working; refusing to {before}",
+                evidence={
+                    "before": before,
+                    "pr": f"{self.config.repo}#{self.config.pr}",
+                    "drift": drift,
+                },
+            )
+        # The PR agreeing with itself is not enough: the branch it names must
+        # still resolve to the same commit on the remote.
+        self.worktrees.source.verified_head(snapshot.head_ref_name, snapshot.head_ref_oid)
+        self._event(f"live state re-verified at {snapshot.head_ref_oid} before {before}")
 
     def _evaluate(self, pull: PullRequest, head: str) -> Classification:
         """Run gates and, when gates are clean, the exact-head reviewer lanes.
@@ -319,20 +395,78 @@ class ProverLoop:
                 self._values(pull, head, worktree, extra={"reviewer": reviewer.name}),
                 what=f"reviewer {reviewer.name!r}",
             )
+            lane = f"reviewer {reviewer.name}"
             result = self.runner.run(argv, cwd=worktree, timeout=reviewer.timeout)
+            self._reject_timed_out(result, lane=lane, head=head)
             verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
+            # "pass" is the only verdict that lets the PR through this lane, so
+            # it is the one that must be backed by a process that actually
+            # finished successfully. A failing verdict may exit nonzero.
+            self._require_success_for_clean(
+                result, lane=lane, status=verdict.status, clean="pass", head=head
+            )
             verdicts.append(verdict)
             self._event(
                 f"reviewer {reviewer.name} returned {verdict.status} with "
-                f"{len(verdict.blocking)} blocking finding(s) on {head}"
+                f"{len(verdict.blocking)} blocking finding(s) on {head} "
+                f"(exit {result.returncode})"
             )
         return tuple(verdicts)
+
+    # -- lane result agreement --------------------------------------------
+    def _reject_timed_out(self, result: CommandResult, *, lane: str, head: str) -> None:
+        """A lane that ran out of time never produced a verdict, whatever it printed.
+
+        Its output is a truncated stream, and a truncated stream can end on a
+        marker the lane never meant as final — so the marker is not read at all.
+        """
+        if not result.timed_out:
+            return
+        raise LaneFailure(
+            f"{lane} timed out; its output cannot be read as a verdict",
+            evidence={
+                "lane": lane,
+                "head": head,
+                "returncode": result.returncode,
+                "timed_out": True,
+                "output": redact_evidence(_combined(result), limit=2000),
+            },
+        )
+
+    def _require_success_for_clean(
+        self, result: CommandResult, *, lane: str, status: str, clean: str, head: str
+    ) -> None:
+        """A verdict that clears the lane requires a successful process result.
+
+        The inverse is deliberately allowed: a nonzero exit alongside a valid
+        failing verdict is how lanes conventionally say "I found blockers" or "I
+        could not finish", and that lane must keep feeding the blocker set
+        instead of being discarded as an infrastructure error.
+        """
+        if status != clean or result.ok:
+            return
+        raise LaneFailure(
+            f"{lane} reported STATUS={status} but its process exited {result.returncode}",
+            evidence={
+                "lane": lane,
+                "head": head,
+                "status": status,
+                "returncode": result.returncode,
+                "timed_out": result.timed_out,
+                "output": redact_evidence(_combined(result), limit=2000),
+            },
+        )
 
     # -- bounded fix attempt ----------------------------------------------
     def _attempt(
         self, state: RunState, pull: PullRequest, head: str, classification: Classification
     ) -> None:
         frozen_ids = classification.blocking_ids
+        # The identity of every comment that existed before the builder could
+        # post one. A copy of a real fix comment sitting here already — same
+        # signature, same author string, same SHA — is by construction not the
+        # comment this attempt is looking for.
+        known_comments = self._comment_identities()
         worktree = self.worktrees.create(
             f"pr{pull.number}-{head[:12]}-attempt{state.attempt}", head
         )
@@ -378,7 +512,7 @@ class ProverLoop:
                     evidence={"attempt": state.attempt, "reported_head": report.head},
                 )
             self._assert_clean(worktree)
-            self._verify_push(pull, old_head=head, report=report)
+            self._verify_push(pull, old_head=head, report=report, known_comments=known_comments)
         except Exception:
             self._retain(worktree, why=f"attempt {state.attempt} failed")
             raise
@@ -416,12 +550,21 @@ class ProverLoop:
             what="builder",
         )
         result = self.runner.run(argv, cwd=worktree, timeout=self.config.builder.timeout)
-        return parse_builder_report(
+        # The builder lane carries the same rule as the reviewer lanes: a
+        # timeout is never a verdict, and only the clean claim ("success", the
+        # one that leads to push verification) requires a successful process.
+        lane = f"builder ({mode})"
+        self._reject_timed_out(result, lane=lane, head=head)
+        report = parse_builder_report(
             _combined(result),
             expected_pr=pull.number,
             expected_branch=pull.head_ref_name,
             frozen_ids=frozen_ids,
         )
+        self._require_success_for_clean(
+            result, lane=lane, status=report.status, clean="success", head=head
+        )
+        return report
 
     def _assert_clean(self, worktree: Path) -> None:
         """A builder that pushed leaves nothing behind; leftovers are contamination."""
@@ -446,7 +589,14 @@ class ProverLoop:
                 },
             )
 
-    def _verify_push(self, pull: PullRequest, *, old_head: str, report: BuilderReport) -> None:
+    def _verify_push(
+        self,
+        pull: PullRequest,
+        *,
+        old_head: str,
+        report: BuilderReport,
+        known_comments: frozenset[str],
+    ) -> None:
         """Bind the builder's push to exactly one new head, then read the comment back."""
         if report.head == old_head:
             raise AmbiguousPush(
@@ -471,27 +621,45 @@ class ProverLoop:
                 evidence={"before": pull.head_ref_name, "after": refreshed.head_ref_name},
             )
         self.worktrees.source.verified_head(refreshed.head_ref_name, new_head)
-        self._read_back_comment(new_head)
+        self._read_back_comment(new_head, known_comments)
         self._event(f"push verified: {old_head} -> {new_head}")
 
-    def _read_back_comment(self, head: str) -> None:
+    def _comment_identities(self) -> frozenset[str]:
+        """GitHub's own ids for the comments visible right now."""
+        comments = self.github.comments(self.config.repo, self.config.pr)
+        return frozenset(comment.identifier for comment in comments)
+
+    def _read_back_comment(self, head: str, known: frozenset[str]) -> None:
+        """Find the builder's fix comment, or stop.
+
+        Three conditions, and all three are required. The comment id must be one
+        that did not exist before the builder was invoked, because a body can be
+        copied verbatim by anyone who can read the PR. The author must equal the
+        configured login exactly, because that is the only part of the comment an
+        arbitrary commenter cannot supply. And the body must carry both the
+        signature and this exact new head, so a real comment about some other
+        push cannot stand in for this one.
+        """
         signature = self.config.builder.signature
         author = self.config.builder.comment_author
         comments = self.github.comments(self.config.repo, self.config.pr)
-        for comment in comments:
+        fresh = [comment for comment in comments if comment.identifier not in known]
+        for comment in fresh:
+            if comment.author != author:
+                continue
             if signature not in comment.body or head not in comment.body:
                 continue
-            if author is not None and comment.author != author:
-                continue
-            self._event(f"builder fix comment read back for {head}")
+            self._event(f"builder fix comment {comment.identifier} read back for {head}")
             return
         raise ReadbackMismatch(
-            "no builder fix comment on GitHub carries both the signature and the new head",
+            "no comment posted since the builder was invoked carries the expected "
+            "author, the signature, and the new head together",
             evidence={
                 "head": head,
                 "expected_signature": signature,
                 "expected_author": author,
                 "comments_seen": len(comments),
+                "comments_since_builder_invoked": len(fresh),
             },
         )
 
@@ -586,6 +754,10 @@ class ProverLoop:
         state: RunState,
         classification: Classification,
     ) -> RunResult:
+        # Every non-failure terminal outcome is produced here, so asserting
+        # freshness at this one point is what makes "no report for a head that
+        # drifted" structural rather than a rule each call site must remember.
+        self._assert_live_state(pull, before=f"report {outcome}")
         self._event(f"outcome {outcome} ({reason}) on head {pull.head_ref_oid}")
         return RunResult(
             outcome=outcome,
