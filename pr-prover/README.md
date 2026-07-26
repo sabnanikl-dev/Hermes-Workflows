@@ -1,5 +1,10 @@
 # pr-prover
 
+Read [`MISSION.md`](MISSION.md) before changing or reviewing this tool. It is the
+normative product, scope, lifecycle, and blocker contract; this README explains
+operation and implementation behavior. Repository-wide rules live in
+[`AGENTS.md`](../AGENTS.md).
+
 The repository-owned executable loop that proves an **existing** pull request
 merge-ready, blocked, or in need of Karan. Standard library only; no install
 step and no runtime dependencies.
@@ -16,9 +21,14 @@ inspect live PR → bind exact headRefOid → verify remote head
   → merge-ready | blocked | needs-karan, tied to the final exact head
 ```
 
-This slice is **PAPI-88** of the [control-surface contract](https://github.com/sabnanikl-dev/Hermes-Workflows/issues/1).
-The hardened launcher and credential scoping (PAPI-90), the slim SKILL.md router
-(PAPI-92), and the final qualification suite (PAPI-93) are still pending.
+The executable is **PAPI-88** of the [control-surface contract](https://github.com/sabnanikl-dev/Hermes-Workflows/issues/1);
+the repo-native contract and the slim
+[`autonomous-pr-prover`](../Karan-skills/software-development/autonomous-pr-prover/SKILL.md)
+router that sends Hermes here are **PAPI-92**. The hardened launcher and
+credential scoping (PAPI-90), deterministic human-feedback reconciliation
+(PAPI-97), and the final integration proof (PAPI-93) are still pending; see the
+proof map in [`MISSION.md`](MISSION.md) for exactly which invariants are shipped
+and which are owed.
 
 ## Run it
 
@@ -32,7 +42,11 @@ pr-prover/bin/pr-prover reset        --config /path/to/run.json [--force]
 Exit codes are the outcome: `0` merge-ready, `1` blocked, `2` needs-Karan
 (including every fail-closed stop), `64` usage or configuration error.
 
-Start from [`examples/run.example.json`](examples/run.example.json).
+Start from [`examples/run.example.json`](examples/run.example.json). It shows the
+two-lane minimum the tool enforces; a merge-readiness run adds the Integration
+Auditor as a third reviewer lane, in the order [`MISSION.md`](MISSION.md)
+requires. Until PAPI-90 lands that ordering check, the operator writing the
+config is what holds it.
 
 ## Configuration
 
