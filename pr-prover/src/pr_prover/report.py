@@ -52,6 +52,16 @@ def as_dict(result: RunResult) -> dict[str, Any]:
             }
             for verdict in result.verdicts
         ],
+        "lanes": [
+            {
+                "lane": lane.lane,
+                "state": lane.state,
+                "returncode": lane.returncode,
+                "duration_seconds": round(lane.duration, 1),
+                "quiet_seconds": round(lane.quiet_seconds, 1),
+            }
+            for lane in result.lanes
+        ],
         "classification": result.classification.as_dict() if result.classification else None,
         "events": list(result.events),
         "retained_paths": list(result.retained_paths),
@@ -96,6 +106,14 @@ def to_markdown(result: RunResult) -> str:
             lines.append(
                 f"- Reviewer {verdict['reviewer']}: {verdict['status']}, "
                 f"{verdict['blocking']} blocking on `{verdict['head']}`"
+            )
+
+    if payload["lanes"]:
+        lines += ["", "### Lanes"]
+        for lane in payload["lanes"]:
+            lines.append(
+                f"- `{lane['lane']}`: {lane['state']} after {lane['duration_seconds']}s "
+                f"(exit {lane['returncode']}, quiet {lane['quiet_seconds']}s)"
             )
 
     if payload["classification"] is not None:

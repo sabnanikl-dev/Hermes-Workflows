@@ -44,11 +44,21 @@ agree, so a marker alone never decides:
   finish"; swallowing that as an infrastructure error would lose the findings
   the blocker set is built from.
 
-**Comment identity.** The builder's fix comment is accepted only from the exact
+**Published identity.** Every claim a trusted agent makes about GitHub is read
+back from GitHub. The builder's fix comment is accepted only from the exact
 configured login, and only if GitHub's own comment id was not already present
-before the builder was invoked. The signature and the head SHA both become
-public the moment the real comment is posted, so neither can carry the proof on
-its own.
+before the builder was invoked; its push must move the PR head, add commits on
+top of the reviewed head, and match the worktree it actually worked in. Each
+reviewer lane must likewise leave a published artifact under its configured
+login, carrying its own role line and this exact head. The signature and the
+head SHA both become public the moment a real artifact is posted, so neither can
+carry the proof on its own.
+
+Trusted agents are given room to work. A builder or reviewer that prints nothing
+for twenty minutes is a lane doing its job behind buffered output, and only its
+own wall-clock budget ever ends it; what the loop keeps is the observable state
+— launched, running, exited, or timed out — so Hermes can tell those apart
+without guessing from silence.
 
 Every ambiguity — a malformed verdict, a stale head, a lane whose result
 contradicts its verdict, a push that cannot be bound to exactly one new head, a
@@ -59,6 +69,7 @@ with the evidence preserved.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -66,8 +77,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .commands import CommandResult, CommandRunner, render_argv
-from .config import RunConfig
+from .commands import CommandResult, CommandRunner, Progress, render_argv
+from .config import LaneEnv, ReviewerConfig, RunConfig
 from .errors import (
     AmbiguousPush,
     BuilderRefusal,
@@ -86,7 +97,7 @@ from .findings import (
     classify,
     default_adjudicator,
 )
-from .github import GitHubBoundary, PullRequest
+from .github import Comment, GitHubBoundary, PullRequest
 from .redaction import evidence as redact_evidence
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
@@ -118,6 +129,22 @@ class GateOutcome:
     output: str
 
 
+@dataclass(frozen=True)
+class LaneObservation:
+    """How one lane's process actually ended, kept whatever its verdict said.
+
+    ``quiet_seconds`` is here to be read, not acted on: a long quiet stretch
+    followed by a clean exit is a normal trusted-agent run, and the loop records
+    it so a later "was it hung?" question has an answer.
+    """
+
+    lane: str
+    state: str
+    returncode: int
+    duration: float
+    quiet_seconds: float
+
+
 @dataclass
 class RunResult:
     """The terminal report for one run, tied to the final exact head."""
@@ -132,6 +159,7 @@ class RunResult:
     classification: Classification | None = None
     verdicts: tuple[ReviewerVerdict, ...] = ()
     gates: tuple[GateOutcome, ...] = ()
+    lanes: tuple[LaneObservation, ...] = ()
     events: tuple[str, ...] = ()
     evidence: dict[str, Any] = field(default_factory=dict)
     retained_paths: tuple[str, ...] = ()
@@ -164,6 +192,7 @@ class ProverLoop:
         self._state: RunState | None = None
         self._events: list[str] = []
         self._gates: list[GateOutcome] = []
+        self._lanes: list[LaneObservation] = []
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
         self._retained: list[str] = []
 
@@ -355,7 +384,13 @@ class ProverLoop:
                 self._values(pull, head, worktree),
                 what=f"gate {gate.name!r}",
             )
-            result = self.runner.run(argv, cwd=worktree, timeout=gate.timeout)
+            result = self._run_lane(
+                argv,
+                lane=f"gate {gate.name}",
+                cwd=worktree,
+                timeout=gate.timeout,
+                env=gate.env,
+            )
             output = redact_evidence(_combined(result))
             self._gates.append(
                 GateOutcome(
@@ -392,11 +427,20 @@ class ProverLoop:
         for reviewer in self.config.reviewers:
             argv = render_argv(
                 reviewer.argv,
-                self._values(pull, head, worktree, extra={"reviewer": reviewer.name}),
+                self._values(
+                    pull,
+                    head,
+                    worktree,
+                    extra={"reviewer": reviewer.name, "role": reviewer.role},
+                ),
                 what=f"reviewer {reviewer.name!r}",
             )
             lane = f"reviewer {reviewer.name}"
-            result = self.runner.run(argv, cwd=worktree, timeout=reviewer.timeout)
+            # Everything already published, captured before this lane can post.
+            known = self._artifact_identities()
+            result = self._run_lane(
+                argv, lane=lane, cwd=worktree, timeout=reviewer.timeout, env=reviewer.env
+            )
             self._reject_timed_out(result, lane=lane, head=head)
             verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
             # "pass" is the only verdict that lets the PR through this lane, so
@@ -405,6 +449,7 @@ class ProverLoop:
             self._require_success_for_clean(
                 result, lane=lane, status=verdict.status, clean="pass", head=head
             )
+            self._read_back_reviewer(reviewer, head, known)
             verdicts.append(verdict)
             self._event(
                 f"reviewer {reviewer.name} returned {verdict.status} with "
@@ -412,6 +457,108 @@ class ProverLoop:
                 f"(exit {result.returncode})"
             )
         return tuple(verdicts)
+
+    def _read_back_reviewer(
+        self, reviewer: ReviewerConfig, head: str, known: frozenset[str]
+    ) -> None:
+        """Find this reviewer's published artifact on the PR, or stop.
+
+        A lane's stdout is only what a process said about itself; the artifact
+        Karan and the next reviewer act on is the one on the PR. So it must be
+        new since this lane was launched, published under the configured login,
+        carry this lane's role on its own line — a role read as a substring
+        would let ``ROLE=Auditor`` satisfy ``ROLE=A`` — and be bound to this
+        exact head, by the review's own ``commit_id`` where GitHub records one.
+        """
+        role_line = f"ROLE={reviewer.role}"
+        published = self._artifacts()
+        fresh = [item for item in published if item.identifier not in known]
+        for artifact in fresh:
+            if artifact.author != reviewer.artifact_author:
+                continue
+            if reviewer.artifact_signature not in artifact.body:
+                continue
+            if not any(line.strip() == role_line for line in artifact.body.splitlines()):
+                continue
+            if artifact.commit_id:
+                if artifact.commit_id != head:
+                    continue
+            elif head not in artifact.body:
+                continue
+            self._event(
+                f"reviewer {reviewer.name} {artifact.kind} {artifact.identifier} "
+                f"read back for {head} as {role_line}"
+            )
+            return
+        raise ReadbackMismatch(
+            f"reviewer {reviewer.name} published no artifact carrying its configured "
+            "author, signature, role, and this exact head together",
+            evidence={
+                "reviewer": reviewer.name,
+                "head": head,
+                "expected_author": reviewer.artifact_author,
+                "expected_role_line": role_line,
+                "expected_signature": reviewer.artifact_signature,
+                "artifacts_seen": len(published),
+                "artifacts_since_lane_launched": len(fresh),
+            },
+        )
+
+    def _artifacts(self) -> tuple[Comment, ...]:
+        """Every published comment and review on the PR, as untrusted evidence."""
+        return (
+            *self.github.comments(self.config.repo, self.config.pr),
+            *self.github.reviews(self.config.repo, self.config.pr),
+        )
+
+    def _artifact_identities(self) -> frozenset[str]:
+        return frozenset(artifact.identifier for artifact in self._artifacts())
+
+    # -- launching a trusted lane -----------------------------------------
+    def _run_lane(
+        self,
+        argv: Sequence[str],
+        *,
+        lane: str,
+        cwd: Path,
+        timeout: float | None,
+        env: LaneEnv,
+    ) -> CommandResult:
+        """Launch one lane and keep its observable state.
+
+        The environment is inherited and then adjusted by the lane's own named
+        overlay, so the trusted agent keeps the session it authenticates with.
+        While it runs, progress is recorded; when it ends, so is how it ended.
+        Silence is written down, never converted into a failure.
+        """
+        self._event(f"{lane} launched: {argv[0]} (budget {_budget(timeout)})")
+        result = self.runner.run(
+            argv,
+            cwd=cwd,
+            env=env.apply(os.environ),
+            timeout=timeout,
+            progress=lambda update: self._observe(lane, update),
+        )
+        self._lanes.append(
+            LaneObservation(
+                lane=lane,
+                state=result.state,
+                returncode=result.returncode,
+                duration=result.duration,
+                quiet_seconds=result.quiet_seconds,
+            )
+        )
+        self._event(
+            f"{lane} {result.state} after {result.duration:.0f}s "
+            f"(exit {result.returncode}, quiet {result.quiet_seconds:.0f}s)"
+        )
+        return result
+
+    def _observe(self, lane: str, update: Progress) -> None:
+        self._event(
+            f"{lane} still running at {update.elapsed:.0f}s "
+            f"({update.output_bytes} bytes of output, quiet {update.quiet_seconds:.0f}s)"
+        )
 
     # -- lane result agreement --------------------------------------------
     def _reject_timed_out(self, result: CommandResult, *, lane: str, head: str) -> None:
@@ -512,7 +659,13 @@ class ProverLoop:
                     evidence={"attempt": state.attempt, "reported_head": report.head},
                 )
             self._assert_clean(worktree)
-            self._verify_push(pull, old_head=head, report=report, known_comments=known_comments)
+            self._verify_push(
+                pull,
+                old_head=head,
+                report=report,
+                known_comments=known_comments,
+                worktree=worktree,
+            )
         except Exception:
             self._retain(worktree, why=f"attempt {state.attempt} failed")
             raise
@@ -549,11 +702,17 @@ class ProverLoop:
             ),
             what="builder",
         )
-        result = self.runner.run(argv, cwd=worktree, timeout=self.config.builder.timeout)
+        lane = f"builder ({mode})"
+        result = self._run_lane(
+            argv,
+            lane=lane,
+            cwd=worktree,
+            timeout=self.config.builder.timeout,
+            env=self.config.builder.env,
+        )
         # The builder lane carries the same rule as the reviewer lanes: a
         # timeout is never a verdict, and only the clean claim ("success", the
         # one that leads to push verification) requires a successful process.
-        lane = f"builder ({mode})"
         self._reject_timed_out(result, lane=lane, head=head)
         report = parse_builder_report(
             _combined(result),
@@ -589,6 +748,33 @@ class ProverLoop:
                 },
             )
 
+    def _assert_local_head(self, worktree: Path, expected: str) -> None:
+        """The worktree the builder worked in must sit on the commit it pushed.
+
+        Local head, remote branch head, and PR head all have to be the same
+        commit. This is the local third of that: it catches a builder that
+        pushed from somewhere else, or reported a head it never checked out.
+        """
+        result = self.runner.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"], timeout=120.0
+        )
+        if not result.ok:
+            raise ReadbackMismatch(
+                "could not read the attempt worktree's local head",
+                evidence={
+                    "worktree": str(worktree),
+                    "returncode": result.returncode,
+                    "stderr": redact_evidence(result.stderr, limit=1000),
+                },
+            )
+        local = result.stdout.strip().lower()
+        if local != expected:
+            raise ReadbackMismatch(
+                "the attempt worktree's local head is not the head the builder reported pushing",
+                evidence={"worktree": str(worktree), "local_head": local, "reported_head": expected},
+            )
+        self._event(f"attempt worktree local head verified as {local}")
+
     def _verify_push(
         self,
         pull: PullRequest,
@@ -596,8 +782,15 @@ class ProverLoop:
         old_head: str,
         report: BuilderReport,
         known_comments: frozenset[str],
+        worktree: Path,
     ) -> None:
-        """Bind the builder's push to exactly one new head, then read the comment back."""
+        """Bind the builder's push to exactly one new head, then read the comment back.
+
+        The order is the reconciliation Hermes would otherwise do by hand: the
+        PR head moved to the reported commit, the worktree the builder used sits
+        on that same commit, that commit was added on top of the head this run
+        reviewed, and the signed fix comment for it is on the PR.
+        """
         if report.head == old_head:
             raise AmbiguousPush(
                 "the builder reported the pre-attempt head as its result",
@@ -621,8 +814,17 @@ class ProverLoop:
                 evidence={"before": pull.head_ref_name, "after": refreshed.head_ref_name},
             )
         self.worktrees.source.verified_head(refreshed.head_ref_name, new_head)
+        self._assert_local_head(worktree, new_head)
+        commits = self.worktrees.source.commits_added(old_head, new_head)
+        if not commits or commits[0] != new_head:
+            raise AmbiguousPush(
+                "the new PR head is not the newest commit added on top of the reviewed head",
+                evidence={"old_head": old_head, "new_head": new_head, "commits": list(commits)},
+            )
         self._read_back_comment(new_head, known_comments)
-        self._event(f"push verified: {old_head} -> {new_head}")
+        self._event(
+            f"push verified: {old_head} -> {new_head} ({len(commits)} new commit(s))"
+        )
 
     def _comment_identities(self) -> frozenset[str]:
         """GitHub's own ids for the comments visible right now."""
@@ -770,6 +972,7 @@ class ProverLoop:
             classification=classification,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
+            lanes=tuple(self._lanes),
             events=tuple(self._events),
             retained_paths=tuple(self._retained),
         )
@@ -789,6 +992,7 @@ class ProverLoop:
             classification=None,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
+            lanes=tuple(self._lanes),
             events=tuple(self._events),
             evidence=exc.as_dict(),
             retained_paths=tuple(self._retained),
@@ -818,4 +1022,16 @@ def _marker_count(stream: str) -> int:
     return sum(1 for line in stream.splitlines() if line.lstrip().upper().startswith("DONE:"))
 
 
-__all__ = ["BLOCKED", "MERGE_READY", "NEEDS_KARAN", "GateOutcome", "ProverLoop", "RunResult"]
+def _budget(timeout: float | None) -> str:
+    return "unbounded" if timeout is None else f"{timeout:.0f}s"
+
+
+__all__ = [
+    "BLOCKED",
+    "MERGE_READY",
+    "NEEDS_KARAN",
+    "GateOutcome",
+    "LaneObservation",
+    "ProverLoop",
+    "RunResult",
+]

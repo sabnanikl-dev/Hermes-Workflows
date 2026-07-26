@@ -19,7 +19,7 @@ from .commands import CommandRunner
 from .errors import StaleHead, WorktreeError
 from .redaction import evidence as redact_evidence
 
-_ALLOWED_GIT_SUBCOMMANDS = frozenset({"fetch", "rev-parse", "worktree"})
+_ALLOWED_GIT_SUBCOMMANDS = frozenset({"fetch", "rev-list", "rev-parse", "worktree"})
 
 
 def _is_full_sha(value: str) -> bool:
@@ -110,6 +110,45 @@ class SourceRepo:
                 evidence={"branch": branch, "expected_head": expected_oid, "remote_head": actual},
             )
         return actual
+
+    def commits_added(self, old: str, new: str, *, limit: int = 100) -> tuple[str, ...]:
+        """The commits ``new`` adds on top of ``old``, newest first.
+
+        This is the commit-list half of push verification: the PR head moving is
+        not by itself evidence that a fix commit was added on top of the head
+        this run reviewed. If ``old`` is no longer reachable from ``new``, the
+        branch was rewritten rather than extended — the reviewed commits are
+        gone — and that is never an ordinary fix push.
+        """
+        for oid in (old, new):
+            if not _is_full_sha(oid):
+                raise StaleHead(
+                    "commit-list reconciliation needs two full 40-hex SHAs",
+                    evidence={"old": old, "new": new},
+                )
+        dropped = self._rev_list(f"{new}..{old}", limit=1)
+        if dropped:
+            raise StaleHead(
+                "the new head does not contain the head this run reviewed; "
+                "the branch was rewritten, not extended",
+                evidence={"old_head": old, "new_head": new, "dropped": list(dropped)},
+            )
+        return self._rev_list(f"{old}..{new}", limit=limit)
+
+    def _rev_list(self, spec: str, *, limit: int) -> tuple[str, ...]:
+        raw = self._git(["rev-list", f"--max-count={limit}", spec], what="rev-list")
+        commits: list[str] = []
+        for line in raw.splitlines():
+            oid = line.strip().lower()
+            if not oid:
+                continue
+            if not _is_full_sha(oid):
+                raise WorktreeError(
+                    "git rev-list returned a line that is not a full 40-hex SHA",
+                    evidence={"spec": spec, "line": redact_evidence(line, limit=200)},
+                )
+            commits.append(oid)
+        return tuple(commits)
 
     def add_worktree(self, path: Path, oid: str) -> None:
         self._git(["worktree", "add", "--detach", str(path), oid], what="worktree add")

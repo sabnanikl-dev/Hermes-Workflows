@@ -1,21 +1,39 @@
 """Strict run configuration.
 
 One JSON file names the PR, the clone to borrow objects from, where the local
-state/lock live, and the argv templates for baseline gates, the two reviewer
-lanes, and the builder lane. Unknown keys are rejected: a typo that silently
-disables a gate is exactly the kind of quiet drift this loop must not have.
+state/lock live, and the argv templates for baseline gates, the reviewer lanes,
+and the builder lane. Unknown keys are rejected: a typo that silently disables a
+gate is exactly the kind of quiet drift this loop must not have.
 
 Placeholders available to every template::
 
     {repo} {owner} {name} {pr} {branch} {base} {head} {worktree}
 
-Reviewer templates also get ``{reviewer}``; builder templates also get
-``{attempt}``, ``{mode}`` (``initial`` or ``corrective``), and
+Reviewer templates also get ``{reviewer}`` and ``{role}``; builder templates also
+get ``{attempt}``, ``{mode}`` (``initial`` or ``corrective``), and
 ``{blockers_file}`` — a path under the OS temp directory, never inside a repo.
 
-``builder.comment_author`` is required: the fix-comment readback is only worth
-anything if the expected commenter is pinned, so there is no "any author will
-do" configuration to fall into.
+The argv arrays are where the trusted agents are named. Hermes writes the exact
+invocation of the installed Claude/Codex wrapper it wants — model, empty MCP
+config, task-scoped tools, pointer-first prompt file — and the loop runs it
+unchanged. There is no role abstraction between the two.
+
+Two identities are pinned rather than inferred:
+
+* ``builder.comment_author`` — the login the fix comment must come from;
+* each reviewer's ``artifact_author`` — the login its published review or
+  comment must come from, alongside the ``role`` line and the exact head that
+  artifact must carry.
+
+Both are required. A signature and a head SHA are public the moment an artifact
+is posted, so on their own they prove only that somebody read the PR; the login
+is the part an arbitrary account cannot supply. There is no "any author will do"
+configuration to fall into.
+
+``env``/``env_unset`` are a small named overlay on the inherited environment,
+not a replacement for it: the trusted lanes run as Karan's own user with the
+normal Claude OAuth/keychain session, so the session variables cannot be
+retargeted and credentials do not belong in this file.
 """
 from __future__ import annotations
 
@@ -31,6 +49,12 @@ from .errors import ConfigError
 
 SCHEMA_VERSION = 1
 GATE_KINDS = ("baseline", "visual")
+# A trusted builder reads the live PR, edits, runs verification, commits,
+# pushes, and comments. Twenty minutes is the floor of a realistic budget for
+# that; anything shorter tends to be killed mid-verification and misread as a
+# hang. Advisory, not enforced: a repo with a two-minute suite may know better.
+REALISTIC_BUILDER_BUDGET = 1200.0
+REALISTIC_REVIEWER_BUDGET = 900.0
 _REPO = re.compile(r"\A[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 _NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}\Z")
 # A GitHub login: alphanumerics and single hyphens, 39 characters at most, with
@@ -54,9 +78,49 @@ _TOP_LEVEL_KEYS = frozenset(
         "builder",
     }
 )
-_GATE_KEYS = frozenset({"name", "argv", "kind", "timeout"})
-_REVIEWER_KEYS = frozenset({"name", "argv", "timeout"})
-_BUILDER_KEYS = frozenset({"argv", "signature", "comment_author", "timeout"})
+_GATE_KEYS = frozenset({"name", "argv", "kind", "timeout", "env", "env_unset"})
+_REVIEWER_KEYS = frozenset(
+    {"name", "argv", "timeout", "role", "artifact_author", "artifact_signature", "env", "env_unset"}
+)
+_BUILDER_KEYS = frozenset(
+    {"argv", "signature", "comment_author", "timeout", "env", "env_unset"}
+)
+_ENV_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+# The variables that carry the logged-in macOS session the trusted agents
+# authenticate through. Overriding or clearing any of them is how a lane ends up
+# running against a synthetic home with no Claude OAuth/keychain session.
+_SESSION_ENV = frozenset({"HOME", "USER", "LOGNAME", "SHELL"})
+_CREDENTIAL_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
+
+
+@dataclass(frozen=True)
+class LaneEnv:
+    """A named overlay on the environment a lane inherits.
+
+    Empty by default, and empty means "inherit exactly what this process has".
+    The overlay can add a variable a lane needs and remove one it must not see
+    — ``GH_TOKEN``, so a trusted agent uses its own configured ``gh`` identity
+    rather than the operator's — but it cannot touch the session variables and
+    it may not carry a credential value: tokens belong in the keychain and in
+    ``gh``'s own auth, not in a run config that ends up in evidence.
+    """
+
+    set: tuple[tuple[str, str], ...] = ()
+    unset: tuple[str, ...] = ()
+
+    @property
+    def empty(self) -> bool:
+        return not self.set and not self.unset
+
+    def apply(self, base: Mapping[str, str]) -> dict[str, str] | None:
+        """The environment for one lane, or ``None`` to inherit untouched."""
+        if self.empty:
+            return None
+        env = dict(base)
+        for name in self.unset:
+            env.pop(name, None)
+        env.update(self.set)
+        return env
 
 
 @dataclass(frozen=True)
@@ -67,31 +131,37 @@ class GateConfig:
     argv: tuple[str, ...]
     kind: str = "baseline"
     timeout: float | None = None
+    env: LaneEnv = LaneEnv()
 
 
 @dataclass(frozen=True)
 class ReviewerConfig:
-    """One exact-head reviewer lane."""
+    """One exact-head reviewer lane, and the artifact it must publish.
+
+    ``role`` is what the lane is: Reviewer A, Reviewer B, Integration Auditor.
+    It is substituted into the argv template and it must appear on its own line
+    in the published artifact, so one reviewer's post can never be read back as
+    another's.
+    """
 
     name: str
     argv: tuple[str, ...]
+    artifact_author: str
+    artifact_signature: str
+    role: str
     timeout: float | None = None
+    env: LaneEnv = LaneEnv()
 
 
 @dataclass(frozen=True)
 class BuilderConfig:
-    """The fix lane, plus who its PR comment must come from and what it must say.
-
-    ``comment_author`` is required, not optional. The signature and the head SHA
-    are both public the moment the builder comments, so on their own they prove
-    only that somebody read the PR. The expected login is the part an arbitrary
-    commenter cannot supply.
-    """
+    """The fix lane, plus who its PR comment must come from and what it must say."""
 
     argv: tuple[str, ...]
     signature: str
     comment_author: str
     timeout: float | None = None
+    env: LaneEnv = LaneEnv()
 
 
 @dataclass(frozen=True)
@@ -127,6 +197,28 @@ class RunConfig:
     @property
     def visual_gates(self) -> tuple[GateConfig, ...]:
         return tuple(gate for gate in self.gates if gate.kind == "visual")
+
+    def advisories(self) -> tuple[str, ...]:
+        """Non-fatal notes ``check-config`` prints before a real run.
+
+        The budgets are the ones that matter operationally: a trusted agent cut
+        off mid-verification looks exactly like a hang, and that misreading is
+        what the two-cycle loop pays for.
+        """
+        notes: list[str] = []
+        if self.builder.timeout is not None and self.builder.timeout < REALISTIC_BUILDER_BUDGET:
+            notes.append(
+                f"builder timeout is {self.builder.timeout:.0f}s; a trusted builder that reads "
+                f"the PR, edits, verifies, pushes, and comments usually needs "
+                f"{REALISTIC_BUILDER_BUDGET:.0f}s or more"
+            )
+        for reviewer in self.reviewers:
+            if reviewer.timeout is not None and reviewer.timeout < REALISTIC_REVIEWER_BUDGET:
+                notes.append(
+                    f"reviewer {reviewer.name!r} timeout is {reviewer.timeout:.0f}s; "
+                    f"exact-head review usually needs {REALISTIC_REVIEWER_BUDGET:.0f}s or more"
+                )
+        return tuple(notes)
 
     @classmethod
     def load(cls, path: Path) -> RunConfig:
@@ -188,6 +280,9 @@ class RunConfig:
                 evidence={"reviewers": len(reviewers)},
             )
         _reject_duplicates([reviewer.name for reviewer in reviewers], what="reviewer")
+        # Two lanes sharing a role could each satisfy the other's artifact
+        # readback, which is exactly the independence the two lanes exist for.
+        _reject_duplicates([reviewer.role for reviewer in reviewers], what="reviewer role")
 
         if visual_required and not any(gate.kind == "visual" for gate in gates):
             raise ConfigError(
@@ -265,6 +360,7 @@ def _gate(item: object, index: int) -> GateConfig:
         argv=validate_argv(item.get("argv"), what=f"gates[{index}].argv"),
         kind=kind,
         timeout=_timeout(item, what=f"gates[{index}]"),
+        env=_lane_env(item, what=f"gates[{index}]"),
     )
 
 
@@ -274,10 +370,32 @@ def _reviewer(item: object, index: int) -> ReviewerConfig:
     unknown = sorted(set(item) - _REVIEWER_KEYS)
     if unknown:
         raise ConfigError(f"reviewers[{index}] has unknown keys", evidence={"unknown_keys": unknown})
+    name = _checked_name(item, what="reviewers", index=index)
+    role = item.get("role", name)
+    if not isinstance(role, str) or not _NAME.match(role):
+        raise ConfigError(f"reviewers[{index}] role is unusable", evidence={"role": role})
+    author = item.get("artifact_author")
+    if not isinstance(author, str) or not _LOGIN.match(author):
+        raise ConfigError(
+            f"reviewers[{index}].artifact_author is required and must be the exact GitHub "
+            "login this reviewer publishes under; without it a review cannot be told "
+            "apart from any other account's",
+            evidence={"artifact_author": author},
+        )
+    signature = item.get("artifact_signature")
+    if not isinstance(signature, str) or len(signature.strip()) < 8:
+        raise ConfigError(
+            f"reviewers[{index}].artifact_signature must be a distinctive string to read back",
+            evidence={"artifact_signature": signature},
+        )
     return ReviewerConfig(
-        name=_checked_name(item, what="reviewers", index=index),
+        name=name,
         argv=validate_argv(item.get("argv"), what=f"reviewers[{index}].argv"),
+        artifact_author=author,
+        artifact_signature=signature.strip(),
+        role=role,
         timeout=_timeout(item, what=f"reviewers[{index}]"),
+        env=_lane_env(item, what=f"reviewers[{index}]"),
     )
 
 
@@ -305,7 +423,47 @@ def _builder(item: object) -> BuilderConfig:
         signature=signature.strip(),
         comment_author=author,
         timeout=_timeout(item, what="builder"),
+        env=_lane_env(item, what="builder"),
     )
+
+
+def _lane_env(raw: Mapping[str, Any], *, what: str) -> LaneEnv:
+    """Validate one lane's environment overlay."""
+    overlay = raw.get("env", {})
+    if not isinstance(overlay, Mapping):
+        raise ConfigError(f"{what} env must be an object of NAME: value pairs")
+    pairs: list[tuple[str, str]] = []
+    for name, value in overlay.items():
+        _checked_env_name(name, what=what)
+        if not isinstance(value, str) or "\x00" in value:
+            raise ConfigError(
+                f"{what} env {name} must be a string value", evidence={"name": name}
+            )
+        if value.startswith(_CREDENTIAL_PREFIXES):
+            raise ConfigError(
+                f"{what} env {name} looks like a credential; keep tokens in the keychain "
+                "and in gh's own auth, and let the lane read them there",
+                evidence={"name": name},
+            )
+        pairs.append((name, value))
+    names = raw.get("env_unset", [])
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        raise ConfigError(f"{what} env_unset must be a list of variable names")
+    for name in names:
+        _checked_env_name(name, what=what)
+    return LaneEnv(set=tuple(pairs), unset=tuple(names))
+
+
+def _checked_env_name(name: object, *, what: str) -> str:
+    if not isinstance(name, str) or not _ENV_NAME.match(name):
+        raise ConfigError(f"{what} environment variable name is unusable", evidence={"name": name})
+    if name in _SESSION_ENV:
+        raise ConfigError(
+            f"{what} may not set or clear {name}: the trusted lanes run in Karan's own "
+            "session and need the real Claude OAuth/keychain environment",
+            evidence={"name": name, "session_variables": sorted(_SESSION_ENV)},
+        )
+    return name
 
 
 def _reject_duplicates(names: list[str], *, what: str) -> None:
@@ -318,9 +476,12 @@ def _reject_duplicates(names: list[str], *, what: str) -> None:
 
 __all__ = [
     "GATE_KINDS",
+    "REALISTIC_BUILDER_BUDGET",
+    "REALISTIC_REVIEWER_BUDGET",
     "SCHEMA_VERSION",
     "BuilderConfig",
     "GateConfig",
+    "LaneEnv",
     "ReviewerConfig",
     "RunConfig",
 ]

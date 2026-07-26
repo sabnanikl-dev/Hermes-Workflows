@@ -65,6 +65,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"config ok: {config.repo}#{config.pr} "
             f"({len(config.gates)} gate(s), {len(config.reviewers)} reviewer lane(s))"
         )
+        for reviewer in config.reviewers:
+            print(f"  reviewer {reviewer.name}: role {reviewer.role}, publishes as {reviewer.artifact_author}")
+        print(f"  builder: comments as {config.builder.comment_author}")
+        for note in config.advisories():
+            print(f"  advisory: {note}")
         return 0
 
     if args.command == "reset":

@@ -7,17 +7,20 @@ step and no runtime dependencies.
 ```text
 inspect live PR → bind exact headRefOid → verify remote head
   → baseline gates (+ visual QA when required)
-  → exact-head Reviewer A/B → machine-readable verdicts
+  → exact-head reviewer lanes → machine-readable verdicts + published artifacts
   → classify: blocking / non-blocking / false-positive / needs-karan
   → at most two isolated fix attempts (one corrective rerun each)
-  → verify push + read the signed fix comment back from GitHub
+  → verify local head, PR head, commit list, and the signed fix comment
   → invalidate every prior verdict, inspect again
   → merge-ready | blocked | needs-karan, tied to the final exact head
 ```
 
-This slice is **PAPI-88** of the [control-surface contract](https://github.com/sabnanikl-dev/Hermes-Workflows/issues/1).
-The hardened launcher and credential scoping (PAPI-90), the slim SKILL.md router
-(PAPI-92), and the final qualification suite (PAPI-93) are still pending.
+Claude Code and Codex are **trusted** for their scoped work here: Claude edits,
+tests, commits, pushes, and comments on the bound PR branch; the reviewer lanes
+inspect one exact head and publish their own role-signed artifacts. This tool is
+not a sandbox around them. It is the part that keeps every such claim tied to
+one exact head and checked against GitHub, so Hermes can advise Karan on
+evidence rather than on what a lane printed about itself.
 
 ## Run it
 
@@ -43,17 +46,40 @@ tokens, and an unknown token fails the run rather than rendering literally:
 | `{repo}` `{owner}` `{name}` `{pr}` | all lanes | from config |
 | `{branch}` `{base}` `{head}` | all lanes | from the **live** PR, never from config alone |
 | `{worktree}` | all lanes | the fresh worktree this lane runs in |
-| `{reviewer}` | reviewer lanes | the lane name |
+| `{reviewer}` `{role}` | reviewer lanes | the lane name and its configured role |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
 
-`builder.comment_author` is **required** and must be the exact GitHub login the
-builder comments under. See [Fix-comment readback](#fix-comment-readback).
+`builder.comment_author` and each reviewer's `artifact_author` are **required**,
+and must be the exact GitHub logins those agents publish under. See
+[Published-artifact readback](#published-artifact-readback).
 
-The gate, reviewer, and builder commands themselves are supplied by the
-operator — the example's `./scripts/*-lane.sh` names are placeholders. PAPI-90
-replaces them with the hardened, credential-scoped launcher; until then the only
-seam this slice needs is that every lane is an argv array and every lane's
-verdict is machine-readable.
+The lane commands are the installed agents themselves. Write the invocation you
+actually want — the example ships a real `claude --print` builder with an empty
+MCP config, a task-scoped tool list, a pointer-first prompt, and a 30-minute
+budget — and the loop runs it unchanged. There is no role abstraction in
+between.
+
+### The session, and how a lane may adjust it
+
+A lane inherits this process's environment. That is deliberate: the trusted
+agents run as Karan's own user and authenticate through the normal macOS Claude
+OAuth/keychain session, so there is no `env -i`, no synthetic `HOME`, and no
+generated sandbox policy anywhere in this tool.
+
+`env` and `env_unset` are a named overlay on that inherited environment — the
+example uses `"env_unset": ["GH_TOKEN"]` so each agent uses its own configured
+`gh` identity rather than the operator's. The overlay may not set or clear
+`HOME`, `USER`, `LOGNAME`, or `SHELL`, and may not carry a credential value:
+tokens belong in the keychain and in `gh`'s own auth.
+
+### Budgets, and why quiet is not a hang
+
+A trusted builder reading a PR, editing, verifying, pushing, and commenting
+routinely runs 20–30 minutes with `--print` buffering its output. Only a lane's
+own `timeout` ever ends it. While it runs, the loop records elapsed time, bytes
+produced, and how long it has been quiet; when it ends, the report carries
+`exited` or `timed-out` with the duration and exit code. `check-config` prints
+an advisory for a builder budget under 20 minutes or a reviewer budget under 15.
 
 Gates take `"kind": "baseline"` (default) or `"kind": "visual"`. Visual gates
 run only when `visual_qa_required` is `true`; setting that flag without a visual
@@ -126,11 +152,31 @@ and immediately before a fix attempt opens**, and requires all of the PR number,
 the snapshot the work was measured against. Any difference is `stale-head`: the
 run reports nothing and spends no attempt on a head that has already moved.
 
-## Fix-comment readback
+## Published-artifact readback
 
-After a push is bound to exactly one new head, the builder's fix comment is read
-back from GitHub. Three conditions are required together, and a comment
-satisfying only some of them is a `readback-mismatch`:
+Nothing a lane says about GitHub is believed until GitHub says it too.
+
+### Reviewer artifacts
+
+Each reviewer lane must leave a published comment or review that is **new** since
+that lane was launched, authored by its configured `artifact_author`, carrying
+its `artifact_signature` and a bare `ROLE=<role>` line, and bound to the exact
+head — by the review's own `commit_id` where GitHub records one, otherwise by the
+40-hex SHA in the body. The role line is matched whole, so one lane's artifact
+can never be read back as another's. Anything else is a `readback-mismatch`.
+
+### The builder's push
+
+A push is accepted only when the PR head moved to exactly the commit the builder
+reported, the attempt worktree's own `HEAD` is that same commit, and `git
+rev-list` shows it added on top of the head this run reviewed. If the reviewed
+commit is no longer reachable, the branch was rewritten rather than extended and
+the run stops as `stale-head`.
+
+### The fix comment
+
+Three conditions are required together, and a comment satisfying only some of
+them is a `readback-mismatch`:
 
 1. **New.** The loop snapshots GitHub's own comment ids before it invokes the
    builder, and accepts only an id that was not already there.
@@ -174,16 +220,18 @@ bounded with explicit markers.
 
 ## Isolation guarantees
 
-- The source clone is reachable only through `git fetch`, `git rev-parse`, and
-  `git worktree`. Checkout, commit, reset, clean, and push are unreachable by
+- The source clone is reachable only through `git fetch`, `git rev-parse`,
+  `git rev-list`, and `git worktree`. Checkout, commit, reset, clean, and push are unreachable by
   construction, so the operational clone is never modified.
 - Every attempt gets a fresh worktree, detached at one verified SHA. An existing
   path is refused rather than reused, and worktrees this run did not create
   cannot be removed.
 - The frozen blocker set is written under the OS temp directory, never inside a
   repository, so a builder's inputs cannot contaminate the diff.
-- The loop never pushes, comments, approves, or merges. The builder pushes and
-  comments under its own identity; this loop only verifies what landed.
+- The loop never pushes, comments, approves, or merges. The trusted agents act
+  under their own identities; this loop only verifies what landed.
+- Any push invalidates every prior verdict, and at most two fix attempts can
+  ever open. A third is unreachable by construction.
 
 ## Verify
 
@@ -193,5 +241,7 @@ python3 -m compileall -q pr-prover/src pr-prover/tests
 git diff --check origin/main...HEAD
 ```
 
-The suite runs entirely against deterministic doubles: no network, no `gh`, and
-no real `git`.
+The suite runs against deterministic doubles — no network and no `gh` — apart
+from `test_integration_git.py`, which drives the real `git` argv shapes against
+a throwaway repository, and the process tests in `test_trusted_agents.py`, which
+launch real quiet, slow, and timing-out children.

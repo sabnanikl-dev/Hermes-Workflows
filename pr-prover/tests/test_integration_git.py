@@ -121,6 +121,43 @@ class RealGitTests(unittest.TestCase):
             self.source._git(["checkout", BRANCH], what="test")
         self.assertEqual(git("rev-parse", "--abbrev-ref", "HEAD", cwd=self.clone), "main")
 
+    def test_commits_added_lists_the_real_fix_commit(self) -> None:
+        (self.seed / "feature.txt").write_text("two\n", encoding="utf-8")
+        git("commit", "-am", "fix the blocker", cwd=self.seed)
+        git("push", "origin", BRANCH, cwd=self.seed)
+        fixed = git("rev-parse", "HEAD", cwd=self.seed)
+        self.source.verified_head(BRANCH, fixed)
+
+        self.assertEqual(self.source.commits_added(self.head, fixed), (fixed,))
+
+    def test_a_head_that_does_not_contain_the_reviewed_commit_is_refused(self) -> None:
+        """A replaced history, not an extended one: the reviewed commit is gone."""
+        git("checkout", "-b", "feat/rebuilt", "HEAD~1", cwd=self.seed)
+        (self.seed / "feature.txt").write_text("rebuilt\n", encoding="utf-8")
+        git("add", "feature.txt", cwd=self.seed)
+        git("commit", "-m", "rebuilt", cwd=self.seed)
+        git("push", "origin", "feat/rebuilt", cwd=self.seed)
+        rebuilt = git("rev-parse", "HEAD", cwd=self.seed)
+        self.source.verified_head("feat/rebuilt", rebuilt)
+
+        with self.assertRaises(StaleHead) as caught:
+            self.source.commits_added(self.head, rebuilt)
+        self.assertEqual(caught.exception.evidence["dropped"], [self.head])
+
+    def test_a_worktree_this_run_did_not_create_is_left_alone(self) -> None:
+        other = self.tmp / "someone-elses-worktree"
+        git("worktree", "add", "--detach", str(other), self.head, cwd=self.clone)
+        marker = other / "another-agent.txt"
+        marker.write_text("in use\n", encoding="utf-8")
+
+        with self.assertRaises(WorktreeError):
+            self.provider.remove(other)
+
+        mine = self.provider.create("inspect", self.head)
+        self.provider.remove(mine)
+        self.assertTrue(marker.exists(), "an unrelated worktree must survive this run")
+        self.assertEqual(marker.read_text(encoding="utf-8"), "in use\n")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

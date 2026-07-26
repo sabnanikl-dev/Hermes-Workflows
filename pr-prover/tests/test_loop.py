@@ -119,7 +119,10 @@ class CleanPassTests(LoopHarness):
         self.review_round(HEAD_A)
         loop.run()
         reviewer_a = next(call for call in self.runner.calls if call.argv[0] == "lane-reviewer-A")
-        self.assertEqual(list(reviewer_a.argv), ["lane-reviewer-A", "--head", HEAD_A, "--repo", "example/repo"])
+        self.assertEqual(
+            list(reviewer_a.argv),
+            ["lane-reviewer-A", "--role", "reviewer-a", "--head", HEAD_A, "--repo", "example/repo"],
+        )
 
 
 class NeedsKaranClassificationTests(LoopHarness):
@@ -180,7 +183,7 @@ class FixCycleTests(LoopHarness):
         self.assertTrue(self.script.exhausted)
         # Verdicts on the final result belong to the final head only.
         self.assertTrue(all(verdict.head == HEAD_B for verdict in result.verdicts))
-        self.assertIn(f"push verified: {HEAD_A} -> {HEAD_B}", result.events)
+        self.assertIn(f"push verified: {HEAD_A} -> {HEAD_B} (1 new commit(s))", result.events)
 
     def test_the_builder_receives_the_frozen_blocker_set_as_a_file_outside_every_repo(self) -> None:
         loop = self.build()
@@ -624,7 +627,7 @@ class LockTests(LoopHarness):
 
 
 class NonMutationTests(LoopHarness):
-    def test_the_source_clone_only_ever_sees_fetch_rev_parse_and_worktree(self) -> None:
+    def test_the_source_clone_only_ever_sees_read_and_worktree_subcommands(self) -> None:
         loop = self.build()
         self.review_round(HEAD_A, [BLOCKER])
         self.script.add(
@@ -638,7 +641,7 @@ class NonMutationTests(LoopHarness):
 
         subcommands = set(self.runner.git_subcommands(self.source_repo))
         self.assertTrue(subcommands)
-        self.assertEqual(subcommands - {"fetch", "rev-parse", "worktree"}, set())
+        self.assertEqual(subcommands - {"fetch", "rev-list", "rev-parse", "worktree"}, set())
 
     def test_every_command_runs_in_the_source_clone_or_a_run_owned_worktree(self) -> None:
         loop = self.build()

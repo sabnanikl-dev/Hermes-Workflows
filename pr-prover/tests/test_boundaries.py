@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _support import BUILDER_LOGIN, HEAD_A, make_source_repo
+from _support import BUILDER_LOGIN, HEAD_A, REVIEWER_LOGIN, REVIEWER_SIGNATURE, make_source_repo
 from pr_prover import cli, redaction
 from pr_prover.commands import CommandResult
 from pr_prover.config import RunConfig
@@ -19,6 +19,19 @@ from pr_prover.github import GhCliGitHub
 
 def finding(identifier: str, severity: str = "blocking", source: str = "reviewer:A") -> Finding:
     return Finding(id=identifier, severity=severity, summary="s", source=source, head=HEAD_A)
+
+
+def reviewer(name: str, *, role: str | None = None, **overrides: object) -> dict:
+    """A complete reviewer lane: argv plus the identity its artifact must carry."""
+    lane: dict = {
+        "name": name,
+        "role": role or f"reviewer-{name.lower()}",
+        "argv": [f"reviewer-{name.lower()}", "{head}"],
+        "artifact_author": REVIEWER_LOGIN,
+        "artifact_signature": REVIEWER_SIGNATURE,
+    }
+    lane.update(overrides)
+    return lane
 
 
 class ClassificationTests(unittest.TestCase):
@@ -158,6 +171,40 @@ class GhBoundaryTests(unittest.TestCase):
         payload = json.dumps({"comments": [{"id": "IC_kwDO123", "body": "hi"}]})
         with self.assertRaises(GitHubError):
             self.boundary(payload).comments("example/repo", 7)
+
+    def test_reviews_carry_the_commit_they_were_submitted_against(self) -> None:
+        payload = json.dumps(
+            [[{"id": 42, "user": {"login": "karanagent1"}, "body": "ROLE=reviewer-a", "commit_id": HEAD_A.upper()}]]
+        )
+        reviews = self.boundary(payload).reviews("example/repo", 7)
+        self.assertEqual(reviews[0].identifier, "review:42")
+        self.assertEqual(reviews[0].kind, "review")
+        self.assertEqual(reviews[0].commit_id, HEAD_A)
+
+    def test_reviews_are_read_through_the_rest_api_across_pages(self) -> None:
+        seen: list[tuple[str, ...]] = []
+
+        class Recorder:
+            def run(self, argv, *, cwd=None, env=None, timeout=None, progress=None):
+                seen.append(tuple(argv))
+                return CommandResult(argv=tuple(argv), returncode=0, stdout="[[], []]", stderr="")
+
+        self.assertEqual(GhCliGitHub(Recorder()).reviews("example/repo", 7), ())
+        self.assertEqual(seen[0][:4], ("gh", "api", "--paginate", "--slurp"))
+        self.assertIn("repos/example/repo/pulls/7/reviews?per_page=100", seen[0])
+
+    def test_a_bodyless_approval_is_data_not_an_error(self) -> None:
+        payload = json.dumps([[{"id": 1, "user": {"login": "karanagent1"}, "state": "APPROVED"}]])
+        self.assertEqual(self.boundary(payload).reviews("example/repo", 7)[0].body, "")
+
+    def test_a_review_without_an_author_fails_closed(self) -> None:
+        payload = json.dumps([[{"id": 1, "body": "ROLE=reviewer-a"}]])
+        with self.assertRaises(GitHubError):
+            self.boundary(payload).reviews("example/repo", 7)
+
+    def test_a_review_payload_that_is_not_an_array_fails_closed(self) -> None:
+        with self.assertRaises(GitHubError):
+            self.boundary(json.dumps({"message": "Not Found"})).reviews("example/repo", 7)
 
 
 class RedactionTests(unittest.TestCase):
@@ -344,10 +391,7 @@ class ConfigTests(unittest.TestCase):
             "state_file": "state.json",
             "lock_file": "run.lock",
             "gates": [{"name": "tests", "argv": ["make", "test"]}],
-            "reviewers": [
-                {"name": "A", "argv": ["reviewer-a", "{head}"]},
-                {"name": "B", "argv": ["reviewer-b", "{head}"]},
-            ],
+            "reviewers": [reviewer("A"), reviewer("B")],
             "builder": {
                 "argv": ["builder", "{blockers_file}"],
                 "signature": "Fixed by: Claude Code",
@@ -378,13 +422,11 @@ class ConfigTests(unittest.TestCase):
 
     def test_one_reviewer_lane_is_not_enough(self) -> None:
         with self.assertRaises(ConfigError):
-            self.load(reviewers=[{"name": "A", "argv": ["reviewer-a"]}])
+            self.load(reviewers=[reviewer("A")])
 
     def test_duplicate_lane_names_fail_closed(self) -> None:
         with self.assertRaises(ConfigError):
-            self.load(
-                reviewers=[{"name": "A", "argv": ["a"]}, {"name": "A", "argv": ["b"]}]
-            )
+            self.load(reviewers=[reviewer("A"), reviewer("A", role="reviewer-b")])
 
     def test_required_visual_qa_without_a_visual_gate_fails_closed(self) -> None:
         with self.assertRaises(ConfigError) as caught:
@@ -484,10 +526,7 @@ class CliTests(unittest.TestCase):
                     "state_file": str(self.tmp / "state.json"),
                     "lock_file": str(self.tmp / "run.lock"),
                     "gates": [],
-                    "reviewers": [
-                        {"name": "A", "argv": ["reviewer-a", "{head}"]},
-                        {"name": "B", "argv": ["reviewer-b", "{head}"]},
-                    ],
+                    "reviewers": [reviewer("A"), reviewer("B")],
                     "builder": {
                 "argv": ["builder", "{blockers_file}"],
                 "signature": "Fixed by: Claude Code",
