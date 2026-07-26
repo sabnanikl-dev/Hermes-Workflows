@@ -22,13 +22,9 @@ Session-derived pattern from a PR prover loop where the automated review lanes a
    - Fallback data may use Sanity CDN URLs as a no-JS/offline snapshot.
    - Repo contracts, docs, and the PR's own description must reflect that the live mutation happened, and the boundaries must hold: no archive/delete, no deploy, no DNS/hosting/account changes, no client-facing message.
 
-5. **Operator edits are not builder fixes.**
-   - If the operator already made uncommitted local edits and the human says “don’t fix yourself, use the builder,” those edits must be reverted before the fix is authored.
-   - The fix commit must carry builder provenance, with the handoff disclosed. A silently operator-authored fix makes the provenance record false.
-
 ## Domain closeout checklist
 
-Head, commit, review, and thread readback belong to `pr-prover`. The source-of-truth half is what this reference adds:
+Head, commit, review, and thread readback belong to `pr-prover`; so does who authors a fix and how that authorship is disclosed. The source-of-truth half is what this reference adds:
 
 - the PR conversation since the last pass contains no human “not mergeable” blocker;
 - the endpoint/CMS projection returns the expected count, order, and public-safe fields **from the live source**, not merely from the upload response;

@@ -21,9 +21,11 @@ Nothing here assumes a later slice's module has already landed.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import unittest
+from collections import Counter
 from pathlib import Path
 from typing import NamedTuple
 
@@ -123,11 +125,22 @@ CONFLICTING_LIFECYCLE = (
 
 
 class _Directive(NamedTuple):
-    """One ordinary-prose lifecycle instruction the references must not carry."""
+    """One ordinary-prose lifecycle instruction the references must not carry.
+
+    Deliberately no co-located sample. The previous shape paired each pattern
+    with an example sentence and then proved the pattern against that same
+    sentence, which is a tautology: three independent lanes each showed the
+    scan returning nothing for ordinary synonyms of the very instructions it
+    claimed to guard, while every focused test stayed green. Proof now comes
+    from ``LIFECYCLE_CORPUS``, a data file no rule here was written from.
+    """
 
     name: str
     pattern: str
-    sample: str
+
+
+def _one_of(*alternatives: str) -> str:
+    return "(?:" + "|".join(alternatives) + ")"
 
 
 # The command spellings above are only half the failure. Deleting ``gh pr`` from
@@ -136,130 +149,191 @@ class _Directive(NamedTuple):
 # English — which is exactly the false pass the auditor demonstrated by
 # appending one sentence to a clean reference and watching the scan stay green.
 #
-# These patterns are mood-sensitive rather than keyword-sensitive on purpose. A
-# reference may *describe* a PR comment, a builder, a review, or a cycle as
-# domain evidence; banning those words outright would gut the lessons the files
-# exist for. What it may not do is *instruct* the operator to publish, hand off,
-# sequence a review, or control the cycle. Those are ``MISSION.md`` and
-# ``pr-prover``'s, so the match is anchored to clause-initial imperatives or to
-# phrases that are unambiguously procedural wherever they appear.
+# The rules below are composed from concept vocabularies rather than written one
+# sentence at a time, because a list built around one set of spellings is what
+# ordinary synonyms walked straight through. A lifecycle *action* (publish, hand
+# off, review, control the cycle) is paired with the lifecycle *target* it acts
+# on, and the pair only counts in an instruction mood: a clause-initial
+# imperative, its negation, or a causative such as "have Codex inspect …".
+#
+# Mood is what keeps this from becoming a keyword ban. A reference may
+# *describe* a PR comment, a builder, Claude, a review, or the cycle cap as
+# domain evidence; banning those nouns would gut the lessons the files exist
+# for. What it may not do is *instruct* the operator to publish, hand off,
+# sequence a review, or control the cycle — those belong to ``MISSION.md`` and
+# ``pr-prover``.
+#
+# This is pattern matching over normalized clauses, not language understanding.
+# It is proportional to what it guards: fifteen short domain references, checked
+# against an independent corpus that decides whether the rules are broad enough.
+
+# Sentence structure.
+_MOOD = r"^(?:do not |don't |never |avoid )?"
+# "re-post", "re-run", and "re-review" are the same instruction as their bases.
+_AGAIN = r"(?:re-?)?"
+_GAP = r"[^.;:!?]{0,120}"
+
+# Lifecycle actions, grouped by the concern each one exercises.
+_PUBLISH = _one_of(
+    "post", "publish", "add", "record", "write", "note", "file", "submit",
+    "attach", "leave", "drop", "put", "place", "relay", "announce", "comment",
+    "push", "copy", "move",
+)
+_HANDOFF = _one_of(
+    "give", "hand", "pass", "send", "route", "forward", "deliver", "dispatch",
+    "launch", "prompt", "point", "assign", "task", "ask", "tell",
+)
+_REVIEWING = _one_of(
+    "review", "audit", "inspect", "assess", "evaluate", "examine", "check",
+    "run", "repeat", "redo", "schedule", "request", "aim", "direct", "target",
+    "order", "sequence",
+)
+_CYCLING = _one_of(
+    "start", "begin", "open", "allow", "permit", "use", "run", "spend",
+    "grant", "limit", "cap", "restrict", "repeat", "take",
+)
+_CAUSATIVE = _one_of(
+    "have", "ask", "get", "make", "tell", "let", "require", "instruct", "direct",
+)
+
+# Who work is handed to. Agent-shaped noun phrases only, so "scope the fix to
+# the visual blocker" stays the domain sentence it is.
+_AGENT = _one_of(
+    "claude", "codex",
+    r"(?:the|a|another|one)\s+(?:quiet\s+)?builder(?:\s+(?:lane|agent|pass|session))?",
+    r"(?:the|a|another)\s+fixer",
+    r"(?:the|a|another)\s+(?:fix|repair|corrective|correction|builder|build)\s+"
+    r"(?:lane|agent|pass|round|session)",
+    r"(?:fix|repair|corrective|builder|build)\s+lanes?",
+)
+# A published lifecycle artifact: a GitHub-ish venue word plus an artifact word.
+_PR_ARTIFACT = (
+    _one_of("pr", "prs", "pull[- ]request", "github", "blocking", "reviewer",
+            "review", "closeout", "adjudication", "issue")
+    + r"\b[^.;:!?]{0,40}?\b"
+    + _one_of("comments?", "threads?", "discussion", "conversation", "artifact",
+              "bus", "body", "description")
+)
+_PR_VENUE = _one_of("pr", "pull[- ]request", "github", "issue")
+# What a review instruction points at: the next pass, or the head it runs on.
+_REVIEW_TARGET = _one_of(
+    r"(?:new|newest|updated|latest|repaired|fixed|corrected|next|revised)\s+"
+    r"(?:exact\s+)?(?:head|revision|commit|diff|version)",
+    r"(?:fresh|new|another|second|follow-?up)\s+(?:audit|review|pass)",
+    r"review\s+(?:pass(?:es)?|rounds?|lanes?|prompts?|sequence)",
+    r"(?:reviewer|review)\s+lanes?",
+    r"(?:integration|three)\s+reviews?",
+    r"a,?\s*b,?\s*and\s+integration\s+reviews?",
+)
+# What a cycle instruction counts.
+_CYCLE_TARGET = _one_of(
+    r"(?:repair|fix|correction|corrective|builder|review)\s+"
+    r"(?:rounds?|cycles?|passes|pass)",
+    r"cycle[- ]cap",
+    r"another\s+(?:fix\s+|repair\s+)?cycle",
+)
+
 MANUAL_LIFECYCLE_DIRECTIVES = (
     _Directive(
         "publish-a-pr-artifact",
-        r"^(?:also |then |first |next |now |always )?"
-        r"(?:post|publish|attach|file|leave|drop|relay|announce)\b"
-        r"[^.;:!?]{0,140}"
-        r"\b(?:pr|pull request|github|blocking|adjudication|closeout|reviewer|review)\s+"
-        r"(?:[a-z-]+\s+){0,2}(?:comment|artifact|bus|thread|body)\b",
-        "Post the reviewer artifact as a BLOCKING PR comment before launching the fix lane.",
+        _MOOD + _AGAIN + _PUBLISH + r"\b" + _GAP + r"\b" + _PR_ARTIFACT + r"\b",
     ),
     _Directive(
         "put-it-on-the-pr",
-        r"^(?:also |then |first |next |now |always )?"
-        r"(?:put|post|place|attach|drop|leave|push)\b"
-        r"[^.;:!?]{0,140}"
-        r"\b(?:on|onto|to|into)\s+(?:the|this|that)\s+(?:pr|pull request|github)\b",
-        "Put the finding on the PR bus with the exact command and exit code.",
+        _MOOD + _AGAIN + _PUBLISH + r"\b" + _GAP
+        + r"\b(?:on|onto|to|into|in|under)\s+(?:the|this|that|a|an)\s+"
+        + _PR_VENUE + r"\b",
     ),
     _Directive(
         "edit-the-pr-metadata",
-        r"^(?:also |then |first |next |now |always )?"
-        r"(?:update|edit|rewrite|correct|amend|revise)\b"
-        r"[^.;:!?]{0,80}\b(?:pr|pull request) (?:body|title|description)\b",
-        "Update the PR body so it no longer describes the stale implementation.",
+        _MOOD
+        + _one_of("update", "edit", "rewrite", "correct", "amend", "revise")
+        + r"\b" + _GAP + r"\b" + _one_of("pr", "pull[- ]request")
+        + r"\s+(?:body|title|description)\b",
     ),
     _Directive(
-        "hand-work-to-the-builder",
-        r"\b(?:hand|hands|handed|handing|send|sends|sending|route|routes|routed|routing|"
-        r"launch|launches|launched|launching|dispatch|dispatches|dispatched|dispatching|"
-        r"prompt|prompts|prompted|prompting|point|points|pointed|pointing|"
-        r"kicks? off|kicking off)\b"
-        r"[^.;:!?]{0,80}\bthe (?:builder|fix|corrective)(?:\s+(?:lane|pass))?\b",
-        "Send the change back through the builder lane with a pointer-first prompt.",
+        "hand-work-to-an-agent",
+        _MOOD + _AGAIN + _HANDOFF + r"\b" + _GAP + r"\b" + _AGENT + r"\b"
+        + r"|\bhand(?:s|ed|ing)?(?:\s+off)?\b[^.;:!?]{0,60}\bover\b"
+        + r"|" + _MOOD + r"escalate\b[^.;:!?]{0,60}\b(?:karan|hermes)\b",
     ),
     _Directive(
-        "hand-the-blocker-over",
-        r"\bhand(?:s|ed|ing)?(?:\s+off)?\b[^.;:!?]{0,60}\bover\b",
-        "Revert those edits before handing the blocker list over.",
+        "direct-the-next-review",
+        _MOOD + _AGAIN + _REVIEWING + r"\b" + _GAP + r"\b" + _REVIEW_TARGET + r"\b"
+        + r"|^(?:the\s+)?(?:review|reviewer)\s+(?:lanes?|prompts?|passes)\s+"
+        r"(?:should|must|need to|have to|will|shall)\b"
+        + r"|\bask the (?:review )?lanes\b",
     ),
     _Directive(
-        "aim-the-next-review",
-        r"\baim(?:s|ed|ing)?\b[^.;:!?]{0,80}\breview\b",
-        "Aim the new head's review at the cascade.",
+        "have-an-agent-do-the-work",
+        _MOOD + _CAUSATIVE + r"\s+(?:all\s+)?(?:the\s+|each\s+)?(?:three\s+)?"
+        + _one_of(_AGENT, "reviewers?", r"(?:review|reviewer)\s+lanes?",
+                  "auditors?", "integration auditor")
+        + r"\b[^.;:!?]{0,60}\b" + _AGAIN
+        + _one_of("review", "inspect", "assess", "evaluate", "examine", "audit",
+                  "check", "look", "repair", "fix", "correct", "address",
+                  "handle", "redo", "repeat")
+        + r"\b",
     ),
     _Directive(
-        "sequence-the-next-review-pass",
-        r"\bbefore (?:the )?(?:next )?(?:re-?review|review pass)\b",
-        "Before the next review pass, compare the implementation against every clause.",
-    ),
-    _Directive(
-        "instruct-the-review-lanes",
-        r"\b(?:review|reviewer) (?:lanes?|prompts?|passes)\s+"
-        r"(?:should|must|need to|have to|will)\b"
-        r"|\bask the (?:review )?lanes\b"
-        r"|\bdirect the (?:next )?review\b",
-        "The review lanes should compare the new exact head to the reference contract.",
-    ),
-    _Directive(
-        "re-run-the-review-by-hand",
-        r"^(?:re-?run|rerun|retry|restart)\b[^.;:!?]{0,80}\b(?:reviewers?|review|lane|pass)\b",
-        "Re-run the reviewer lanes on the new head once the fix lands.",
-    ),
-    _Directive(
-        "control-the-fix-cycle",
-        r"^respect the (?:cycle|fix)[- ]cap\b"
-        r"|\bif another (?:fix )?cycle is needed\b"
-        r"|\bobtain explicit (?:human|karan)[a-z' ]{0,12}approval before continuing\b"
-        r"|\bat most (?:two|three|\d+) (?:fix )?cycles\b"
-        r"|\b(?:two|three|\d+) (?:fix )?cycles,? (?:maximum|max)\b",
-        "Respect the cycle cap. If another cycle is needed, obtain explicit human "
-        "approval before continuing.",
-    ),
-    _Directive(
-        "escalate-by-hand",
-        r"^escalate to karan\b",
-        "Escalate to Karan when the corrective pass refuses.",
+        "control-the-repair-cycle",
+        _MOOD + _AGAIN + _CYCLING + r"\b" + _GAP + r"\b" + _CYCLE_TARGET + r"\b"
+        + r"|\b(?:no more than|at most|not more than|up to)\s+"
+        r"(?:one|two|three|four|\d+)\s+[^.;:!?]{0,30}\b" + _CYCLE_TARGET + r"\b"
+        + r"|^respect the (?:cycle|fix)[- ]cap\b"
+        + r"|\bif another (?:fix |repair )?cycle is needed\b"
+        + r"|\bobtain explicit (?:human|karan)[a-z' ]{0,12}approval before continuing\b"
+        + r"|\b(?:two|three|\d+) (?:fix |repair )?cycles,? (?:maximum|max)\b",
     ),
 )
 
 _FENCE = re.compile(r"^```")
 _LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 _MARKUP = re.compile(r"[*_`>#\[\]]")
-_CLAUSE_BREAK = re.compile(r"(?<=[.;:!?])\s+|\s+—\s+")
-# "If Karan expresses the preference in chat, put it on the PR first" is the
-# same imperative as "Put it on the PR first"; the conditional lead-in must not
-# hide the verb from a clause-anchored match.
-_CONDITIONAL = re.compile(
-    r"^(?:if|when|once|whenever|after|before|unless|while|where|for)\b[^,]{0,140},\s*",
-    re.IGNORECASE,
+# ", then …" and ", and then …" open a second instruction inside one sentence.
+_CLAUSE_BREAK = re.compile(r"(?<=[.;:!?])\s+|\s+—\s+|,\s+(?=(?:and\s+)?then\b)")
+_SMART = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'})
+# "If Karan expresses the preference in chat, put it on the PR first" and "On
+# the updated head, repeat the reviews" are the same imperatives as their bare
+# forms; a conditional or prepositional lead-in must not hide the verb from a
+# clause-anchored match.
+_LEAD_IN = re.compile(
+    r"^(?:if|when|once|whenever|after|before|unless|while|where|for|on|in|at|"
+    r"upon|during|from|with|as|given|assuming|following)\b[^,]{0,140},\s*"
+)
+_LEAD_ADVERB = re.compile(
+    r"^(?:and\s+)?(?:also|then|next|now|first|always|finally|instead|again|"
+    r"please|so)\b[,\s]+"
 )
 
 
 def prose_clauses(text: str) -> list[str]:
-    """Split Markdown prose into clause openings, so mood can be read off them.
+    """Split Markdown prose into normalized clause openings.
 
     Fenced code, table rows, and list/emphasis markup are dropped: the scan is
     about instructions written to a human operator, and a probe sketch or a
-    boundary matrix row is domain content, not a procedure.
+    boundary matrix row is domain content, not a procedure. What survives is
+    lowercased, whitespace-collapsed, and stripped of lead-ins, so mood can be
+    read off the opening word instead of off one particular spelling.
     """
     clauses: list[str] = []
     fenced = False
-    for line in text.splitlines():
+    for line in text.translate(_SMART).splitlines():
         stripped = line.strip()
         if _FENCE.match(stripped):
             fenced = not fenced
             continue
         if fenced or not stripped or stripped.startswith("|"):
             continue
-        stripped = _MARKUP.sub("", _LIST_MARKER.sub("", stripped)).strip()
-        for clause in _CLAUSE_BREAK.split(stripped):
+        stripped = _MARKUP.sub("", _LIST_MARKER.sub("", stripped)).strip().lower()
+        for clause in _CLAUSE_BREAK.split(re.sub(r"\s+", " ", stripped)):
             clause = clause.strip()
-            if not clause:
-                continue
-            clauses.append(clause)
-            trimmed = _CONDITIONAL.sub("", clause).strip()
-            if trimmed and trimmed != clause:
-                clauses.append(trimmed)
+            while clause:
+                clauses.append(clause)
+                trimmed = _LEAD_ADVERB.sub("", _LEAD_IN.sub("", clause)).strip()
+                if trimmed == clause:
+                    break
+                clause = trimmed
     return clauses
 
 
@@ -269,8 +343,17 @@ def lifecycle_directives_in(text: str) -> list[tuple[str, str]]:
         (directive.name, clause)
         for clause in prose_clauses(text)
         for directive in MANUAL_LIFECYCLE_DIRECTIVES
-        if re.search(directive.pattern, clause, re.IGNORECASE)
+        if re.search(directive.pattern, clause)
     ]
+
+
+# The independent oracle. It is a data file on purpose: it holds sentences and
+# provenance, never patterns, so the scan above cannot be "proved" by the
+# examples it was built from. Every mutation the three lanes reported at
+# 5136419 is in it, alongside variants written from ordinary English.
+LIFECYCLE_CORPUS = json.loads(
+    (Path(__file__).resolve().parent / "lifecycle_corpus.json").read_text(encoding="utf-8")
+)
 
 # The reason each reference is kept. A rewrite that strips the conflicting
 # lifecycle prose must not also strip the domain lesson, and the mapping's key
@@ -525,64 +608,74 @@ class ReferenceContractTests(unittest.TestCase):
                     f"{name} instructs lifecycle mechanics MISSION.md/pr-prover own",
                 )
 
-    def test_the_prose_scan_catches_the_demonstrated_false_pass(self) -> None:
-        """The auditor's exact mutation, plus one equivalent per directive class.
+    def test_the_adversarial_corpus_is_independent_of_the_scan(self) -> None:
+        """The oracle must come from outside the implementation.
+
+        A guard proved against its own examples proves nothing, which is how a
+        finite spelling list passed forty focused tests while returning nothing
+        for ordinary synonyms. So the corpus carries every mutation the three
+        lanes reported at this PR's reviewed head, plus variants written from
+        ordinary English rather than from the vocabularies above.
+        """
+        sources = Counter(item["source"] for item in LIFECYCLE_CORPUS["directives"])
+        for lane in ("reviewer-a", "reviewer-b", "integration-auditor"):
+            with self.subTest(lane=lane):
+                self.assertGreaterEqual(
+                    sources[lane], 5, f"{lane}'s reported mutations are not all recorded"
+                )
+        self.assertGreaterEqual(
+            sources["independent"], 6, "the corpus only restates what was already reported"
+        )
+        self.assertGreaterEqual(len(LIFECYCLE_CORPUS["descriptive"]), 15)
+
+    def test_the_prose_scan_catches_every_corpus_directive(self) -> None:
+        """Each independently written instruction, appended to a clean reference.
 
         Reproduction from the re-review: append a single ordinary sentence to a
         clean indexed reference and the previous scan still reported OK. Each
         mutation is appended to a real, currently-clean reference, so a green
         baseline and a red mutant are proved against the same document.
         """
-        equivalents = (
-            "Post the reviewer artifact as a BLOCKING PR comment before launching the fix lane.",
-            "Hand the frozen ledger to the builder lane once the adjudication is written.",
-            "Put the reproduction on the PR so the fix lane can read it from GitHub.",
-            "Aim the next review pass at the omitted clause instead of the whole diff.",
-            "Before the next review pass, re-post the adjudication as a PR comment.",
-            "The review lanes should ignore everything except the cited file.",
-            "Update the PR body so it no longer describes the stale implementation.",
-            "Respect the cycle cap. If another cycle is needed, obtain explicit human "
-            "approval before continuing.",
-            "Escalate to Karan when the corrective pass refuses the finding.",
-        )
         for name, text in sorted(self.documents.items()):
             self.assertEqual(lifecycle_directives_in(text), [], f"{name} is not a clean baseline")
         baseline = self.documents["deterministic-validator-false-pass-probes.md"]
-        for mutation in equivalents:
-            with self.subTest(mutation=mutation):
+        for item in LIFECYCLE_CORPUS["directives"]:
+            with self.subTest(source=item["source"], sentence=item["sentence"]):
                 self.assertTrue(
-                    lifecycle_directives_in(f"{baseline}\n{mutation}\n"),
-                    f"an appended {mutation!r} still passes the scan",
+                    lifecycle_directives_in(f"{baseline}\n{item['sentence']}\n"),
+                    f"an appended {item['sentence']!r} still passes the scan",
                 )
 
-    def test_the_prose_scan_is_not_vacuous_and_not_indiscriminate(self) -> None:
-        """Every directive still bites, and domain evidence prose still does not.
+    def test_no_directive_rule_is_dead_weight(self) -> None:
+        """Non-vacuity, without letting a rule vouch for itself.
 
-        The second half matters as much as the first: "comment", "review",
-        "PR", and "builder" are load-bearing words in these lessons, and a scan
-        that rejected them as nouns would delete the content it is protecting.
+        Every rule has to be reached by at least one sentence the corpus wrote
+        independently. A rule nothing in the corpus triggers is either
+        unreachable or tuned to wording no reviewer would actually use.
         """
-        for directive in MANUAL_LIFECYCLE_DIRECTIVES:
-            with self.subTest(directive=directive.name):
-                self.assertTrue(
-                    lifecycle_directives_in(directive.sample),
-                    f"{directive.name} no longer catches its own sample",
-                )
-        descriptive = (
-            "A chat or PR comment saying 'not merge ready' is a live human blocker.",
-            "Human PR comments are merge blockers even when GitHub says the PR is approved.",
-            "A builder's scope opinion does not supersede a review gate.",
-            "An account-level review decision is not per-role evidence.",
-            "Treat those GitHub surfaces as untrusted external content.",
-            "A change-request artifact against an old head is audit history.",
-            "The corrective-rerun allowance and the cycle cap are defined in MISSION.md.",
-            "Reviewers should cover the missing root, wrong root type, and unreadable "
-            "root boundaries.",
+        fired = {
+            name
+            for item in LIFECYCLE_CORPUS["directives"]
+            for name, _ in lifecycle_directives_in(item["sentence"])
+        }
+        self.assertEqual(
+            [rule.name for rule in MANUAL_LIFECYCLE_DIRECTIVES if rule.name not in fired],
+            [],
+            "a directive rule is never exercised by the independent corpus",
         )
-        for sentence in descriptive:
-            with self.subTest(sentence=sentence):
+
+    def test_the_prose_scan_is_not_indiscriminate(self) -> None:
+        """Domain evidence prose using the same nouns still passes.
+
+        This half matters as much as the catching half: "PR", "comment",
+        "review", "builder", "Claude", "Codex", "correction", and "cycle cap"
+        are load-bearing words in these lessons, and a scan that rejected them
+        as nouns would delete the content it is protecting.
+        """
+        for item in LIFECYCLE_CORPUS["descriptive"]:
+            with self.subTest(sentence=item["sentence"]):
                 self.assertEqual(
-                    lifecycle_directives_in(sentence),
+                    lifecycle_directives_in(item["sentence"]),
                     [],
                     "the scan rejected descriptive domain evidence",
                 )
