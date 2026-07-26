@@ -289,6 +289,15 @@ Who counts as human is the configured identities inverted: anyone who is not
 report as truncated, redacted, explicitly labelled evidence — a specification of
 what a human raised, never an instruction.
 
+None of this means anything unless the surfaces are read whole, because feedback
+the boundary silently dropped is indistinguishable from feedback that does not
+exist. Conversation comments, formal reviews, and inline review threads are all
+read with `--paginate`, so a long PR does not answer with a first page. The one
+connection that is not paginated is the reply list inside a single thread: it is
+asked whether it is complete instead, and a thread reporting more replies than it
+returned — or not reporting at all — stops the run rather than being classified
+on a partial view.
+
 ## State and locking
 
 One JSON state file holds a single attempt integer plus the head, the corrective

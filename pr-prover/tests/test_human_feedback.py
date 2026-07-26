@@ -10,9 +10,13 @@ the prose says.
 """
 from __future__ import annotations
 
+import json
+
 from _support import HEAD_A, HEAD_B, BUILDER_LOGIN, REVIEWER_LOGIN
+from pr_prover.commands import CommandResult
+from pr_prover.errors import GitHubError
 from pr_prover.feedback import ACKNOWLEDGEMENT, FeedbackSurfaces, human_findings
-from pr_prover.github import Comment
+from pr_prover.github import Comment, GhCliGitHub, ReviewThread
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN
 from test_loop import BLOCKER, LoopHarness
 
@@ -281,6 +285,91 @@ class FeedbackFreshnessTests(LoopHarness):
         loop.run()
 
         self.assertEqual(self.github.review_thread_calls, 1)
+
+
+class OmittedFeedbackTests(LoopHarness):
+    """ADAPTER-SMOKE-1: feedback the boundary could not see never becomes merge-ready.
+
+    The two surfaces reach ``human_findings`` as flat tuples, so anything the
+    boundary silently dropped is indistinguishable there from feedback that does
+    not exist. These drive the real :class:`GhCliGitHub` into the classifier for
+    the paginated surface, and the whole loop for the fail-closed one.
+    """
+
+    def boundary(self, stdout: str) -> GhCliGitHub:
+        class OneShot:
+            def run(self, argv, *, cwd=None, env=None, timeout=None, progress=None):
+                return CommandResult(argv=tuple(argv), returncode=0, stdout=stdout, stderr="")
+
+        return GhCliGitHub(OneShot())
+
+    def test_a_human_comment_beyond_the_first_page_still_blocks(self) -> None:
+        """Under the unpaginated read this comment never arrived, and the PR looked clean."""
+        pages = json.dumps(
+            [
+                [
+                    {"id": index, "user": {"login": BUILDER_LOGIN}, "body": "pushed a fix"}
+                    for index in range(100)
+                ],
+                [{"id": 100, "user": {"login": HUMAN}, "body": BLOCKING_PROSE}],
+            ]
+        )
+
+        comments = self.boundary(pages).comments("example/repo", 7)
+        findings = human_findings(
+            FeedbackSurfaces(comments=comments),
+            head=HEAD_A,
+            agents=frozenset({BUILDER_LOGIN, REVIEWER_LOGIN}),
+        )
+
+        self.assertEqual([item.source for item in findings], ["human-feedback:comment"])
+        self.assertEqual(findings[0].severity, "needs-karan")
+        self.assertEqual(findings[0].id, "human-comment-100")
+
+    def test_an_all_agent_thread_slice_cannot_be_read_as_no_human_feedback(self) -> None:
+        """Why the boundary must raise: the truncated slice classifies as clean."""
+        truncated = (
+            ReviewThread(
+                identifier="T1",
+                is_resolved=False,
+                is_outdated=False,
+                comments=(Comment(identifier="T1-c0", author=REVIEWER_LOGIN, body="nit"),),
+            ),
+        )
+
+        self.assertEqual(
+            human_findings(
+                FeedbackSurfaces(threads=truncated),
+                head=HEAD_A,
+                agents=frozenset({BUILDER_LOGIN, REVIEWER_LOGIN}),
+            ),
+            (),
+            "an all-agent slice is silently clean, so completeness must be decided earlier",
+        )
+
+    def test_an_incomplete_thread_read_stops_the_run_instead_of_reporting(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+        github = self.github
+
+        class TruncatedThreads:
+            def __getattr__(self, name: str) -> object:
+                return getattr(github, name)
+
+            def review_threads(self, repo: str, number: int):
+                raise GitHubError(
+                    "review thread has more comments than one page holds, so "
+                    "unresolved human feedback in it cannot be ruled out",
+                    evidence={"thread": "T1"},
+                )
+
+        loop.github = TruncatedThreads()
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.exit_code, 2)
 
 
 class FeedbackUnitTests(LoopHarness):

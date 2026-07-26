@@ -20,7 +20,7 @@ from pr_prover.errors import (
     StateError,
 )
 from pr_prover.findings import Finding, classify
-from pr_prover.github import Comment, GhCliGitHub
+from pr_prover.github import _NESTED_PAGE_INFO, _REVIEW_THREADS_QUERY, Comment, GhCliGitHub
 from pr_prover.reviewers import (
     artifact_matches,
     binds_head,
@@ -129,9 +129,14 @@ class GhBoundaryTests(unittest.TestCase):
         class Recorder:
             def run(self, argv, *, cwd=None, env=None, timeout=None):
                 seen.append(tuple(argv))
-                return CommandResult(argv=tuple(argv), returncode=0, stdout=json.dumps({"comments": []}), stderr="")
+                return CommandResult(argv=tuple(argv), returncode=0, stdout=self.payload(), stderr="")
 
-        GhCliGitHub(Recorder()).comments("example/repo", 7)
+            def payload(self) -> str:
+                return json.dumps({"number": 7, "state": "OPEN", "isDraft": True, "title": "t",
+                                   "url": "u", "headRefName": "b", "headRefOid": HEAD_A,
+                                   "baseRefName": "main"})
+
+        GhCliGitHub(Recorder()).pull_request("example/repo", 7)
         self.assertEqual(seen[0][:6], ("gh", "pr", "view", "7", "--repo", "example/repo"))
 
     def test_a_short_head_ref_oid_fails_closed(self) -> None:
@@ -168,20 +173,30 @@ class GhBoundaryTests(unittest.TestCase):
 
     def test_comments_carry_their_author_and_stable_id(self) -> None:
         payload = json.dumps(
-            {"comments": [{"id": "IC_kwDO123", "author": {"login": "karanagent1"}, "body": "hi"}]}
+            [[{"id": 123, "user": {"login": "karanagent1"}, "body": "hi", "html_url": "u"}]]
         )
         comments = self.boundary(payload).comments("example/repo", 7)
         self.assertEqual(comments[0].author, "karanagent1")
-        self.assertEqual(comments[0].identifier, "IC_kwDO123")
+        self.assertEqual(comments[0].identifier, "123")
+        self.assertEqual(comments[0].url, "u")
 
     def test_a_comment_without_a_stable_id_fails_closed(self) -> None:
         """Without an id there is no way to tell a comment from a copy of it."""
-        payload = json.dumps({"comments": [{"author": {"login": "karanagent1"}, "body": "hi"}]})
+        payload = json.dumps([[{"user": {"login": "karanagent1"}, "body": "hi"}]])
         with self.assertRaises(GitHubError):
             self.boundary(payload).comments("example/repo", 7)
 
     def test_a_comment_without_an_author_fails_closed(self) -> None:
-        payload = json.dumps({"comments": [{"id": "IC_kwDO123", "body": "hi"}]})
+        payload = json.dumps([[{"id": 123, "body": "hi"}]])
+        with self.assertRaises(GitHubError):
+            self.boundary(payload).comments("example/repo", 7)
+
+    def test_a_comment_payload_that_is_not_an_array_fails_closed(self) -> None:
+        with self.assertRaises(GitHubError):
+            self.boundary(json.dumps({"message": "Not Found"})).comments("example/repo", 7)
+
+    def test_a_comment_with_an_unusable_body_fails_closed(self) -> None:
+        payload = json.dumps([[{"id": 1, "user": {"login": "karanagent1"}, "body": {"x": 1}}]])
         with self.assertRaises(GitHubError):
             self.boundary(payload).comments("example/repo", 7)
 
@@ -218,6 +233,201 @@ class GhBoundaryTests(unittest.TestCase):
     def test_a_review_payload_that_is_not_an_array_fails_closed(self) -> None:
         with self.assertRaises(GitHubError):
             self.boundary(json.dumps({"message": "Not Found"})).reviews("example/repo", 7)
+
+
+def thread_node(
+    identifier: str,
+    *,
+    authors: tuple[str, ...] = (REVIEWER_LOGIN,),
+    resolved: bool = False,
+    outdated: bool = False,
+    has_next: object = False,
+    page_info: bool = True,
+    comments: bool = True,
+) -> dict:
+    """One ``reviewThreads`` node, with the nested completeness field the query asks for."""
+    connection: dict = {
+        "nodes": [
+            {"id": f"{identifier}-c{index}", "url": "u", "body": "b", "author": {"login": login}}
+            for index, login in enumerate(authors)
+        ]
+    }
+    if page_info:
+        connection["threadCommentsPageInfo"] = {"hasNextPage": has_next}
+    node: dict = {
+        "id": identifier,
+        "isResolved": resolved,
+        "isOutdated": outdated,
+        "path": "src/example.py",
+    }
+    if comments:
+        node["comments"] = connection
+    return node
+
+
+def thread_page(*nodes: dict) -> dict:
+    return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": list(nodes)}}}}}
+
+
+class PaginatedFeedbackSurfaceTests(unittest.TestCase):
+    """ADAPTER-SMOKE-1: neither human surface may be read as a silent slice.
+
+    The defect these pin down: conversation comments were read with a single
+    unpaginated ``gh pr view --json comments`` call, and each review thread asked
+    for ``comments(first: 100)`` without ever checking whether that was all of
+    them. On a long PR either read returns a slice with no indication of what it
+    dropped, so a human reply outside the slice reached nothing that could block
+    the run, and ``merge-ready`` was reachable over unresolved human feedback.
+    """
+
+    def boundary(self, *pages: object, returncode: int = 0) -> GhCliGitHub:
+        stdout = json.dumps(list(pages))
+
+        class OneShot:
+            def run(self, argv, *, cwd=None, env=None, timeout=None, progress=None):
+                return CommandResult(argv=tuple(argv), returncode=returncode, stdout=stdout, stderr="")
+
+        return GhCliGitHub(OneShot())
+
+    def comment(self, identifier: int, *, login: str, body: str = "b") -> dict:
+        return {"id": identifier, "user": {"login": login}, "body": body, "html_url": "u"}
+
+    # -- conversation comments ------------------------------------------------
+    def test_comments_are_read_through_the_paginated_rest_endpoint(self) -> None:
+        seen: list[tuple[str, ...]] = []
+
+        class Recorder:
+            def run(self, argv, *, cwd=None, env=None, timeout=None, progress=None):
+                seen.append(tuple(argv))
+                return CommandResult(argv=tuple(argv), returncode=0, stdout="[[], []]", stderr="")
+
+        self.assertEqual(GhCliGitHub(Recorder()).comments("example/repo", 7), ())
+        self.assertEqual(seen[0][:4], ("gh", "api", "--paginate", "--slurp"))
+        self.assertIn("repos/example/repo/issues/7/comments?per_page=100", seen[0])
+        self.assertNotIn("view", seen[0], "the unpaginated CLI read is gone")
+
+    def test_a_human_comment_on_a_later_page_is_returned(self) -> None:
+        """The frozen probe: old feedback lives on page two of a long PR."""
+        pages = [
+            [self.comment(index, login=BUILDER_LOGIN) for index in range(100)],
+            [self.comment(100, login="human-reviewer", body="do not merge")],
+        ]
+
+        comments = self.boundary(*pages).comments("example/repo", 7)
+
+        self.assertEqual(len(comments), 101)
+        self.assertEqual(comments[-1].identifier, "100")
+        self.assertEqual(comments[-1].author, "human-reviewer")
+
+    def test_pages_flatten_in_a_deterministic_order(self) -> None:
+        """Two reads of the same PR must agree, or id snapshots mean nothing."""
+        pages = [
+            [self.comment(1, login=BUILDER_LOGIN), self.comment(2, login=BUILDER_LOGIN)],
+            [self.comment(3, login="human-reviewer")],
+        ]
+
+        boundary = self.boundary(*pages)
+        first = [item.identifier for item in boundary.comments("example/repo", 7)]
+
+        self.assertEqual(first, ["1", "2", "3"])
+        self.assertEqual(
+            first, [item.identifier for item in boundary.comments("example/repo", 7)]
+        )
+
+    def test_a_single_object_page_is_kept_rather_than_dropped(self) -> None:
+        comments = self.boundary(self.comment(9, login="human-reviewer")).comments(
+            "example/repo", 7
+        )
+        self.assertEqual([item.identifier for item in comments], ["9"])
+
+    def test_a_string_comment_id_is_still_accepted(self) -> None:
+        payload = [[{"id": "9", "user": {"login": "human-reviewer"}, "body": "b"}]]
+        self.assertEqual(
+            self.boundary(*payload).comments("example/repo", 7)[0].identifier, "9"
+        )
+
+    def test_a_malformed_comment_page_fails_closed(self) -> None:
+        for page in ([["not an object"]], [[{"id": 1, "user": "human-reviewer"}]]):
+            with self.subTest(page=page):
+                with self.assertRaises(GitHubError):
+                    self.boundary(*page).comments("example/repo", 7)
+
+    # -- nested review-thread comments ---------------------------------------
+    def test_the_query_asks_each_thread_whether_its_comments_are_complete(self) -> None:
+        self.assertIn(f"{_NESTED_PAGE_INFO}: pageInfo", _REVIEW_THREADS_QUERY)
+        self.assertEqual(
+            _REVIEW_THREADS_QUERY.count("pageInfo { hasNextPage endCursor }"),
+            1,
+            "only the top-level connection carries the cursor gh pages on",
+        )
+
+    def test_a_complete_thread_is_read_normally(self) -> None:
+        threads = self.boundary(thread_page(thread_node("T1"))).review_threads("example/repo", 7)
+
+        self.assertEqual(len(threads), 1)
+        self.assertEqual(threads[0].authors, (REVIEWER_LOGIN,))
+        self.assertFalse(threads[0].is_resolved)
+
+    def test_a_thread_with_more_comments_than_one_page_fails_closed(self) -> None:
+        """The frozen probe: the returned slice is all agents, the reply is not."""
+        page = thread_page(thread_node("T1", authors=(REVIEWER_LOGIN,), has_next=True))
+
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(page).review_threads("example/repo", 7)
+
+        self.assertIn("more comments than one page holds", caught.exception.message)
+
+    def test_an_overflowing_thread_fails_closed_even_when_resolved(self) -> None:
+        """Completeness is decided at the boundary, before anything filters threads."""
+        page = thread_page(thread_node("T1", resolved=True, has_next=True))
+
+        with self.assertRaises(GitHubError):
+            self.boundary(page).review_threads("example/repo", 7)
+
+    def test_a_thread_that_does_not_report_completeness_fails_closed(self) -> None:
+        page = thread_page(thread_node("T1", page_info=False))
+
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(page).review_threads("example/repo", 7)
+
+        self.assertIn("did not report whether its comments are complete", caught.exception.message)
+
+    def test_a_non_boolean_completeness_flag_fails_closed(self) -> None:
+        for value in ("true", 1, None, {}):
+            with self.subTest(value=value):
+                page = thread_page(thread_node("T1", has_next=value))
+                with self.assertRaises(GitHubError):
+                    self.boundary(page).review_threads("example/repo", 7)
+
+    def test_a_thread_with_no_comments_connection_fails_closed(self) -> None:
+        page = thread_page(thread_node("T1", comments=False))
+
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(page).review_threads("example/repo", 7)
+
+        self.assertIn("no comments connection", caught.exception.message)
+
+    def test_one_overflowing_thread_fails_the_whole_read(self) -> None:
+        """A partial answer is not salvageable by returning the threads that fit."""
+        page = thread_page(thread_node("T1"), thread_node("T2", has_next=True))
+
+        with self.assertRaises(GitHubError):
+            self.boundary(page).review_threads("example/repo", 7)
+
+    def test_top_level_thread_pagination_is_preserved(self) -> None:
+        seen: list[tuple[str, ...]] = []
+        pages = [thread_page(thread_node("T1")), thread_page(thread_node("T2"))]
+        stdout = json.dumps(pages)
+
+        class Recorder:
+            def run(self, argv, *, cwd=None, env=None, timeout=None, progress=None):
+                seen.append(tuple(argv))
+                return CommandResult(argv=tuple(argv), returncode=0, stdout=stdout, stderr="")
+
+        threads = GhCliGitHub(Recorder()).review_threads("example/repo", 7)
+
+        self.assertEqual([thread.identifier for thread in threads], ["T1", "T2"])
+        self.assertEqual(seen[0][:5], ("gh", "api", "graphql", "--paginate", "--slurp"))
 
 
 class CanonicalHeadBindingTests(unittest.TestCase):
