@@ -1,5 +1,7 @@
 # Hermes Workflows
 
+Repository operating rules live in [`AGENTS.md`](AGENTS.md). The normative `pr-prover` product boundary lives in [`pr-prover/MISSION.md`](pr-prover/MISSION.md).
+
 ## Tools
 
 - `pr-prover/` — the repository-owned executable loop that proves an existing pull request merge-ready, blocked, or in need of Karan. Standard library only, no install step. See [`pr-prover/README.md`](pr-prover/README.md) for the run commands, lane contracts, and isolation guarantees.

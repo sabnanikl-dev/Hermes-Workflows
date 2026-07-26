@@ -1,5 +1,7 @@
 # pr-prover
 
+Read [`MISSION.md`](MISSION.md) before changing or reviewing this tool. It is the normative product, scope, lifecycle, and blocker contract; this README explains operation and implementation behavior.
+
 The repository-owned executable loop that proves an **existing** pull request
 merge-ready, blocked, or in need of Karan. Standard library only; no install
 step and no runtime dependencies.
