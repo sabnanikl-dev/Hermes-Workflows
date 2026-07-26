@@ -16,7 +16,7 @@ Google's mobile-first guidance permits different mobile UX such as accordions/ta
 
 ## Workflow notes
 
-1. If Karan expresses the visual preference in chat, put it on the PR first so the PR remains the coordination bus.
+1. A preference expressed in chat is not yet part of the current-head contract. It has to become PR-visible evidence before anything can be proved against it; `pr-prover` owns that transport.
 2. Scope the conversion narrowly: the requested accordion change, JSON-LD parity preserved, and any stale PR body text describing the old markup corrected.
 3. Run deterministic checks:
    - repo checks (`npm test`, `npm run check`, `npm run check:seo` for JMD-like static harnesses)
@@ -27,5 +27,5 @@ Google's mobile-first guidance permits different mobile UX such as accordions/ta
 ## Acceptance notes
 
 - `innerText` for a collapsed answer can be empty even when `textContent` and static HTML contain the answer. Use `textContent` or source parsing for crawlability/parity checks.
-- If a human review preference changes markup semantics, update the PR body so it no longer describes the stale implementation (for example, `<dl>` after converting to `<details>`).
+- A human review preference that changes markup semantics leaves any PR body text describing the old markup stale (for example, `<dl>` after converting to `<details>`). A stale contract surface is a real blocker, not cosmetic.
 - Keep copy/deploy gates explicit; an engineering-mergeable FAQ PR may still be blocked by Lucky/Danny/Karan approval.

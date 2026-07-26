@@ -30,5 +30,5 @@ The important reusable pattern is not the specific PR: **when output path safety
 ## Handling it in a review
 
 - A late-surfacing `--out` edge case is a real current-head blocker, not a nit. Whether another builder pass is allowed is a cycle-cap question `pr-prover/MISSION.md` answers, not one this reference decides.
-- Put the controlled reproduction on the PR as evidence, without touching the real repo files.
+- Reproduce it inside a controlled writable fixture, never against the real repo files. The exact command, root override, and refusal/exit behavior are what make the finding durable; where that evidence is published is `pr-prover`'s concern.
 - The fail-closed no-git/relative-path case is not closed until it is fixed and re-proved on the current head.

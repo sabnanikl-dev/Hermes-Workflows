@@ -8,7 +8,7 @@ Automated zero-blocker reviews and green checks do not satisfy a human visual co
 
 ## Recommended sequence
 
-1. **Acknowledge the blocker by action, not prose.** Do not repeat “merge-ready.” Post a concise PR comment that turns the reference into an actionable contract.
+1. **Acknowledge the blocker by action, not prose.** Do not repeat “merge-ready.” The attached reference has to become an actionable current-head contract before anything else counts; `pr-prover` owns how that contract reaches the PR.
 2. **Transcribe the reference into spatial/design requirements.** For map/card/location widgets, capture relative placement: major roads, landmark positions, labels, highlighted areas, pin placement, colors, and no-go constraints.
 3. **Scope the fix to the visual-alignment blocker.** Existing guardrails stay; the work stays on the existing PR branch; the reference contract, not a redesign, is the acceptance bar.
 4. **Expect a long quiet stretch.** A builder lane can print nothing for 10+ minutes while editing and testing. Judge it by worktree, diff, and head evidence rather than by silence, and do not redo work that already produced a valid commit.
@@ -16,7 +16,7 @@ Automated zero-blocker reviews and green checks do not satisfy a human visual co
    - deterministic checks: required labels/tokens present; forbidden geo/embed/dependency tokens absent; source-of-truth/ARIA contract intact;
    - browser geometry: local HTTP server plus `browser_console` 320-ish iframe probe for `scrollWidth <= innerWidth`, bounding box, and expected DOM/SVG labels;
    - visual proof: side-by-side reference/current screenshot plus mobile screenshot.
-6. **Aim the new head's review at the reference.** The review lanes should compare the new exact head to the human reference contract and to the static safety guardrails above, not only to the diff.
+6. **The reference contract is part of the acceptance bar.** The new exact head has to hold against the human reference contract and the static safety guardrails above, not only against the diff.
 7. **Final wording:** do not say “human-approved” or “merge-ready” until Karan visually signs off. Say “technical/reviewer checks are clean; waiting on your visual approval.”
 
 ## Static mini-map checklist

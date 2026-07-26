@@ -40,4 +40,4 @@ Fixtures for public copy, reviews, testimonials, case studies, or client claims 
 
 ## Terminal-only reviewer findings
 
-If a checker or reviewer CLI returns blocking findings only in its terminal output, those findings are not yet on the PR bus and the fix lane cannot read them. Capture the exact command, exit code, and affected contract so the finding becomes durable PR evidence rather than transcript-only knowledge; publication and readback of that evidence are `pr-prover`'s job, not this reference's.
+If a checker or reviewer CLI returns blocking findings only in its terminal output, those findings are not durable evidence and nothing downstream can read them. Capture the exact command, exit code, and affected contract so the finding survives outside a transcript; where that evidence is published and read back is `pr-prover`'s job, not this reference's.

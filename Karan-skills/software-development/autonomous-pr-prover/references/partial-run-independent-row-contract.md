@@ -43,7 +43,7 @@ If a generated evidence note changes, update the producer template in the same c
 
 ## Sweep closeout
 
-A broad first reconciliation often leaves one narrow generated or handoff claim behind. Before the next review pass:
+A broad first reconciliation often leaves one narrow generated or handoff claim behind. Before the reconciliation can be called complete:
 
 1. run a full-branch stale-token sweep;
 2. inspect the live PR body separately — it is not in the git search;

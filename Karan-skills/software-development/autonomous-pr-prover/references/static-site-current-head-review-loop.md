@@ -4,7 +4,7 @@ Use this reference when proving an existing static-site / SEO PR merge-ready aft
 
 ## Patterns that worked
 
-- Treat public copy blockers as a **class**, not a single line. After Claude fixes the cited files, run a targeted sweep across PR-changed customer-visible pages for the same phrases before re-review. Example patterns: `approved public`, `approved rental`, `approved starting`, `inside the approved scope`, `public rental copy`, `approved details`, plus a broader `approv` sweep to separate visible customer copy from docs/developer comments.
+- Treat public copy blockers as a **class**, not a single line. Once the cited files are fixed, the same phrases still have to be swept across every PR-changed customer-visible page before the class can be called closed. Example patterns: `approved public`, `approved rental`, `approved starting`, `inside the approved scope`, `public rental copy`, `approved details`, plus a broader `approv` sweep to separate visible customer copy from docs/developer comments.
 - If the sweep finds a residual same-class leak, it belongs to the open blocker set: name the precise residual finding, since it was discovered after the original live review and no reviewer artifact carries it yet.
 - For static SEO pages, combine normal repo gates with small deterministic probes:
   - each new route returns HTTP 200 from a local static server;

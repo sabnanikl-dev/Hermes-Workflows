@@ -20,10 +20,10 @@ Session-derived pattern from a PR prover loop where the automated review lanes a
 4. **After human-approved live mutation, update repo artifacts to match reality.**
    - Remove misleading repo-local binaries if they imply the repo is the source of truth.
    - Fallback data may use Sanity CDN URLs as a no-JS/offline snapshot.
-   - Update contracts/docs/PR body/comments to reflect live mutation happened and preserve boundaries: no archive/delete, no deploy, no DNS/hosting/account changes, no client-facing message.
+   - Repo contracts, docs, and the PR's own description must reflect that the live mutation happened, and the boundaries must hold: no archive/delete, no deploy, no DNS/hosting/account changes, no client-facing message.
 
 5. **Operator edits are not builder fixes.**
-   - If the operator already made uncommitted local edits and the human says “don’t fix yourself, use the builder,” revert those edits before handing the blocker list over.
+   - If the operator already made uncommitted local edits and the human says “don’t fix yourself, use the builder,” those edits must be reverted before the fix is authored.
    - The fix commit must carry builder provenance, with the handoff disclosed. A silently operator-authored fix makes the provenance record false.
 
 ## Domain closeout checklist

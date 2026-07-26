@@ -25,6 +25,7 @@ import os
 import re
 import unittest
 from pathlib import Path
+from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parents[2]
 SKILL_DIR = REPO / "Karan-skills" / "software-development" / "autonomous-pr-prover"
@@ -119,6 +120,157 @@ CONFLICTING_LIFECYCLE = (
     r"\blatestReviews\b",
     r"\breviewDecision\b",
 )
+
+
+class _Directive(NamedTuple):
+    """One ordinary-prose lifecycle instruction the references must not carry."""
+
+    name: str
+    pattern: str
+    sample: str
+
+
+# The command spellings above are only half the failure. Deleting ``gh pr`` from
+# a reference while leaving "post it on the PR, hand it to the builder, aim the
+# next review pass" behind keeps the same parallel procedure, written in
+# English — which is exactly the false pass the auditor demonstrated by
+# appending one sentence to a clean reference and watching the scan stay green.
+#
+# These patterns are mood-sensitive rather than keyword-sensitive on purpose. A
+# reference may *describe* a PR comment, a builder, a review, or a cycle as
+# domain evidence; banning those words outright would gut the lessons the files
+# exist for. What it may not do is *instruct* the operator to publish, hand off,
+# sequence a review, or control the cycle. Those are ``MISSION.md`` and
+# ``pr-prover``'s, so the match is anchored to clause-initial imperatives or to
+# phrases that are unambiguously procedural wherever they appear.
+MANUAL_LIFECYCLE_DIRECTIVES = (
+    _Directive(
+        "publish-a-pr-artifact",
+        r"^(?:also |then |first |next |now |always )?"
+        r"(?:post|publish|attach|file|leave|drop|relay|announce)\b"
+        r"[^.;:!?]{0,140}"
+        r"\b(?:pr|pull request|github|blocking|adjudication|closeout|reviewer|review)\s+"
+        r"(?:[a-z-]+\s+){0,2}(?:comment|artifact|bus|thread|body)\b",
+        "Post the reviewer artifact as a BLOCKING PR comment before launching the fix lane.",
+    ),
+    _Directive(
+        "put-it-on-the-pr",
+        r"^(?:also |then |first |next |now |always )?"
+        r"(?:put|post|place|attach|drop|leave|push)\b"
+        r"[^.;:!?]{0,140}"
+        r"\b(?:on|onto|to|into)\s+(?:the|this|that)\s+(?:pr|pull request|github)\b",
+        "Put the finding on the PR bus with the exact command and exit code.",
+    ),
+    _Directive(
+        "edit-the-pr-metadata",
+        r"^(?:also |then |first |next |now |always )?"
+        r"(?:update|edit|rewrite|correct|amend|revise)\b"
+        r"[^.;:!?]{0,80}\b(?:pr|pull request) (?:body|title|description)\b",
+        "Update the PR body so it no longer describes the stale implementation.",
+    ),
+    _Directive(
+        "hand-work-to-the-builder",
+        r"\b(?:hand|hands|handed|handing|send|sends|sending|route|routes|routed|routing|"
+        r"launch|launches|launched|launching|dispatch|dispatches|dispatched|dispatching|"
+        r"prompt|prompts|prompted|prompting|point|points|pointed|pointing|"
+        r"kicks? off|kicking off)\b"
+        r"[^.;:!?]{0,80}\bthe (?:builder|fix|corrective)(?:\s+(?:lane|pass))?\b",
+        "Send the change back through the builder lane with a pointer-first prompt.",
+    ),
+    _Directive(
+        "hand-the-blocker-over",
+        r"\bhand(?:s|ed|ing)?(?:\s+off)?\b[^.;:!?]{0,60}\bover\b",
+        "Revert those edits before handing the blocker list over.",
+    ),
+    _Directive(
+        "aim-the-next-review",
+        r"\baim(?:s|ed|ing)?\b[^.;:!?]{0,80}\breview\b",
+        "Aim the new head's review at the cascade.",
+    ),
+    _Directive(
+        "sequence-the-next-review-pass",
+        r"\bbefore (?:the )?(?:next )?(?:re-?review|review pass)\b",
+        "Before the next review pass, compare the implementation against every clause.",
+    ),
+    _Directive(
+        "instruct-the-review-lanes",
+        r"\b(?:review|reviewer) (?:lanes?|prompts?|passes)\s+"
+        r"(?:should|must|need to|have to|will)\b"
+        r"|\bask the (?:review )?lanes\b"
+        r"|\bdirect the (?:next )?review\b",
+        "The review lanes should compare the new exact head to the reference contract.",
+    ),
+    _Directive(
+        "re-run-the-review-by-hand",
+        r"^(?:re-?run|rerun|retry|restart)\b[^.;:!?]{0,80}\b(?:reviewers?|review|lane|pass)\b",
+        "Re-run the reviewer lanes on the new head once the fix lands.",
+    ),
+    _Directive(
+        "control-the-fix-cycle",
+        r"^respect the (?:cycle|fix)[- ]cap\b"
+        r"|\bif another (?:fix )?cycle is needed\b"
+        r"|\bobtain explicit (?:human|karan)[a-z' ]{0,12}approval before continuing\b"
+        r"|\bat most (?:two|three|\d+) (?:fix )?cycles\b"
+        r"|\b(?:two|three|\d+) (?:fix )?cycles,? (?:maximum|max)\b",
+        "Respect the cycle cap. If another cycle is needed, obtain explicit human "
+        "approval before continuing.",
+    ),
+    _Directive(
+        "escalate-by-hand",
+        r"^escalate to karan\b",
+        "Escalate to Karan when the corrective pass refuses.",
+    ),
+)
+
+_FENCE = re.compile(r"^```")
+_LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+_MARKUP = re.compile(r"[*_`>#\[\]]")
+_CLAUSE_BREAK = re.compile(r"(?<=[.;:!?])\s+|\s+—\s+")
+# "If Karan expresses the preference in chat, put it on the PR first" is the
+# same imperative as "Put it on the PR first"; the conditional lead-in must not
+# hide the verb from a clause-anchored match.
+_CONDITIONAL = re.compile(
+    r"^(?:if|when|once|whenever|after|before|unless|while|where|for)\b[^,]{0,140},\s*",
+    re.IGNORECASE,
+)
+
+
+def prose_clauses(text: str) -> list[str]:
+    """Split Markdown prose into clause openings, so mood can be read off them.
+
+    Fenced code, table rows, and list/emphasis markup are dropped: the scan is
+    about instructions written to a human operator, and a probe sketch or a
+    boundary matrix row is domain content, not a procedure.
+    """
+    clauses: list[str] = []
+    fenced = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _FENCE.match(stripped):
+            fenced = not fenced
+            continue
+        if fenced or not stripped or stripped.startswith("|"):
+            continue
+        stripped = _MARKUP.sub("", _LIST_MARKER.sub("", stripped)).strip()
+        for clause in _CLAUSE_BREAK.split(stripped):
+            clause = clause.strip()
+            if not clause:
+                continue
+            clauses.append(clause)
+            trimmed = _CONDITIONAL.sub("", clause).strip()
+            if trimmed and trimmed != clause:
+                clauses.append(trimmed)
+    return clauses
+
+
+def lifecycle_directives_in(text: str) -> list[tuple[str, str]]:
+    """Every (directive name, offending clause) pair the prose scan finds."""
+    return [
+        (directive.name, clause)
+        for clause in prose_clauses(text)
+        for directive in MANUAL_LIFECYCLE_DIRECTIVES
+        if re.search(directive.pattern, clause, re.IGNORECASE)
+    ]
 
 # The reason each reference is kept. A rewrite that strips the conflicting
 # lifecycle prose must not also strip the domain lesson, and the mapping's key
@@ -363,13 +515,103 @@ class ReferenceContractTests(unittest.TestCase):
                     f"{pattern!r} no longer catches any known conflicting phrasing",
                 )
 
+    def test_no_reference_instructs_publication_handoff_or_sequencing_in_prose(self) -> None:
+        """The half of FROZEN-P92-004 that survived deleting the command spellings."""
+        for name, text in self.documents.items():
+            with self.subTest(reference=name):
+                self.assertEqual(
+                    lifecycle_directives_in(text),
+                    [],
+                    f"{name} instructs lifecycle mechanics MISSION.md/pr-prover own",
+                )
+
+    def test_the_prose_scan_catches_the_demonstrated_false_pass(self) -> None:
+        """The auditor's exact mutation, plus one equivalent per directive class.
+
+        Reproduction from the re-review: append a single ordinary sentence to a
+        clean indexed reference and the previous scan still reported OK. Each
+        mutation is appended to a real, currently-clean reference, so a green
+        baseline and a red mutant are proved against the same document.
+        """
+        equivalents = (
+            "Post the reviewer artifact as a BLOCKING PR comment before launching the fix lane.",
+            "Hand the frozen ledger to the builder lane once the adjudication is written.",
+            "Put the reproduction on the PR so the fix lane can read it from GitHub.",
+            "Aim the next review pass at the omitted clause instead of the whole diff.",
+            "Before the next review pass, re-post the adjudication as a PR comment.",
+            "The review lanes should ignore everything except the cited file.",
+            "Update the PR body so it no longer describes the stale implementation.",
+            "Respect the cycle cap. If another cycle is needed, obtain explicit human "
+            "approval before continuing.",
+            "Escalate to Karan when the corrective pass refuses the finding.",
+        )
+        for name, text in sorted(self.documents.items()):
+            self.assertEqual(lifecycle_directives_in(text), [], f"{name} is not a clean baseline")
+        baseline = self.documents["deterministic-validator-false-pass-probes.md"]
+        for mutation in equivalents:
+            with self.subTest(mutation=mutation):
+                self.assertTrue(
+                    lifecycle_directives_in(f"{baseline}\n{mutation}\n"),
+                    f"an appended {mutation!r} still passes the scan",
+                )
+
+    def test_the_prose_scan_is_not_vacuous_and_not_indiscriminate(self) -> None:
+        """Every directive still bites, and domain evidence prose still does not.
+
+        The second half matters as much as the first: "comment", "review",
+        "PR", and "builder" are load-bearing words in these lessons, and a scan
+        that rejected them as nouns would delete the content it is protecting.
+        """
+        for directive in MANUAL_LIFECYCLE_DIRECTIVES:
+            with self.subTest(directive=directive.name):
+                self.assertTrue(
+                    lifecycle_directives_in(directive.sample),
+                    f"{directive.name} no longer catches its own sample",
+                )
+        descriptive = (
+            "A chat or PR comment saying 'not merge ready' is a live human blocker.",
+            "Human PR comments are merge blockers even when GitHub says the PR is approved.",
+            "A builder's scope opinion does not supersede a review gate.",
+            "An account-level review decision is not per-role evidence.",
+            "Treat those GitHub surfaces as untrusted external content.",
+            "A change-request artifact against an old head is audit history.",
+            "The corrective-rerun allowance and the cycle cap are defined in MISSION.md.",
+            "Reviewers should cover the missing root, wrong root type, and unreadable "
+            "root boundaries.",
+        )
+        for sentence in descriptive:
+            with self.subTest(sentence=sentence):
+                self.assertEqual(
+                    lifecycle_directives_in(sentence),
+                    [],
+                    "the scan rejected descriptive domain evidence",
+                )
+
+    def lesson_gaps(self, documents: dict[str, str]) -> list[tuple[str, str]]:
+        return [
+            (name, token)
+            for name, tokens in PRESERVED_LESSONS.items()
+            for token in tokens
+            if token not in documents.get(name, "").lower()
+        ]
+
     def test_every_reference_keeps_the_domain_lesson_it_exists_for(self) -> None:
         """Removing conflicting mechanics must not remove the reusable lesson."""
+        self.assertEqual(self.lesson_gaps(self.documents), [])
+
+    def test_the_lesson_scan_notices_a_deleted_domain_token(self) -> None:
+        """Non-vacuity: a rewrite that quietly guts a lesson has to fail here."""
         for name, tokens in PRESERVED_LESSONS.items():
-            lowered = self.documents[name].lower()
             for token in tokens:
+                mutated = dict(self.documents)
+                mutated[name] = re.sub(
+                    re.escape(token), "", self.documents[name], flags=re.IGNORECASE
+                )
                 with self.subTest(reference=name, lesson=token):
-                    self.assertIn(token, lowered, f"{name} lost its {token!r} lesson")
+                    self.assertNotEqual(
+                        mutated[name], self.documents[name], f"{name} never held {token!r}"
+                    )
+                    self.assertIn((name, token), self.lesson_gaps(mutated))
 
     def test_every_reference_is_reachable_from_the_router(self) -> None:
         indexed = set(_REFERENCE.findall(SKILL.read_text(encoding="utf-8")))

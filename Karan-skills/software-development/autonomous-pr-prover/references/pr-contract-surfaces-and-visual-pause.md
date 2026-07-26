@@ -4,7 +4,7 @@ Session-derived pattern from a current-head PR prover loop on a static-site/cont
 
 ## Contract surfaces
 
-When the user says the PR/comments/tagged issues are the contract, make that explicit in every reviewer and builder prompt:
+When the user says the PR/comments/tagged issues are the contract, that contract spans more surfaces than the diff:
 
 - PR body
 - PR conversation comments
@@ -31,6 +31,6 @@ If Karan asks to pause once a PR is mergeable and send screenshots:
 3. Start a local HTTP preview from the PR branch/site directory.
 4. Capture desktop and mobile screenshots, storing them outside disposable worktrees.
 5. Stop the preview server.
-6. Say the PR is technically mergeable and **not merged**, and attach the screenshots.
+6. Report the PR as technically mergeable and **not merged**, with the captured screenshots as the visual evidence.
 
 For static sites, a useful fallback when anchored screenshots (`/#section`) are blank in headless Chrome is to capture a tall full-page-ish screenshot from `/` with enough viewport height to include the target section. Pair with DOM/console checks if needed; do not rely on a blank anchored screenshot.

@@ -5,8 +5,8 @@ Use this reference when an already-open static/site PR gets a human visual-contr
 ## Pattern that worked
 
 1. Treat the human PR comment as a live blocking contract surface even if the PR was previously approved.
-2. Send the change back through the builder lane with a pointer-first prompt to read the live PR comments/reviews.
-3. Preserve prior accepted fixes explicitly in the builder prompt (for example: no visible TODO copy, no mobile overflow regression, no geo/coordinate claims).
+2. Keep the change on the existing PR branch and scoped to that comment. Pointer-first still applies: the live PR comments and reviews are the contract, not a copied summary of them.
+3. Prior accepted fixes stay accepted (for example: no visible TODO copy, no mobile overflow regression, no geo/coordinate claims). A visual follow-up is not a licence to regress them.
 4. Require both deterministic suite verification and a targeted contract probe:
    - required labels/content present;
    - no forbidden claims/metadata introduced;
@@ -14,7 +14,7 @@ Use this reference when an already-open static/site PR gets a human visual-contr
 5. If the local worktree does not have Playwright/Chrome available, do not stop at a static text check when Hermes browser tools are available. Start a local HTTP server and use `browser_console` to inject a 320px iframe, then read `documentElement.scrollWidth`, map/component bounding boxes, and DOM/SVG text labels from inside the iframe.
 6. Pair the DOM probe with visual inspection (`browser_vision`) for changed visual components. For anchored sections, scroll the target into view and offset for sticky nav; if an anchor capture is misleading, use a taller full-page/section view plus DOM assertions.
 7. Treat the fix as a new exact head. Prior passes are historical; `pr-prover` re-runs the gates and the ordered review lifecycle, and this reference does not reassemble that closeout by hand.
-8. Do not count a lane that timed out after useful reads as a pass. The right retry is a narrower pass that inspects only the previous blocker and the new diff, and it still has to emit a real verdict.
+8. A lane that timed out after useful reads is not a pass. Useful partial reads and a real verdict are different things, and only the second one counts; `pr-prover` owns timeouts, retries, and how the lifecycle continues.
 9. Confirm by evidence that the human blocking comment has an actual later response — a fix commit or a reply that addresses it — not merely that automated checks went green again.
 
 ## 320px iframe probe sketch

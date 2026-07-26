@@ -50,6 +50,6 @@ If the tool reports both source existence and citation health, keep them as sepa
 ## Using these probes in a review
 
 1. Reproduce any suspected false pass independently before accepting it as a blocker.
-2. Put the finding on the PR bus with the exact command, exit code, and affected contract, so the fix lane can read it from GitHub instead of from a transcript.
+2. Record the exact command, exit code, and affected contract alongside the finding. A false pass described without its reproduction is transcript knowledge rather than durable evidence; where that evidence is published and read back is `pr-prover`'s concern, not this reference's.
 3. After a fix, re-run the **entire** boundary matrix, not only the cited failing case. Empty-success paths travel in families.
 4. Treat small prose mismatches as non-blocking only when behavior, machine output, acceptance criteria, and safety semantics remain unambiguous; record them as follow-up rather than opening another code cycle.

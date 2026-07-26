@@ -32,7 +32,7 @@ Required regressions for **each gate layer** that consumes the clock:
 4. Tests assert positive error/action counts, not vacuous predicates such as `array.every(...)` on an empty array.
 5. Mutation-check the guard when practical: reverting `Number.isFinite` to a type-only check must make the regression fail.
 
-Reviewer prompts should explicitly inspect clock injection/default behavior whenever a PR adds time-dependent test seams.
+Clock injection and default behavior deserve explicit inspection whenever a PR adds time-dependent test seams; a seam only the tests exercise is exactly where a fail-open slips through.
 
 ## Reviewer temporary-file hygiene
 
