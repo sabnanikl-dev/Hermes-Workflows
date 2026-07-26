@@ -1,7 +1,7 @@
 ---
 name: autonomous-pr-prover
 description: "Route an existing GitHub PR through the pr-prover tool: trusted Claude builder and Codex reviewers at one exact head, Hermes judgment, Karan merge authority."
-version: 2.0.0
+version: 2.1.0
 author: Hermes Agent
 metadata:
   hermes:
@@ -22,16 +22,16 @@ Not for turning an idea into an issue, building a feature before a PR exists, or
 The loop is executable and lives in `pr-prover/`. Do not re-run it by hand.
 
 ```bash
-pr-prover check-config --config <run.json>   # gates and reviewer lanes
-pr-prover run --config <run.json> --json     # 0 merge-ready | 1 blocked | 2 needs-Karan
+pr-prover/bin/pr-prover check-config --config <run.json>   # gates and reviewer lanes
+pr-prover/bin/pr-prover run --config <run.json> --json     # 0 merge-ready | 1 blocked | 2 needs-Karan
 ```
 
-Write `run.json` from `pr-prover/examples/run.example.json`: the PR, the clone to borrow objects from, gates, one argv array per lane, and the exact GitHub login the builder's fix comment must come from. `pr-prover/MISSION.md` is the normative product boundary and `pr-prover/README.md` documents the marker contract each lane must satisfy. The tool binds the run to the exact `headRefOid`, holds every gate and verdict to it, accepts a builder push only when the PR head, the remote branch, the PR commit list, the attempt worktree, and the signed comment read back from GitHub all agree, and stops and asks rather than guessing. Hermes' judgment sits either side of it: write the config, read the report, advise Karan.
+Run it from the repository root: there is no install step, so nothing named `pr-prover` is on `PATH`. Mechanics stay in the tool — `pr-prover/examples/run.example.json` is the config shape, `pr-prover/MISSION.md` is the normative product boundary and lifecycle, and `pr-prover/README.md` documents the lane/marker contract, the push agreement, and fix-comment readback. Hermes' judgment sits either side of the run: write the config, read the report, advise Karan.
 
 ## Trusted roles
 
 - **Claude Code** — builder/fix lane. Reads the live PR itself, edits, verifies, commits, pushes to the PR branch, posts its signed fix comment.
-- **Codex Reviewer A/B and Integration Auditor** — independent review lanes judging one exact head. Configure all three in that order; the tool refuses fewer than two.
+- **Codex Reviewer A/B and Integration Auditor** — independent review lanes judging one exact head. Configure all three, in that order.
 - **Hermes** — operator and integrator. Verifies live GitHub evidence, classifies findings, reports merge-ready / blocked / needs-Karan.
 - **Karan** — sole merge authority.
 
@@ -56,7 +56,7 @@ Two fix cycles, maximum; a partial builder fix gets one corrective rerun inside 
 - Visual contract, screenshots, or a human visual reference → `references/current-head-visual-contract-review-loop.md`, `references/human-visual-reference-map-alignment.md`, `references/pr-contract-surfaces-and-visual-pause.md`.
 - CLI output-path safety (`--out`/`--output` as a write surface) → `references/read-command-output-path-safety-pr-loop.md`.
 - A read-only validator or checker that could false-pass on missing, empty, or malformed input → `references/deterministic-validator-false-pass-probes.md`.
-- Reviewer identity, shared reviewer account, or relayed artifacts → `references/reviewer-identity-relay-and-shared-account-state.md`.
+- Two reviewer lanes sharing one GitHub account, or a lane that finished reasoning but will not exit → `references/shared-reviewer-account-state-and-quiet-lanes.md`.
 - Builder fixed only part of the blocker set → `references/partial-builder-fix-cycle-recovery.md`.
 - Human "not mergeable" after green reviews, or a live CMS source of truth → `references/human-review-live-cms-source-of-truth.md`.
 - A human changed a page's purpose, copy, or conversion goal → `references/human-copy-goal-contract-cascade.md`.

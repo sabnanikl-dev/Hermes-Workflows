@@ -2,30 +2,16 @@
 
 ## Failure mode
 
-A builder reads a durable `CHANGES_REQUESTED` review containing multiple blockers, fixes one, and explicitly declines another as “out of scope” or “already satisfied.” If Hermes accepts that partial push and starts re-review, the loop silently narrows the reviewer contract and wastes a cycle.
+A builder reads a durable change-request artifact containing multiple blockers, fixes one, and explicitly declines another as "out of scope" or "already satisfied." If that partial push is treated as the end of the cycle, the loop silently narrows the reviewer contract to whatever the builder was willing to do.
 
-## Correct recovery
+## The judgment that matters
 
-1. Read back the formal review object from GitHub and confirm the omitted finding is durable, current-head, and still blocking.
-2. Adjudicate the finding independently against the issue/PR contract. A builder’s scope opinion does not supersede a formal review gate.
-3. If valid, keep the current fix cycle open. Do not launch reviewers yet.
-4. Re-run the original builder lane once with a compact correction that points to the exact review URL/ID and says the omitted finding remains the merge gate.
-5. Require a focused commit, verification, remote commit-list readback, and signed PR comment.
-6. Only after the complete blocker set is resolved should Hermes run full verification and current-head A/B re-review.
-7. If the corrective builder run still refuses or fails, escalate. Do not add unlimited retries under the label “same cycle.”
+1. Read the artifact back from GitHub and confirm the omitted finding is durable, bound to the current head, and still blocking.
+2. Adjudicate it independently against the issue/PR contract. **A builder's scope opinion does not supersede a review gate**, and a builder's own summary is not evidence that the frozen ledger is closed.
+3. If the finding is valid, the ledger is not closed, so the cycle is not finished. The corrective-rerun allowance and the cycle cap are defined in `pr-prover/MISSION.md`; this reference does not restate them.
+4. Point the corrective pass at the exact omitted artifact — its review URL/ID plus the adjudication — rather than a fresh wall of reviewer prose. This is the narrow exception to pointer-first prompting: the lane already read the PR and misclassified a durable artifact, so identifying that artifact is the correction.
+5. If the corrective pass still refuses or fails, escalate to Karan. Unlimited retries under the label "same cycle" is the failure mode this reference exists to prevent.
 
-## Cycle accounting
+## Why it is a judgment call, not bookkeeping
 
-Count a new cycle when a new reviewer pass produces a new blocker set. A corrective builder rerun before re-review completes the already-open cycle; it is not a third cycle. Bound it to one corrective rerun.
-
-## Prompt shape
-
-```text
-Your previous run fixed blocker A but declined blocker B.
-Reviewer B's formal current-head review <URL/ID> remains the active merge gate.
-Hermes has adjudicated blocker B as valid against issue/PR acceptance criteria.
-Implement only that remaining blocker, verify it, commit/push, and comment back.
-Do not merge or deploy.
-```
-
-This is a narrow exception to pointer-first prompting: the builder already read the PR and misclassified a durable artifact, so Hermes may identify the exact omitted artifact and adjudication without pasting a fresh wall of reviewer prose.
+The tempting shortcut is to accept the partial push because the diff looks reasonable and re-review is cheap. It is not cheap: re-review against a quietly shrunken blocker set produces a pass that means nothing, and the next reader cannot tell which findings were adjudicated and which were merely dropped.

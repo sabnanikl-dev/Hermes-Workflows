@@ -36,7 +36,7 @@ Reviewer prompts should explicitly inspect clock injection/default behavior when
 
 ## Reviewer temporary-file hygiene
 
-External reviewer CLIs may create a Markdown body file before running `gh pr comment`. If the prompt does not constrain the path, they may leave untracked `.reviewer-*` files inside the product worktree.
+External reviewer CLIs may create a Markdown body file before publishing a comment. If the prompt does not constrain the path, they may leave untracked `.reviewer-*` files inside the product worktree.
 
 Reviewer prompt rule:
 
@@ -44,11 +44,10 @@ Reviewer prompt rule:
 Write any review/comment body file under /tmp (or the OS temp directory), never inside the repository.
 ```
 
-After every reviewer exits:
+After a lane exits:
 
-1. Read back the signed GitHub artifact.
-2. Run `git status --short --branch` in the bound worktree.
-3. Remove only clearly reviewer-generated scratch files after confirming their provenance.
-4. Do not begin the builder fix lane until the worktree is clean and current HEAD still equals the PR `headRefOid`.
+1. Run `git status --short --branch` in the bound worktree.
+2. Remove only clearly lane-generated scratch files, and only after confirming their provenance.
+3. Treat an unclean worktree as a stop condition, not as something to commit around.
 
-This prevents reviewer bookkeeping from contaminating the builder diff or being accidentally committed under Claude provenance.
+This prevents reviewer bookkeeping from contaminating the builder diff or being accidentally committed under builder provenance.

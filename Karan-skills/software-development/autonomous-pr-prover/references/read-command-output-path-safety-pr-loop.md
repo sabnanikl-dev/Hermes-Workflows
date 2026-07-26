@@ -27,8 +27,8 @@ In one PR-prover run, two fix cycles cleared obvious `--out` safety and JSON err
 
 The important reusable pattern is not the specific PR: **when output path safety depends on repo discovery, test the no-repo/no-git path and require fail-closed behavior.**
 
-## PR-prover handling
+## Handling it in a review
 
-- If this appears after the second fix cycle, honor the two-cycle hard stop: post the current-head re-review artifact and ask Karan before launching a third builder cycle.
-- Include the controlled reproduction in the PR comment without touching the real repo files.
-- Do not report merge-ready until the fail-closed no-git/relative-path case is fixed and re-reviewed on the current head.
+- A late-surfacing `--out` edge case is a real current-head blocker, not a nit. Whether another builder pass is allowed is a cycle-cap question `pr-prover/MISSION.md` answers, not one this reference decides.
+- Put the controlled reproduction on the PR as evidence, without touching the real repo files.
+- The fail-closed no-git/relative-path case is not closed until it is fixed and re-proved on the current head.

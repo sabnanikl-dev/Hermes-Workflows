@@ -47,11 +47,9 @@ If the tool reports both source existence and citation health, keep them as sepa
 - human and JSON output use the same category and scope semantics;
 - unknown filters and invalid roots cannot produce an empty green report.
 
-## PR-prover procedure
+## Using these probes in a review
 
 1. Reproduce any suspected false pass independently before accepting it as a blocker.
-2. Put the finding on the PR bus with exact command, exit code, and affected contract.
-3. Send Claude Code a pointer-first fix prompt; do not patch directly.
-4. After the push, verify local HEAD, PR `headRefOid`, commit list, CI, and signed fix comment.
-5. Re-run the entire boundary matrix—not only the cited failing case—then run fresh current-head Reviewer A/B lanes.
-6. Treat small prose mismatches as non-blocking only when behavior, machine output, acceptance criteria, and safety semantics remain unambiguous; record them as follow-up rather than opening another code cycle.
+2. Put the finding on the PR bus with the exact command, exit code, and affected contract, so the fix lane can read it from GitHub instead of from a transcript.
+3. After a fix, re-run the **entire** boundary matrix, not only the cited failing case. Empty-success paths travel in families.
+4. Treat small prose mismatches as non-blocking only when behavior, machine output, acceptance criteria, and safety semantics remain unambiguous; record them as follow-up rather than opening another code cycle.

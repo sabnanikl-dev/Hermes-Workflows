@@ -14,16 +14,15 @@ A conservative accordion can remain GEO/crawler-friendly if it is native/static:
 
 Google's mobile-first guidance permits different mobile UX such as accordions/tabs as long as the content remains equivalent and accessible on the mobile page. Treat this as support for static/native accordions, not a license to hide primary content behind interaction-loaded JavaScript.
 
-## PR-bus workflow
+## Workflow notes
 
-1. If Karan expresses the visual preference in chat, post a concise PR comment first so the PR remains the coordination bus.
-2. Send Claude Code a pointer-first fix prompt: read the live PR comments/reviews/issues, fix only the requested accordion conversion, preserve JSON-LD parity, update stale PR body text, run verification, commit/push, and post a signed fix comment.
-3. Verify the pushed commit via `gh pr view --json headRefOid,commits` against local `git rev-parse HEAD`.
-4. Run deterministic checks:
+1. If Karan expresses the visual preference in chat, put it on the PR first so the PR remains the coordination bus.
+2. Scope the conversion narrowly: the requested accordion change, JSON-LD parity preserved, and any stale PR body text describing the old markup corrected.
+3. Run deterministic checks:
    - repo checks (`npm test`, `npm run check`, `npm run check:seo` for JMD-like static harnesses)
    - targeted DOM/static parser: each changed page has 5 `<details>` items, one `<h1>`, `BreadcrumbList` + `FAQPage`, non-empty answer text in static HTML, and exact FAQPage ↔ visible summary/answer parity.
-5. Browser QA one changed page with at least one accordion opened. Native `<details>` may show only questions in accessibility snapshots while collapsed; use `textContent`/static parser to prove answer crawlability and open one item for visual proof.
-6. Re-run A/B reviewers on the new current head. Old approvals on the pre-accordion commit no longer count.
+4. Browser QA one changed page with at least one accordion opened. Native `<details>` may show only questions in accessibility snapshots while collapsed; use `textContent`/static parser to prove answer crawlability and open one item for visual proof.
+5. A markup conversion is a new exact head. Passes recorded against the pre-accordion head no longer count for anything.
 
 ## Acceptance notes
 

@@ -21,15 +21,15 @@ A green suite is not sufficient when its validator still enforces the old requir
 1. Post the human direction as a BLOCKING PR artifact. Quote the new page goal and name examples of prohibited implications/actions.
 2. Inspect the whole page before prompting the builder. Search visible copy, metadata, JSON-LD, CTA destinations, FAQ, and lower-page conversion sections.
 3. Translate absolute intent literally. If the human says the page's only purpose is destination X, merely demoting Call/Directions/visit actions is a partial fix; page-specific competing actions must be removed unless the human allows them. Distinguish global site chrome from page-specific conversion actions.
-4. Send the live blocker to Claude using a pointer-first prompt. Require visible FAQ/JSON-LD parity and no regression to unrelated commerce/accessibility boundaries.
-5. Before re-review, compare the implementation against every clause in the human blocker. If the builder omitted one, post a concise adjudication artifact and run the bounded corrective builder pass inside the same cycle.
+4. Hand the live blocker to the builder lane. Require visible FAQ/JSON-LD parity and no regression to unrelated commerce/accessibility boundaries.
+5. Before the next review pass, compare the implementation against **every** clause of the human blocker. An omitted clause means the blocker is not closed; post a concise adjudication artifact rather than letting re-review judge a shrunken contract.
 6. Re-read the PR body and committed docs. Then sweep structured contracts and executable validators—not just prose.
 7. For each changed invariant, require both:
    - positive proof that the final contract passes; and
    - negative proof that the rejected old behavior fails (including likely alias fields or alternate encodings).
 8. Run browser QA on the changed site tree. A later docs/contract-only head may prove the rendered site tree is unchanged, but if the human asks for screenshot proof, recapture fresh screenshots from the exact final PR head anyway. Pair them with geometry, console, interaction, reduced-motion, and no-JS/degraded checks as relevant, and store proof outside disposable worktrees.
-9. Run fresh current-head Reviewer A/B passes. Reviewer B should explicitly inspect PR-body/docs/allowlist/validator consistency.
-10. Respect the normal cycle cap. If another cycle is needed, stop, report the exact blocker, and obtain explicit human approval before continuing.
+9. Aim the new head's review at the cascade: ask the lanes to inspect PR-body, docs, allowlist, and validator consistency explicitly, not just the code diff.
+10. Respect the cycle cap in `pr-prover/MISSION.md`. If another cycle is needed, stop, report the exact blocker, and obtain explicit human approval before continuing.
 
 ## Entry vs rendered-instance terminology
 
