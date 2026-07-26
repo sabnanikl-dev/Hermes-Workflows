@@ -294,6 +294,15 @@ PR-PROVER: ACKNOWLEDGED <the acknowledged comment's id>
 clears it. That is id matching, not language understanding, and two things have
 to hold before it clears anything.
 
+**It clears its target, not the post it is written in.** An acknowledgement is
+one line of bookkeeping, so a post carrying nothing else is bookkeeping and
+raises nothing new. A post that also says something else is both: the
+acknowledgement still clears the id it names, and the remaining text is
+unacknowledged feedback in its own right, cleared the same explicit way. There is
+no rule for deciding that some leftover prose was only a courtesy note — that is
+the sentiment guess this tool refuses to make — so "do not merge" written above
+an acknowledgement line stops the run instead of leaving with it.
+
 **It has to have come later.** An acknowledgement is a human saying they dealt
 with something that already existed, so the target must precede it by GitHub's
 own immutable timestamps — `created_at` for a conversation comment,
@@ -314,13 +323,24 @@ fields is a test a human on the shared login can pass on purpose.
 
 So a post is excluded only when this run already proved it published *that exact
 GitHub id*. Each readback checks its artifact against a snapshot of the ids
-present before the lane was launched, and keeps the id of whatever satisfied it;
-those retained ids live in the run's state file, so a second cycle still
-recognises what the first one published after the head moves. Every other
-comment, review, thread reply, or acknowledgement from those accounts is human
-feedback — including a post that looks exactly like a lane artifact but belongs
-to some other run — because an unattributed post from a shared publishing
-account is exactly where a real "do not merge" would otherwise vanish.
+present before the lane was launched, and keeps the id of whatever satisfied it
+together with a digest of what that artifact held at the time; both live in the
+run's state file, so a second cycle still recognises what the first one published
+after the head moves. Every other comment, review, thread reply, or
+acknowledgement from those accounts is human feedback — including a post that
+looks exactly like a lane artifact but belongs to some other run — because an
+unattributed post from a shared publishing account is exactly where a real "do
+not merge" would otherwise vanish.
+
+The digest is there because publication is not the last thing that can happen to
+a post. Comments and review bodies stay editable, and the account that can edit a
+verified lane artifact is the same shared account a human types into, so "this
+run published id X" must not harden into "id X can never be feedback again". An
+artifact nobody touched stays this run's own evidence across a moved head and a
+restarted process; one whose body or review state has changed since readback no
+longer matches what was proven, and goes back to being ordinary feedback. A
+review's GitHub `commit_id` is untouched by this and remains the authoritative
+head binding it already was.
 
 **The three surfaces are read until two consecutive passes agree.** Comments,
 reviews, and review threads are three separate GitHub reads, and feedback that
@@ -357,9 +377,13 @@ on a partial view.
 ## State and locking
 
 One JSON state file holds a single attempt integer plus the head, the corrective
-reruns already spent, the GitHub ids of the artifacts this run proved it
-published, and the terminal outcome. The ids are here for the same reason the
-attempt counter is: both have to survive a moved head and a restarted process.
+reruns already spent, the GitHub id of each artifact this run proved it published
+with a digest of what that artifact held when it was proved, and the terminal
+outcome. The artifact records are here for the same reason the attempt counter
+is: both have to survive a moved head and a restarted process. An entry carrying
+an id but no publication evidence is unexpected state and stops the run, because
+accepting it would silently restore ownership by id alone for every artifact in
+the file.
 One `O_EXCL` lockfile marks that a run exists. There is no PID inspection and no takeover path: if the lock is
 held, the run stops and asks. After confirming no run is active, remove it with
 `pr-prover reset --force`.

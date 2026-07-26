@@ -29,6 +29,7 @@ from pr_prover.feedback import (
     FeedbackSurfaces,
     RunArtifacts,
     human_findings,
+    publication_evidence,
 )
 from pr_prover.github import Comment, GhCliGitHub, ReviewThread
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN
@@ -44,9 +45,20 @@ PUBLISHERS = frozenset({BUILDER_LOGIN, REVIEWER_LOGIN})
 NOTHING_PROVED = RunArtifacts(publishers=PUBLISHERS)
 
 
-def owning(*identifiers: str) -> RunArtifacts:
-    """A run that proved it published exactly these artifact ids."""
-    return RunArtifacts(identifiers=frozenset(identifiers), publishers=PUBLISHERS)
+def owning(*artifacts: Comment) -> RunArtifacts:
+    """A run that proved it published exactly these artifacts, as they stand.
+
+    Ownership is the id *and* what readback verified the post held, so the
+    artifacts themselves are passed rather than bare ids: retaining an id alone
+    is the thing that used to keep an edited post excluded.
+    """
+    return RunArtifacts(
+        verified_artifacts=frozenset(
+            (artifact.identifier, publication_evidence(artifact))
+            for artifact in artifacts
+        ),
+        publishers=PUBLISHERS,
+    )
 
 
 class UnresolvedHumanFeedbackTests(LoopHarness):
@@ -180,17 +192,49 @@ class ResolvedHumanFeedbackTests(LoopHarness):
         self.assertEqual(result.outcome, NEEDS_KARAN)
 
     def test_an_explicitly_acknowledged_comment_is_not_blocking(self) -> None:
+        """An acknowledgement that only acknowledges clears its target and adds nothing."""
         loop = self.build()
         raised = self.remote.comment("nit: rename this helper", author=HUMAN)
-        self.remote.comment(
-            f"handled in a follow-up issue\n\n{ACKNOWLEDGEMENT} {raised.identifier}\n",
+        self.remote.comment(f"{ACKNOWLEDGEMENT} {raised.identifier}\n", author="karan")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+
+    def test_an_acknowledgement_carrying_more_prose_leaves_that_prose_unresolved(
+        self,
+    ) -> None:
+        """The mixed post: acknowledging one thing does not clear what else it says.
+
+        This is the shape that used to report ``merge-ready`` over a live stop.
+        The post validly cleared the older comment, and the whole post was then
+        skipped as bookkeeping — so a "do not merge" written directly above the
+        acknowledgement line vanished with it.
+
+        The acknowledgement still counts for its target. What no longer happens
+        is the rest of the body counting as acknowledged too, because deciding
+        that some remaining prose is merely a courtesy note and not a new stop
+        would be exactly the sentiment guess this module refuses to make.
+        """
+        loop = self.build()
+        raised = self.remote.comment("nit: rename this helper", author=HUMAN)
+        mixed = self.remote.comment(
+            f"{BLOCKING_PROSE}\n\n{ACKNOWLEDGEMENT} {raised.identifier}\n",
             author="karan",
         )
         self.review_round(HEAD_A)
 
         result = loop.run()
 
-        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        # Exactly one finding: the mixed post itself. Its target really was
+        # cleared, so the older comment is not reported alongside it.
+        self.assertEqual(
+            [item.finding.id for item in result.classification.needs_karan],
+            [f"human-comment-{mixed.identifier.replace('_', '-').lower()}"],
+        )
 
     def test_an_agent_cannot_acknowledge_the_feedback_aimed_at_it(self) -> None:
         """Only a human clears human feedback; a lane would be marking its own homework.
@@ -521,7 +565,14 @@ class SharedPublishingIdentityTests(LoopHarness):
         self.assertEqual(len(self.remote.comments), 3)
         self.assertEqual(
             [comment.identifier for comment in self.remote.comments],
-            list(self.state()["verified_artifacts"]),
+            [entry["id"] for entry in self.state()["verified_artifacts"]],
+        )
+        # Each retained id carries the evidence readback proved for it, which is
+        # what lets a later cycle tell "still this run's artifact" from "edited
+        # since".
+        self.assertEqual(
+            [entry["evidence"] for entry in self.state()["verified_artifacts"]],
+            [publication_evidence(comment) for comment in self.remote.comments],
         )
 
     def test_retained_ids_still_exclude_the_runs_artifacts_after_the_head_moves(self) -> None:
@@ -542,6 +593,53 @@ class SharedPublishingIdentityTests(LoopHarness):
         # Three reviewer artifacts for HEAD_A, the fix comment, then three more
         # for HEAD_B — all retained, none reclassified as feedback on the new head.
         self.assertEqual(len(self.state()["verified_artifacts"]), 7)
+
+    def test_an_edited_retained_artifact_stops_the_run(self) -> None:
+        """End to end: a verified lane comment edited into a stop is not invisible.
+
+        The lane publishes under the shared login and readback retains that
+        comment, so before this the id excluded it for the rest of the run no
+        matter what it later said. Here a human edits that same comment after it
+        was retained; the run must classify it as feedback rather than as its own
+        evidence.
+        """
+        loop = self.build()
+        self.review_round(HEAD_A)
+        github = self.github
+        remote = self.remote
+
+        class EditAfterPublication:
+            fired = False
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(github, name)
+
+            def comments(self, repo: str, number: int):
+                seen = github.comments(repo, number)
+                # Once all three lane artifacts exist they have been read back
+                # and retained, so this edit lands on proven evidence.
+                if not EditAfterPublication.fired and len(remote.comments) == 3:
+                    EditAfterPublication.fired = True
+                    original = remote.comments[0]
+                    remote.comments[0] = Comment(
+                        identifier=original.identifier,
+                        author=original.author,
+                        body=BLOCKING_PROSE,
+                        created_at=original.created_at,
+                    )
+                return seen
+
+        loop.github = EditAfterPublication()
+
+        result = loop.run()
+
+        self.assertTrue(EditAfterPublication.fired, "the edit must actually have landed")
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:comment"],
+        )
 
     def test_the_signature_alone_does_not_make_a_post_a_lane_artifact(self) -> None:
         """A signature is public the moment a real artifact is posted."""
@@ -851,7 +949,7 @@ class OmittedFeedbackTests(LoopHarness):
             head=HEAD_A,
             # Page one is a hundred artifacts this run proved it published, so
             # only the human comment on page two is left to find.
-            artifacts=owning(*(str(index) for index in range(100))),
+            artifacts=owning(*comments[:100]),
         )
 
         self.assertEqual([item.source for item in findings], ["human-feedback:comment"])
@@ -875,7 +973,7 @@ class OmittedFeedbackTests(LoopHarness):
             human_findings(
                 FeedbackSurfaces(comments=(owned,)),
                 head=HEAD_A,
-                artifacts=owning("IC_1"),
+                artifacts=owning(owned),
             ),
             (),
             "an all-owned slice is silently clean, so completeness must be decided earlier",
@@ -985,6 +1083,289 @@ class FeedbackUnitTests(LoopHarness):
         )
 
         self.assertEqual(findings[0].id, "human-comment-ic-kwdo")
+
+
+class MixedAcknowledgementTests(LoopHarness):
+    """M6: an acknowledgement spends itself on its target, not on the whole post.
+
+    The defect these pin down: ``_prose_findings`` skipped every post whose id
+    reached ``_Acknowledgements.clearing``, so one valid acknowledgement line
+    exempted everything else in the same body. A human writing "do not merge"
+    above an acknowledgement cleared the old comment and erased the new stop in
+    the same move, and the run could report ``merge-ready`` over it.
+    """
+
+    def classify(self, *comments: Comment) -> tuple[str, ...]:
+        findings = human_findings(
+            FeedbackSurfaces(comments=comments), head=HEAD_A, artifacts=NOTHING_PROVED
+        )
+        return tuple(item.id for item in findings)
+
+    def raised(self, identifier: str = "IC_old") -> Comment:
+        return Comment(
+            identifier=identifier,
+            author=HUMAN,
+            body="nit: rename this helper",
+            created_at="2026-07-26T00:00:01Z",
+        )
+
+    def acknowledging(self, body: str, *, identifier: str = "IC_ack") -> Comment:
+        return Comment(
+            identifier=identifier,
+            author="karan",
+            body=body,
+            created_at="2026-07-26T00:00:02Z",
+        )
+
+    # -- the former red path ----------------------------------------------
+    def test_new_prose_beside_an_acknowledgement_is_still_feedback(self) -> None:
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{BLOCKING_PROSE}\n\n{ACKNOWLEDGEMENT} {old.identifier}\n"
+        )
+
+        self.assertEqual(self.classify(old, mixed), ("human-comment-ic-ack",))
+
+    def test_the_acknowledgement_in_a_mixed_post_still_clears_its_target(self) -> None:
+        """Only the bookkeeping is spent: the older comment really is cleared."""
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{BLOCKING_PROSE}\n\n{ACKNOWLEDGEMENT} {old.identifier}\n"
+        )
+
+        self.assertNotIn("human-comment-ic-old", self.classify(old, mixed))
+
+    def test_a_mixed_post_quotes_only_the_unacknowledged_remainder(self) -> None:
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{BLOCKING_PROSE}\n\n{ACKNOWLEDGEMENT} {old.identifier}\n"
+        )
+
+        finding = human_findings(
+            FeedbackSurfaces(comments=(old, mixed)),
+            head=HEAD_A,
+            artifacts=NOTHING_PROVED,
+        )[0]
+
+        self.assertIn(BLOCKING_PROSE, finding.detail)
+        self.assertNotIn(
+            f"{ACKNOWLEDGEMENT} {old.identifier}",
+            finding.detail,
+            "the spent bookkeeping line is not the unresolved evidence",
+        )
+
+    def test_prose_below_the_acknowledgement_line_counts_too(self) -> None:
+        """Position is not the rule; anything left after the ack lines is."""
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{ACKNOWLEDGEMENT} {old.identifier}\n\n{BLOCKING_PROSE}\n"
+        )
+
+        self.assertEqual(self.classify(old, mixed), ("human-comment-ic-ack",))
+
+    def test_a_mixed_post_clears_every_target_it_names(self) -> None:
+        first = self.raised("IC_one")
+        second = Comment(
+            identifier="IC_two",
+            author=HUMAN,
+            body="second nit",
+            created_at="2026-07-26T00:00:01Z",
+        )
+        mixed = self.acknowledging(
+            f"{ACKNOWLEDGEMENT} IC_one\n{ACKNOWLEDGEMENT} IC_two\n\n{BLOCKING_PROSE}\n"
+        )
+
+        self.assertEqual(self.classify(first, second, mixed), ("human-comment-ic-ack",))
+
+    # -- controls that must not move --------------------------------------
+    def test_an_acknowledgement_only_post_is_still_not_feedback(self) -> None:
+        """The pure case stays bookkeeping, or acknowledging never terminates."""
+        old = self.raised()
+        pure = self.acknowledging(f"{ACKNOWLEDGEMENT} {old.identifier}")
+
+        self.assertEqual(self.classify(old, pure), ())
+
+    def test_blank_lines_around_an_acknowledgement_are_not_prose(self) -> None:
+        old = self.raised()
+        padded = self.acknowledging(
+            f"\n\n   \n{ACKNOWLEDGEMENT} {old.identifier}\n   \n\n"
+        )
+
+        self.assertEqual(self.classify(old, padded), ())
+
+    def test_several_acknowledgements_and_nothing_else_stay_bookkeeping(self) -> None:
+        first = self.raised("IC_one")
+        second = Comment(
+            identifier="IC_two",
+            author=HUMAN,
+            body="second nit",
+            created_at="2026-07-26T00:00:01Z",
+        )
+        pure = self.acknowledging(f"{ACKNOWLEDGEMENT} IC_one\n{ACKNOWLEDGEMENT} IC_two\n")
+
+        self.assertEqual(self.classify(first, second, pure), ())
+
+    def test_a_mixed_post_whose_acknowledgement_fails_is_wholly_feedback(self) -> None:
+        """An ack that did not hold up exempts nothing, so both posts stand.
+
+        The remainder rule must not become a second way out: this post never
+        reached ``clearing`` at all, because it does not postdate what it names.
+        """
+        later = Comment(
+            identifier="IC_later",
+            author=HUMAN,
+            body="nit: rename this helper",
+            created_at="2026-07-26T00:00:09Z",
+        )
+        premature = self.acknowledging(
+            f"{BLOCKING_PROSE}\n\n{ACKNOWLEDGEMENT} IC_later\n"
+        )
+
+        self.assertEqual(
+            self.classify(later, premature),
+            ("human-comment-ic-later", "human-comment-ic-ack"),
+        )
+
+    def test_a_lane_login_still_cannot_clear_by_acknowledging(self) -> None:
+        """Acknowledgement authority is unchanged: it is refused by login."""
+        old = self.raised()
+        lane = Comment(
+            identifier="IC_lane",
+            author=REVIEWER_LOGIN,
+            body=f"{ACKNOWLEDGEMENT} {old.identifier}\n",
+            created_at="2026-07-26T00:00:02Z",
+        )
+
+        findings = human_findings(
+            FeedbackSurfaces(comments=(old, lane)), head=HEAD_A, artifacts=NOTHING_PROVED
+        )
+
+        self.assertEqual(
+            [item.id for item in findings],
+            ["human-comment-ic-old", "human-comment-ic-lane"],
+        )
+
+
+class EditedRetainedArtifactTests(LoopHarness):
+    """M7: ownership is the artifact this run verified, not the id forever.
+
+    The defect these pin down: ``RunArtifacts.owns`` matched on retained id plus
+    current author, and both survive an edit. The publishing login is shared with
+    a human on this repository, so editing an already-verified lane comment into
+    "do not merge" left it excluded from classification entirely and the run
+    could report ``merge-ready`` over it.
+    """
+
+    def published(self, body: str = "## Reviewer A — PASS\nROLE=REVIEWER_A") -> Comment:
+        return Comment(
+            identifier="IC_verified",
+            author=REVIEWER_LOGIN,
+            body=body,
+            created_at="2026-07-26T00:00:03Z",
+        )
+
+    def classify(self, current: Comment, *, retained: Comment) -> tuple[str, ...]:
+        findings = human_findings(
+            FeedbackSurfaces(comments=(current,)),
+            head=HEAD_A,
+            artifacts=owning(retained),
+        )
+        return tuple(item.id for item in findings)
+
+    # -- the former red path ----------------------------------------------
+    def test_an_edited_retained_comment_is_feedback_again(self) -> None:
+        verified = self.published()
+        edited = self.published(BLOCKING_PROSE)
+
+        self.assertEqual(
+            self.classify(edited, retained=verified), ("human-comment-ic-verified",)
+        )
+
+    def test_an_edit_that_only_appends_still_breaks_ownership(self) -> None:
+        """No partial credit: the post is what was verified, or it is not."""
+        verified = self.published()
+        edited = self.published(f"{verified.body}\n\n{BLOCKING_PROSE}")
+
+        self.assertEqual(
+            self.classify(edited, retained=verified), ("human-comment-ic-verified",)
+        )
+
+    def test_an_edited_review_state_breaks_ownership_too(self) -> None:
+        verified = Comment(
+            identifier="review:1",
+            author=REVIEWER_LOGIN,
+            body="## Reviewer A\nROLE=REVIEWER_A",
+            kind="review",
+            state="COMMENTED",
+            created_at="2026-07-26T00:00:04Z",
+        )
+        changed = Comment(
+            identifier="review:1",
+            author=REVIEWER_LOGIN,
+            body=verified.body,
+            kind="review",
+            state="CHANGES_REQUESTED",
+            created_at=verified.created_at,
+        )
+
+        findings = human_findings(
+            FeedbackSurfaces(reviews=(changed,)),
+            head=HEAD_A,
+            artifacts=owning(verified),
+        )
+
+        self.assertEqual([item.id for item in findings], ["human-review-review-1"])
+
+    # -- controls that must not move --------------------------------------
+    def test_an_untouched_retained_artifact_stays_this_runs_evidence(self) -> None:
+        """The positive control: proving ownership must still actually work."""
+        verified = self.published()
+
+        self.assertEqual(self.classify(verified, retained=verified), ())
+
+    def test_an_untouched_retained_review_stays_this_runs_evidence(self) -> None:
+        verified = Comment(
+            identifier="review:1",
+            author=REVIEWER_LOGIN,
+            body="## Reviewer A\nROLE=REVIEWER_A",
+            kind="review",
+            state="COMMENTED",
+            created_at="2026-07-26T00:00:04Z",
+        )
+
+        self.assertEqual(
+            human_findings(
+                FeedbackSurfaces(reviews=(verified,)),
+                head=HEAD_A,
+                artifacts=owning(verified),
+            ),
+            (),
+        )
+
+    def test_a_retained_artifact_whose_author_changed_is_not_owned(self) -> None:
+        """The pre-existing author check is unchanged by the content check."""
+        verified = self.published()
+        moved = Comment(
+            identifier=verified.identifier,
+            author=HUMAN,
+            body=verified.body,
+            created_at=verified.created_at,
+        )
+
+        self.assertEqual(
+            self.classify(moved, retained=verified), ("human-comment-ic-verified",)
+        )
+
+    def test_publication_evidence_separates_body_from_state(self) -> None:
+        """The digest cannot be collided by a body that spells the boundary."""
+        self.assertNotEqual(
+            publication_evidence(
+                Comment(identifier="a", author=HUMAN, body="x", state="y")
+            ),
+            publication_evidence(
+                Comment(identifier="a", author=HUMAN, body="x\", \"y", state="")
+            ),
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

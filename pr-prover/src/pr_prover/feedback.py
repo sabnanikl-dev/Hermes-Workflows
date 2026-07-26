@@ -61,18 +61,28 @@ in for anybody who submits a review. Matching on those fields is therefore a
 predicate a human can satisfy on purpose, and a human who satisfies it while
 writing "do not merge" disappears from the run.
 
-So exclusion is decided by the one field nobody but GitHub assigns: the
-artifact's immutable id. A post is run-owned only when this run already proved
-it published *that exact id* — the loop snapshots the ids on the PR before each
-lane is launched, finds the single fresh artifact that satisfies the author,
-signature, role line, and exact head it demanded, and keeps that id. Every other
-post from those logins is human feedback, because an unattributed comment from a
-shared publishing account is precisely the case where a real human stop would
-otherwise disappear.
+So exclusion starts from the one field nobody but GitHub assigns: the artifact's
+immutable id. A post is run-owned only when this run already proved it published
+*that exact id* — the loop snapshots the ids on the PR before each lane is
+launched, finds the single fresh artifact that satisfies the author, signature,
+role line, and exact head it demanded, and keeps that id. Every other post from
+those logins is human feedback, because an unattributed comment from a shared
+publishing account is precisely the case where a real human stop would otherwise
+disappear.
 
-Retained ids outlive the head they were published for. A second fix cycle still
-has to recognise what the first cycle published, so the run keeps its verified
-ids in its own state file rather than rediscovering them from body shape.
+An id alone is not the whole answer, because publication is not the last thing
+that can happen to a post. Comments and review bodies stay editable, and the
+account that can edit a verified lane artifact is the same shared account a
+human types into — so "this run published id X" must not harden into "id X can
+never be feedback again". What is retained is therefore the id *and*
+:func:`publication_evidence` for the post readback actually verified, and
+ownership requires both to still hold. An artifact nobody touched stays owned;
+one whose body or review state changed no longer matches what was proven, and
+goes back to being ordinary feedback rather than staying invisible.
+
+Retained evidence outlives the head it was published for. A second fix cycle
+still has to recognise what the first cycle published, so the run keeps it in
+its own state file rather than rediscovering ownership from body shape.
 
 Both of those rules take the direction that fails closed, which is why they use
 different granularity. Excluding a whole account from *being* feedback would
@@ -89,6 +99,8 @@ explicitly labelled as untrusted.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -112,19 +124,54 @@ UNTRUSTED_NOTE = (
 )
 
 
+def publication_evidence(item: Comment) -> str:
+    """A digest of the mutable evidence readback verified for one artifact.
+
+    An immutable id answers "did this run publish that post"; it cannot answer
+    "is that post still what this run verified". A conversation comment stays
+    editable for as long as the PR exists, the publishing login is shared with a
+    human on this repository, and the two facts together are a way for a real
+    stop to disappear: edit an already-verified lane comment into "do not merge"
+    and ownership by id alone still excludes it.
+
+    So retention keeps a digest of exactly the fields classification reads and an
+    author can still change — the body, and the review state that decides a
+    formal review — and ownership requires the current post to still match it.
+    Editing a retained artifact does not make it lane-owned-and-invisible; it
+    makes it unrecognised, which is the direction that fails closed. A review's
+    GitHub ``commit_id`` is unaffected and stays the authoritative head binding
+    it already was: this is about the post's content, not about how a head is
+    proven.
+
+    The digest is over a JSON array rather than concatenated text so that no body
+    can spell the field boundary itself and collide with a different pairing.
+    """
+    payload = json.dumps([item.body, item.state], ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class RunArtifacts:
     """What this run proved it published, by GitHub's own immutable ids.
 
     Not "these logins are agents", and not "this post has the right shape".
-    ``identifiers`` holds the ids readback verified at publication: for each one
-    the loop had already snapshotted the ids present on the PR before the lane
-    was launched, so a retained id is a post that did not exist until this run's
-    own lane published it. That is the single thing about an artifact a human
-    sharing the publishing account cannot reproduce. They can copy a signature,
-    a role line and a canonical ``HEAD=`` declaration out of any published
-    artifact, and GitHub will fill in a real ``commit_id`` for any review they
-    submit — but they cannot post under an id this run already recorded.
+    ``verified_artifacts`` pairs each id readback verified at publication with
+    :func:`publication_evidence` for the post as it stood at that moment. The id
+    establishes that this run published it at all: the loop had already
+    snapshotted the ids present on the PR before the lane was launched, so a
+    retained id is a post that did not exist until this run's own lane published
+    it. That is the single thing about an artifact a human sharing the publishing
+    account cannot reproduce — they can copy a signature, a role line and a
+    canonical ``HEAD=`` declaration out of any published artifact, and GitHub
+    will fill in a real ``commit_id`` for any review they submit, but they cannot
+    post under an id this run already recorded.
+
+    The paired evidence establishes the other half, which an id alone cannot:
+    that the post is *still* the one that was verified. Published artifacts
+    remain editable, so ownership is not a property an artifact keeps no matter
+    what happens to it afterwards. An unchanged artifact stays owned across a
+    moved head and a restarted process, because the retained pair is durable; an
+    edited one stops matching and goes back to being ordinary feedback.
 
     ``publishers`` is the configured publishing logins, and it answers two
     questions at deliberately different granularity. Ownership requires the
@@ -136,12 +183,23 @@ class RunArtifacts:
     rule takes the direction that fails closed.
     """
 
-    identifiers: frozenset[str] = frozenset()
+    # (immutable GitHub id, publication-time evidence digest) pairs.
+    verified_artifacts: frozenset[tuple[str, str]] = frozenset()
     publishers: frozenset[str] = frozenset()
 
     def owns(self, item: Comment) -> bool:
-        """Is this published post one this run proved it published itself?"""
-        if not item.identifier or item.identifier not in self.identifiers:
+        """Is this published post still the one this run proved it published?
+
+        Three things have to hold together, and each closes a way a human post
+        could otherwise be excluded: the id is one this run watched appear, the
+        content is unchanged since readback verified it, and the author is still
+        a configured publishing login. Any of them failing means the post is
+        classified as feedback, which is the safe direction for a check whose
+        whole job is to decide whether a run may stop.
+        """
+        if not item.identifier:
+            return False
+        if (item.identifier, publication_evidence(item)) not in self.verified_artifacts:
             return False
         return item.author in self.publishers
 
@@ -181,9 +239,10 @@ def human_findings(
 ) -> tuple[Finding, ...]:
     """Unresolved human feedback on this PR, as needs-Karan findings.
 
-    ``artifacts`` is what this run proved it published, by immutable id — not
-    the logins it published under. What is excluded is this run's own verified
-    evidence, never everything a shared publishing account ever said.
+    ``artifacts`` is what this run proved it published, by immutable id and the
+    evidence verified at publication — not the logins it published under. What is
+    excluded is this run's own verified evidence while it is still that evidence,
+    never everything a shared publishing account ever said.
     """
     acknowledged = _acknowledgements(surfaces, artifacts=artifacts)
     findings: list[Finding] = []
@@ -274,25 +333,41 @@ def _prose_findings(
     for item, kind in _prose_items(surfaces, artifacts=artifacts):
         if item.identifier in acknowledged.cleared:
             continue
-        if item.identifier in acknowledged.clearing:
-            # A comment that really did clear earlier feedback is bookkeeping,
-            # not new feedback to clear in turn — otherwise acknowledging
-            # anything would leave one more thing to acknowledge. Only an
-            # acknowledgement that held up earns this: a body naming an id it
-            # cannot be proven to postdate exempts nothing, itself included.
+        acknowledging = item.identifier in acknowledged.clearing
+        remainder = _residual_prose(item.body) if acknowledging else ""
+        if acknowledging and not remainder:
+            # A comment that really did clear earlier feedback, and said nothing
+            # else, is bookkeeping rather than new feedback to clear in turn —
+            # otherwise acknowledging anything would leave one more thing to
+            # acknowledge. Only an acknowledgement that held up earns this: a
+            # body naming an id it cannot be proven to postdate exempts nothing,
+            # itself included.
             continue
+        if acknowledging:
+            # The post cleared its targets *and* said something else. Skipping it
+            # wholesale here is how a "do not merge" written above an
+            # acknowledgement line disappeared while the line it sat next to
+            # still counted, so only the bookkeeping is spent: the remaining
+            # prose is unacknowledged feedback in its own right.
+            summary = (
+                f"{item.author} acknowledged earlier feedback and raised more in "
+                "the same post; that added text is itself unacknowledged, and "
+                "this tool does not interpret human prose as resolved"
+            )
+        else:
+            summary = (
+                f"{item.author} left PR feedback that nothing has acknowledged; "
+                "this tool does not interpret human prose as resolved"
+            )
         findings.append(
             Finding(
                 id=f"human-{kind}-{_slug(item.identifier)}",
                 severity="needs-karan",
-                summary=(
-                    f"{item.author} left PR feedback that nothing has acknowledged; "
-                    "this tool does not interpret human prose as resolved"
-                ),
+                summary=summary,
                 source=f"human-feedback:{kind}",
                 head=head,
                 detail=_detail(
-                    item.body,
+                    remainder if acknowledging else item.body,
                     url=item.url,
                     resolution=(
                         f"reconcile it, then post a comment carrying "
@@ -412,6 +487,25 @@ def _acknowledgement_targets(body: str) -> tuple[str, ...]:
     return tuple(targets)
 
 
+def _residual_prose(body: str) -> str:
+    """What a post still says once its acknowledgement lines are taken out.
+
+    An acknowledgement is one line of bookkeeping, not a licence for the rest of
+    the body. A post can hold both — "do not merge, and by the way I dealt with
+    that other thing" — and it is the commonest shape a human actually writes,
+    because acknowledging is the moment they are already looking at the PR. So
+    what earns the bookkeeping exemption is an empty remainder, established the
+    same way :func:`_acknowledgement_targets` finds the lines in the first place,
+    rather than the mere presence of one valid acknowledgement somewhere in the
+    text.
+    """
+    return "\n".join(
+        line
+        for line in body.splitlines()
+        if not line.strip().startswith(ACKNOWLEDGEMENT)
+    ).strip()
+
+
 def _detail(body: str, *, url: str = "", resolution: str = "") -> str:
     """A body-free header plus a truncated, redacted excerpt of untrusted text."""
     parts = [UNTRUSTED_NOTE]
@@ -442,4 +536,5 @@ __all__ = [
     "FeedbackSurfaces",
     "RunArtifacts",
     "human_findings",
+    "publication_evidence",
 ]

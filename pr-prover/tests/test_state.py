@@ -144,24 +144,49 @@ class VerifiedArtifactLedgerTests(unittest.TestCase):
 
     def test_retained_ids_survive_a_restart_in_the_order_they_were_proved(self) -> None:
         state = self.load()
-        self.assertTrue(state.remember_artifact("review:1"))
-        self.assertTrue(state.remember_artifact("IC_comment4"))
+        self.assertTrue(state.remember_artifact("review:1", "digest-1"))
+        self.assertTrue(state.remember_artifact("IC_comment4", "digest-4"))
         state.save()
 
-        self.assertEqual(self.load().verified_artifacts, ("review:1", "IC_comment4"))
+        self.assertEqual(
+            self.load().verified_artifacts,
+            (("review:1", "digest-1"), ("IC_comment4", "digest-4")),
+        )
+
+    def test_the_evidence_proved_at_publication_survives_a_restart(self) -> None:
+        """The digest is the half of ownership a restart used to drop.
+
+        An id alone says a post was this run's; it cannot say the post is still
+        what readback verified. That check only works across a restart if what
+        was verified is on disk too.
+        """
+        state = self.load()
+        state.remember_artifact("IC_comment4", "digest-4")
+        state.save()
+
+        restored = dict(self.load().verified_artifacts)
+        self.assertEqual(restored["IC_comment4"], "digest-4")
 
     def test_retaining_the_same_id_twice_changes_nothing(self) -> None:
         state = self.load()
-        state.remember_artifact("review:1")
-        self.assertFalse(state.remember_artifact("review:1"))
-        self.assertEqual(state.verified_artifacts, ("review:1",))
+        state.remember_artifact("review:1", "digest-1")
+        self.assertFalse(state.remember_artifact("review:1", "digest-1"))
+        self.assertEqual(state.verified_artifacts, (("review:1", "digest-1"),))
 
     def test_an_artifact_without_an_identifier_is_unexpected_state(self) -> None:
         state = self.load()
         for identifier in ("", "   "):
             with self.subTest(identifier=identifier):
                 with self.assertRaises(StateError):
-                    state.remember_artifact(identifier)
+                    state.remember_artifact(identifier, "digest-1")
+
+    def test_an_artifact_without_publication_evidence_is_unexpected_state(self) -> None:
+        """Retaining an id with no evidence would rebuild the hole this closes."""
+        state = self.load()
+        for evidence in ("", "   "):
+            with self.subTest(evidence=evidence):
+                with self.assertRaises(StateError):
+                    state.remember_artifact("review:1", evidence)
 
     def test_a_non_identifier_entry_on_disk_is_unexpected_state(self) -> None:
         self.path.write_text(
@@ -174,7 +199,52 @@ class VerifiedArtifactLedgerTests(unittest.TestCase):
                     "head": None,
                     "corrective_rerun_attempts": [],
                     "outcome": None,
-                    "verified_artifacts": [17],
+                    "verified_artifacts": [{"id": 17, "evidence": "digest-1"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(StateError):
+            self.load()
+
+    def test_a_bare_id_on_disk_without_its_evidence_is_unexpected_state(self) -> None:
+        """A record that predates paired evidence cannot be read as still-valid.
+
+        Accepting a bare id would silently restore ownership-by-id-alone for
+        every artifact in that file, which is the false success this closes. It
+        is a small, strict, run-local file, so the fail-closed answer is to stop
+        rather than to infer evidence nobody recorded.
+        """
+        self.path.write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "repo": "example/repo",
+                    "pr": 7,
+                    "attempt": 0,
+                    "head": None,
+                    "corrective_rerun_attempts": [],
+                    "outcome": None,
+                    "verified_artifacts": ["review:1"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(StateError):
+            self.load()
+
+    def test_an_artifact_entry_missing_its_evidence_key_is_unexpected_state(self) -> None:
+        self.path.write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "repo": "example/repo",
+                    "pr": 7,
+                    "attempt": 0,
+                    "head": None,
+                    "corrective_rerun_attempts": [],
+                    "outcome": None,
+                    "verified_artifacts": [{"id": "review:1"}],
                 }
             ),
             encoding="utf-8",
@@ -193,7 +263,10 @@ class VerifiedArtifactLedgerTests(unittest.TestCase):
                     "head": None,
                     "corrective_rerun_attempts": [],
                     "outcome": None,
-                    "verified_artifacts": ["review:1", "review:1"],
+                    "verified_artifacts": [
+                        {"id": "review:1", "evidence": "digest-1"},
+                        {"id": "review:1", "evidence": "digest-2"},
+                    ],
                 }
             ),
             encoding="utf-8",

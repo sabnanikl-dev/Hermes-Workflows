@@ -60,11 +60,14 @@ occurring somewhere in prose is satisfied by an artifact that says on its own
 line that it reviewed something else. Formal reviews keep the stronger binding:
 GitHub's own ``commit_id``.
 
-Each readback then *keeps* the immutable id it just proved. Freshness against a
-pre-launch snapshot is the only moment ownership is knowable, and the id is the
-only part of an artifact that a human sharing the publishing login cannot
-reproduce; retained ids live in the run's state file so a second cycle still
-recognises what the first one published.
+Each readback then *keeps* the immutable id it just proved, together with what
+that artifact held at the time. Freshness against a pre-launch snapshot is the
+only moment ownership is knowable, and the id is the only part of an artifact
+that a human sharing the publishing login cannot reproduce — but a published
+artifact stays editable, so the id alone would go on excluding a post that has
+since been edited into human feedback. Both live in the run's state file, so a
+second cycle still recognises what the first one published while an edited
+artifact stops matching and returns to being feedback.
 
 **Human feedback.** Gates and reviewer lanes are not the whole PR. Before every
 classification the loop re-reads the conversation comments, the formal reviews
@@ -128,7 +131,12 @@ from .errors import (
     StaleHead,
     StateError,
 )
-from .feedback import FeedbackSurfaces, RunArtifacts, human_findings
+from .feedback import (
+    FeedbackSurfaces,
+    RunArtifacts,
+    human_findings,
+    publication_evidence,
+)
 from .findings import (
     Adjudicator,
     Classification,
@@ -538,16 +546,20 @@ class ProverLoop:
         moment a real artifact is posted, and GitHub stamps a real ``commit_id``
         on any review anybody submits.
 
-        What is handed to the feedback seam is therefore the set of immutable
-        GitHub ids this run watched appear — :meth:`_read_back_reviewer` and
+        What is handed to the feedback seam is therefore the immutable GitHub ids
+        this run watched appear, each paired with the evidence it carried when
+        readback verified it — :meth:`_read_back_reviewer` and
         :meth:`_read_back_comment` each retain the one artifact they verified
         against a pre-launch snapshot — plus the configured logins, which still
         decide acknowledgement authority. Everything else on those accounts stays
-        human feedback.
+        human feedback, and so does a retained artifact somebody has since edited:
+        publication was proved for the post as it stood, not for the id forever.
         """
         state = self._state
         return RunArtifacts(
-            identifiers=frozenset(state.verified_artifacts) if state else frozenset(),
+            verified_artifacts=(
+                frozenset(state.verified_artifacts) if state else frozenset()
+            ),
             publishers=frozenset(
                 author
                 for author in (
@@ -558,25 +570,31 @@ class ProverLoop:
             ),
         )
 
-    def _retain_artifact(self, identifier: str, *, lane: str, head: str) -> None:
-        """Keep one verified artifact id as this run's own evidence, durably.
+    def _retain_artifact(self, artifact: Comment, *, lane: str, head: str) -> None:
+        """Keep one verified artifact as this run's own evidence, durably.
 
         Called only where publication was already proven against a snapshot of
         the ids present before the lane was launched, so what is retained is an
         artifact this run watched appear rather than one that merely matches a
-        pattern. Persisting is what carries it across a moved head and a
-        restarted process; a state file that cannot record it is unexpected
+        pattern. The whole artifact is passed rather than its id because the id
+        is only half of what has to be remembered: the post as verified is the
+        other half, and recomputing that later from whatever the post has become
+        would prove nothing. Persisting is what carries both across a moved head
+        and a restarted process; a state file that cannot record it is unexpected
         state, and :meth:`RunState.save` stops the run rather than continuing
         with evidence the next cycle would not recognise.
         """
         state = self._state
         if state is None:  # pragma: no cover - the loop always runs with state
             return
-        if not state.remember_artifact(identifier):
+        if not state.remember_artifact(
+            artifact.identifier, publication_evidence(artifact)
+        ):
             return
         state.save()
         self._event(
-            f"{lane} artifact {identifier} retained as this run's own evidence for {head}"
+            f"{lane} artifact {artifact.identifier} retained as this run's own "
+            f"evidence for {head}"
         )
 
     def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
@@ -766,7 +784,7 @@ class ProverLoop:
                 f"read back for {head} as {role_line}"
             )
             self._retain_artifact(
-                artifact.identifier, lane=f"reviewer {reviewer.name}", head=head
+                artifact, lane=f"reviewer {reviewer.name}", head=head
             )
             return
         raise ReadbackMismatch(
@@ -1150,7 +1168,7 @@ class ProverLoop:
                 declared.append(f"{comment.identifier}: {binding.note}")
                 continue
             self._event(f"builder fix comment {comment.identifier} read back for {head}")
-            self._retain_artifact(comment.identifier, lane="builder", head=head)
+            self._retain_artifact(comment, lane="builder", head=head)
             return
         raise ReadbackMismatch(
             "no comment posted since the builder was invoked carries the expected "
