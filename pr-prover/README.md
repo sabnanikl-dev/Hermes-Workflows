@@ -180,6 +180,29 @@ reruns already spent, the terminal outcome, and the phase of the run. One
 `O_EXCL` lockfile marks that a run exists. There is no PID inspection and no
 takeover path: if the lock is held, the run stops and asks.
 
+### The lock is released by identity, not by pathname
+
+A lock path that is removed — by `reset --force`, say — and then acquired again
+names a *different* file. An older run that unlinks the pathname on its way out
+would delete the newer run's lock and leave two runs going at once, so each
+acquisition remembers the identity of the file its own `O_EXCL` create produced,
+read from the descriptor it still owns. Failed-acquisition cleanup and ordinary
+release then share one deletion: remove the path only while it still resolves to
+*that* file, and leave a replacement to the run that owns it.
+
+Checking the identity and unlinking it are two steps, so both are held under a
+short exclusive lock on the containing directory — the same one every
+acquisition takes while it creates and identifies its lockfile. That is the
+whole protocol, and it is what stops another run from acquiring the pathname in
+between. Removing a lockfile by hand while a run is live is still unsupported.
+
+What cleanup achieved is then reported rather than assumed. `removed`,
+`already-absent`, `replacement-preserved`, and `cleanup-failed` are four
+different outcomes; the last two mean a lockfile is still on disk, and
+`cleanup-failed` says so and says to clear it by hand once no run is active. An
+initialization failure keeps its own cause and reason — the disposition travels
+beside it as evidence, never in place of it.
+
 ### An interrupted attempt cannot be resumed into a clean result
 
 A fix attempt is not over when the builder exits — the push still has to be

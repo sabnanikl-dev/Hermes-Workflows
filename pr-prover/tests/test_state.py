@@ -4,13 +4,19 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import _support  # noqa: F401 - inserts the package on sys.path
+import pr_prover.state as state_module
 from pr_prover.errors import LockContention, StateError
 from pr_prover.state import (
+    CLEANUP_ALREADY_ABSENT,
+    CLEANUP_FAILED,
+    CLEANUP_REMOVED,
+    CLEANUP_REPLACEMENT_PRESERVED,
     MAX_ATTEMPTS,
     PHASE_ATTEMPT_IN_FLIGHT,
     PHASE_IDLE,
@@ -624,16 +630,9 @@ class LockAcquisitionTransactionTests(unittest.TestCase):
         self.assertNotIn(FAKE_TOKEN, json.dumps(failure.as_dict()))
 
     def test_a_cleanup_failure_never_replaces_the_acquisition_failure(self) -> None:
-        real_unlink = Path.unlink
-
-        def refuse(self_path, *args, **kwargs):
-            if self_path == self.path:
-                raise OSError("cleanup is broken too")
-            return real_unlink(self_path, *args, **kwargs)
-
         lock = self.lock()
         with patch("pr_prover.state.json.dump", side_effect=OSError(BROKEN_MESSAGE)):
-            with patch.object(Path, "unlink", refuse):
+            with patch("pr_prover.state.os.unlink", side_effect=OSError("cleanup is broken too")):
                 with self.assertRaises(LockContention) as caught:
                     lock.__enter__()
 
@@ -641,6 +640,11 @@ class LockAcquisitionTransactionTests(unittest.TestCase):
         self.assertIn("no space left on device", caught.exception.message)
         self.assertNotIn("cleanup is broken too", caught.exception.message)
         self.assertFalse(lock._held)
+        # The cause survives *and* the evidence stops claiming a removal that
+        # the refused unlink never performed.
+        self.assertEqual(caught.exception.evidence["cleanup"], CLEANUP_FAILED)
+        self.assertIn("partial lock may remain", caught.exception.evidence["resolution"])
+        self.assertTrue(self.path.exists())
 
     def test_a_failed_acquisition_leaves_the_path_free_for_the_next_run(self) -> None:
         """The point of unlinking: the next run must not contend with a ghost."""
@@ -663,6 +667,286 @@ class LockAcquisitionTransactionTests(unittest.TestCase):
             body = self.path.read_text(encoding="utf-8")
         self.assertEqual(json.loads(body), {"pr": 7, "repo": "example/repo"})
         self.assertTrue(body.endswith("\n"))
+
+
+class LockOwnershipTests(unittest.TestCase):
+    """PAPI88-STATE-FAIL-CLOSED: deletion is decided by inode, not by pathname.
+
+    The reproduced defect: a lock path that is removed and then acquired again
+    names a *different* inode, but failed-acquisition cleanup and ordinary
+    release both unlinked the configured pathname alone. The first owner
+    therefore deleted the second owner's lock on its way out — while the second
+    object still believed it held one — and a third run acquired alongside it,
+    which is the mutual exclusion the whole file exists to provide.
+
+    Cleanup evidence had the same shape of problem one level up: it reported
+    that the partial lock "was removed" whether the unlink had succeeded,
+    found nothing to do, refused, or left another run's lock exactly where it
+    was. Those are four different things for an operator to act on.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-lock-own-")
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "run.lock"
+
+    def lock(self, *, pr: int = 7) -> RunLock:
+        return RunLock(self.path, repo="example/repo", pr=pr)
+
+    def identity(self) -> tuple[int, int]:
+        found = self.path.stat()
+        return found.st_dev, found.st_ino
+
+    def assert_contended(self) -> None:
+        """A further run must stop rather than acquire alongside the holder."""
+        with self.assertRaises(LockContention) as caught:
+            self.lock(pr=11).__enter__()
+        self.assertEqual(caught.exception.reason, "lock-contention")
+
+    # -- identity ---------------------------------------------------------
+    def test_the_acquisition_retains_the_identity_of_the_inode_it_created(self) -> None:
+        """Read from the owned descriptor, before ``fdopen`` or any close."""
+        lock = self.lock()
+        with lock:
+            self.assertIsNotNone(lock._identity)
+            self.assertEqual(lock._identity, self.identity())
+        self.assertEqual(lock.cleanup_disposition, CLEANUP_REMOVED)
+
+    # -- replacement ------------------------------------------------------
+    def test_normal_release_leaves_a_replacement_lock_to_the_run_that_owns_it(self) -> None:
+        first = self.lock()
+        first.__enter__()
+        first_identity = self.identity()
+
+        # The supported operational seam: the pathname is removed — a forced
+        # reset, say — and the next run legitimately acquires it afterwards.
+        self.path.unlink()
+        second = self.lock(pr=9)
+        second.__enter__()
+        second_identity = self.identity()
+        second_bytes = self.path.read_bytes()
+        self.assertNotEqual(first_identity, second_identity)
+
+        first.__exit__(None, None, None)
+
+        self.assertTrue(self.path.exists(), "the first owner deleted the second owner's lock")
+        self.assertEqual(self.identity(), second_identity)
+        self.assertEqual(self.path.read_bytes(), second_bytes)
+        self.assertEqual(first.cleanup_disposition, CLEANUP_REPLACEMENT_PRESERVED)
+        self.assertFalse(first._held)
+        self.assertTrue(second._held)
+        self.assert_contended()
+
+        second.__exit__(None, None, None)
+        self.assertEqual(second.cleanup_disposition, CLEANUP_REMOVED)
+        self.assertFalse(self.path.exists())
+
+    def test_failed_initialization_leaves_a_replacement_lock_to_the_run_that_owns_it(self) -> None:
+        first = self.lock()
+        second = self.lock(pr=9)
+        real_dump = state_module.json.dump
+        seen: dict[str, object] = {}
+
+        def replace_then_fail(payload, stream, **kwargs):
+            """Replace the pathname, then fail this acquisition's payload write."""
+            self.path.unlink()
+            with patch.object(state_module.json, "dump", real_dump):
+                second.__enter__()
+            seen["identity"] = self.identity()
+            seen["bytes"] = self.path.read_bytes()
+            raise OSError(BROKEN_MESSAGE)
+
+        with patch.object(state_module.json, "dump", replace_then_fail):
+            with self.assertRaises(LockContention) as caught:
+                first.__enter__()
+
+        # The initialization failure is still the primary, sanitized cause.
+        self.assertEqual(caught.exception.reason, "lock-contention")
+        self.assertEqual(caught.exception.evidence["stage"], "payload")
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertIn("no space left on device", caught.exception.message)
+        self.assertIn("<redacted>", caught.exception.message)
+        self.assertNotIn(FAKE_TOKEN, caught.exception.message)
+        self.assertNotIn(FAKE_TOKEN, json.dumps(caught.exception.as_dict()))
+        self.assertFalse(first._held)
+
+        # ...and the replacement survived it untouched.
+        self.assertEqual(caught.exception.evidence["cleanup"], CLEANUP_REPLACEMENT_PRESERVED)
+        self.assertIn("belongs to another run", caught.exception.evidence["resolution"])
+        self.assertTrue(self.path.exists())
+        self.assertEqual(self.identity(), seen["identity"])
+        self.assertEqual(self.path.read_bytes(), seen["bytes"])
+        self.assertTrue(second._held)
+        self.assert_contended()
+
+        second.__exit__(None, None, None)
+        self.assertFalse(self.path.exists())
+
+    # -- truthful cleanup evidence ----------------------------------------
+    def test_release_reports_an_already_absent_lock_rather_than_a_removal(self) -> None:
+        lock = self.lock()
+        lock.__enter__()
+        self.path.unlink()
+
+        lock.__exit__(None, None, None)
+
+        self.assertEqual(lock.cleanup_disposition, CLEANUP_ALREADY_ABSENT)
+        self.assertFalse(lock._held)
+
+    def test_a_failed_deletion_says_a_partial_lock_may_remain_and_how_to_resolve_it(self) -> None:
+        lock = self.lock()
+        lock.__enter__()
+
+        with patch("pr_prover.state.os.unlink", side_effect=OSError(BROKEN_MESSAGE)):
+            with self.assertRaises(LockContention) as caught:
+                lock.__exit__(None, None, None)
+
+        self.assertEqual(caught.exception.reason, "lock-contention")
+        self.assertEqual(caught.exception.evidence["cleanup"], CLEANUP_FAILED)
+        self.assertIn("partial lock may remain", caught.exception.evidence["resolution"])
+        self.assertIn("by hand", caught.exception.evidence["resolution"])
+        self.assertIn("no space left on device", caught.exception.message)
+        self.assertIn("<redacted>", caught.exception.message)
+        self.assertNotIn(FAKE_TOKEN, json.dumps(caught.exception.as_dict()))
+        self.assertTrue(self.path.exists(), "the lock is still there, as the evidence says")
+
+    def test_an_initialization_cleanup_reports_an_already_absent_lock_truthfully(self) -> None:
+        """The acquisition failed, and its lock was gone before cleanup ran."""
+        lock = self.lock()
+
+        def vanish_then_fail(payload, stream, **kwargs):
+            self.path.unlink()
+            raise OSError(BROKEN_MESSAGE)
+
+        with patch.object(state_module.json, "dump", vanish_then_fail):
+            with self.assertRaises(LockContention) as caught:
+                lock.__enter__()
+
+        self.assertEqual(caught.exception.evidence["stage"], "payload")
+        self.assertEqual(caught.exception.evidence["cleanup"], CLEANUP_ALREADY_ABSENT)
+        self.assertIn("already gone", caught.exception.evidence["resolution"])
+        self.assertIn("no space left on device", caught.exception.message)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(lock._held)
+
+    def test_a_failed_release_never_displaces_the_failure_leaving_the_body(self) -> None:
+        lock = self.lock()
+        lock.__enter__()
+
+        with patch("pr_prover.state.os.unlink", side_effect=OSError(BROKEN_MESSAGE)):
+            lock.__exit__(ValueError, ValueError("boom"), None)
+
+        self.assertEqual(lock.cleanup_disposition, CLEANUP_FAILED)
+        self.assertTrue(self.path.exists())
+
+    # -- the validation-to-unlink gap -------------------------------------
+    def test_a_compliant_acquisition_cannot_publish_between_validation_and_unlink(self) -> None:
+        """The window the guard exists to close, held open deterministically.
+
+        The first owner is stopped *inside* its ownership check, after the
+        pathname was removed out from under it, and a compliant second run is
+        started while it is parked there. The observation is not a timing
+        window: the second run is watched *entering* the guard and then watched
+        for whether it ever gets it. While the first owner holds that guard the
+        answer can only be no, so the second run cannot have created anything
+        for the first one to unlink. Drop the shared guard and the same wait
+        resolves immediately, which is the gap this closes.
+        """
+        first = self.lock()
+        first.__enter__()
+        self.path.unlink()
+
+        second = self.lock(pr=9)
+        entered_guard = threading.Event()
+        holds_guard = threading.Event()
+        finished = threading.Event()
+        failures: list[BaseException] = []
+        observed: dict[str, object] = {}
+        real_flock = state_module.fcntl.flock
+        real_lstat = state_module.os.lstat
+
+        def acquire_second() -> None:
+            try:
+                second.__enter__()
+            except BaseException as exc:  # pragma: no cover - reported below
+                failures.append(exc)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=acquire_second, name="second-acquisition")
+
+        def watched_flock(handle, operation):
+            mine = threading.current_thread() is worker and operation & state_module.fcntl.LOCK_EX
+            if mine:
+                entered_guard.set()
+            result = real_flock(handle, operation)
+            if mine:
+                # Reached only once the guard is actually held, which cannot
+                # happen while the first owner is inside its own guarded region.
+                holds_guard.set()
+            return result
+
+        def watched_lstat(target):
+            if Path(target) == self.path and "checked" not in observed:
+                observed["checked"] = True
+                worker.start()
+                self.assertTrue(entered_guard.wait(10), "the second acquisition never reached the guard")
+                observed["took_guard"] = holds_guard.wait(0.5)
+                observed["published"] = self.path.exists()
+                observed["finished"] = finished.is_set()
+            return real_lstat(target)
+
+        with patch.object(state_module.fcntl, "flock", watched_flock):
+            with patch.object(state_module.os, "lstat", watched_lstat):
+                first.__exit__(None, None, None)
+
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        self.assertTrue(observed.get("checked"), "the ownership check never ran")
+        self.assertFalse(
+            observed["took_guard"],
+            "a compliant acquisition entered the validation-to-unlink gap",
+        )
+        self.assertFalse(
+            observed["published"],
+            "a compliant acquisition published inside the validation-to-unlink gap",
+        )
+        self.assertFalse(observed["finished"])
+
+        # The first owner found the path already gone and said exactly that;
+        # the second owns the lock that exists now.
+        self.assertEqual(first.cleanup_disposition, CLEANUP_ALREADY_ABSENT)
+        self.assertTrue(second._held)
+        self.assertTrue(self.path.exists())
+        self.assertEqual(second._identity, self.identity())
+        self.assert_contended()
+
+        second.__exit__(None, None, None)
+        self.assertFalse(self.path.exists())
+
+    # -- positive controls -------------------------------------------------
+    def test_an_unchanged_owned_lock_is_still_removed_on_ordinary_release(self) -> None:
+        lock = self.lock()
+        with lock:
+            self.assertTrue(self.path.exists())
+        self.assertFalse(self.path.exists())
+        self.assertEqual(lock.cleanup_disposition, CLEANUP_REMOVED)
+        self.assertFalse(lock._held)
+
+    def test_an_unchanged_owned_lock_is_still_removed_on_initialization_failure(self) -> None:
+        lock = self.lock()
+        with patch("pr_prover.state.json.dump", side_effect=OSError(BROKEN_MESSAGE)):
+            with self.assertRaises(LockContention) as caught:
+                lock.__enter__()
+        self.assertEqual(caught.exception.evidence["cleanup"], CLEANUP_REMOVED)
+        self.assertIn("was removed", caught.exception.evidence["resolution"])
+        self.assertFalse(self.path.exists())
+        self.assertFalse(lock._held)
+        # And the path is free for the next run, as before.
+        with self.lock():
+            self.assertTrue(self.path.exists())
+        self.assertFalse(self.path.exists())
 
 
 if __name__ == "__main__":  # pragma: no cover
