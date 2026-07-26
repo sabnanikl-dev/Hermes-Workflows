@@ -12,18 +12,17 @@ GitHub collapses effective review state by account. A later approval from one la
 - role separation has to be carried inside the artifact — explicit role, verdict, and exact head — never inferred from the account;
 - an artifact tied to an older head is audit history, never a current-head pass.
 
-When both lanes must be proven, read the full artifact set and filter by role signature *and* head, rather than trusting a single collapsed summary field.
+A single collapsed account-level summary field therefore cannot prove two lanes. Proving both is a property of per-role, head-bound artifact evidence — invariant M4 in `pr-prover/MISSION.md` — and producing and reading that evidence is `pr-prover`'s work, with its GitHub-published reviewer half owed by PAPI-90.
 
 ## A quiet lane is not a finished lane, and a finished lane is not a dead one
 
-A reviewer process can complete its audit yet stay alive because long-lived MCP/CodeGraph children do not exit. Before concluding anything about such a lane:
+A reviewer process can complete its audit yet stay alive because long-lived MCP/CodeGraph children do not exit. Silence is therefore ambiguous in both directions:
 
-- inspect the process tree and CPU instead of trusting silence;
-- inspect the lane's own worktree status;
-- check whether a result file or a complete review body exists;
-- check the live GitHub surface directly, because stale subprocess output can hide an artifact that did post.
+- quiet output is not evidence of a hang, and it is not evidence of completion;
+- an unexited lane is not a failed lane — a lane whose children outlive its audit still produced a result;
+- no locally visible result is not the same fact as no posted artifact, because stale subprocess output can hide an artifact that did post.
 
-If the lane is idle and only MCP/CodeGraph children remain, terminate the child first and let the parent exit. Do not kill an active reviewer merely because stdout is quiet.
+Resolving that ambiguity is lane lifecycle work `pr-prover` owns: bounded runtimes and fail-closed timeouts, run-owned worktrees at a verified head, and direct GitHub readback (M9, M10, M13). Per-lane elapsed/quiet progress reporting and a report field separating transport success from readback are the parts PAPI-90 still owes. Long-lived MCP/CodeGraph children are why an exit signal alone under-determines a lane's state; reconciling them belongs to that owned lifecycle rather than to hand-run process control driven from this reference.
 
 ## Transient failures are not durable beliefs
 
