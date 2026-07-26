@@ -5,8 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _support  # noqa: F401 - inserts the package on sys.path
+from pr_prover import state as state_module
 from pr_prover.errors import LockContention, StateError
 from pr_prover.state import MAX_ATTEMPTS, SCHEMA_VERSION, RunLock, RunState
 
@@ -112,6 +114,72 @@ class StateFileTests(unittest.TestCase):
         self.assertIn("reset", caught.exception.message)
 
 
+class StateWriteFailureTests(unittest.TestCase):
+    """Persisting can fail, and a failure to persist is unexpected state.
+
+    Every one of these used to escape as a raw ``OSError``, past the loop's
+    fail-closed handling and out as a traceback, taking the needs-Karan report
+    and the durable attempt journal with it.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-write-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.path = self.tmp / "state.json"
+
+    def state(self, path: Path | None = None) -> RunState:
+        return RunState(repo="example/repo", pr=7, path=path or self.path)
+
+    def test_a_parent_that_is_a_file_is_unexpected_state(self) -> None:
+        (self.tmp / "not-a-directory").write_text("occupied\n", encoding="utf-8")
+        state = self.state(self.tmp / "not-a-directory" / "state.json")
+
+        with self.assertRaises(StateError) as caught:
+            state.save()
+
+        self.assertIn("could not persist", caught.exception.message)
+        self.assertEqual(caught.exception.reason, "unexpected-state")
+
+    def test_a_temporary_that_cannot_be_written_is_unexpected_state(self) -> None:
+        (self.tmp / "state.json.tmp").mkdir()
+
+        with self.assertRaises(StateError):
+            self.state().save()
+
+    def test_a_replacement_that_cannot_complete_is_unexpected_state(self) -> None:
+        def refuse(src: object, dst: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(state_module.os, "replace", refuse):
+            with self.assertRaises(StateError) as caught:
+                self.state().save()
+
+        self.assertEqual(caught.exception.evidence["error"], "OSError")
+
+    def test_a_failed_write_leaves_no_half_written_temporary_behind(self) -> None:
+        def refuse(src: object, dst: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(state_module.os, "replace", refuse):
+            with self.assertRaises(StateError):
+                self.state().save()
+
+        self.assertFalse((self.tmp / "state.json.tmp").exists())
+        self.assertFalse(self.path.exists())
+
+    def test_the_evidence_names_the_file_and_carries_no_traceback(self) -> None:
+        (self.tmp / "state.json.tmp").mkdir()
+        state = self.state()
+        state.begin_attempt()
+
+        with self.assertRaises(StateError) as caught:
+            state.save()
+
+        self.assertEqual(caught.exception.evidence["state_file"], str(self.path))
+        self.assertEqual(caught.exception.evidence["attempt"], 1)
+
+
 class AttemptInvariantTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-attempt-")
@@ -184,6 +252,26 @@ class LockTests(unittest.TestCase):
             with RunLock(self.path, repo="example/repo", pr=7):
                 raise ValueError("boom")
         self.assertFalse(self.path.exists())
+
+    def test_a_lock_that_cannot_be_released_is_unexpected_state(self) -> None:
+        """A leaked lock has to be said out loud: the next run will refuse to start."""
+        with mock.patch.object(Path, "unlink", _refuse_unlink):
+            with self.assertRaises(StateError) as caught:
+                with RunLock(self.path, repo="example/repo", pr=7):
+                    pass
+
+        self.assertIn("could not release", caught.exception.message)
+        self.assertEqual(caught.exception.reason, "unexpected-state")
+
+    def test_a_cleanup_failure_never_replaces_the_reason_the_run_stopped(self) -> None:
+        with mock.patch.object(Path, "unlink", _refuse_unlink):
+            with self.assertRaises(ValueError):
+                with RunLock(self.path, repo="example/repo", pr=7):
+                    raise ValueError("the real reason")
+
+
+def _refuse_unlink(self: Path, *args: object, **kwargs: object) -> None:
+    raise OSError(13, "Permission denied")
 
 
 if __name__ == "__main__":  # pragma: no cover

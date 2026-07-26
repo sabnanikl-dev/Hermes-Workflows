@@ -85,6 +85,12 @@ class ReadbackMismatch(FailClosed):
     reason = "readback-mismatch"
 
 
+class ReviewerRelayError(FailClosed):
+    """A credential-free reviewer's prepared artifact is unusable, or the relay failed."""
+
+    reason = "relay-failure"
+
+
 class ScopeContamination(FailClosed):
     """Work appeared outside the frozen blocker set or the attempt worktree is dirty."""
 

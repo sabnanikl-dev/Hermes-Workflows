@@ -47,6 +47,7 @@ tokens, and an unknown token fails the run rather than rendering literally:
 | `{branch}` `{base}` `{head}` | all lanes | from the **live** PR, never from config alone |
 | `{worktree}` | all lanes | the fresh worktree this lane runs in |
 | `{reviewer}` `{role}` | reviewer lanes | the lane name and its configured role |
+| `{artifact_file}` | reviewer lanes and their relay | where that lane prepares its artifact, under the OS temp directory |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
 
 `builder.comment_author` and each reviewer's `artifact_author` are **required**,
@@ -72,14 +73,54 @@ example uses `"env_unset": ["GH_TOKEN"]` so each agent uses its own configured
 `HOME`, `USER`, `LOGNAME`, or `SHELL`, and may not carry a credential value:
 tokens belong in the keychain and in `gh`'s own auth.
 
+### The credential-free reviewer lifecycle
+
+A reviewer is trusted to judge one exact head. It is not handed the identity it
+publishes under, because judging and publishing are different jobs. A reviewer
+with a `relay` therefore takes one explicit route:
+
+```text
+credential-free audit  →  prepared artifact at {artifact_file}
+  →  relay publishes it under the reviewer identity  →  GitHub readback
+```
+
+The lane runs with `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and
+`GITHUB_ENTERPRISE_TOKEN` removed by name — and nothing else about the inherited
+session touched — and writes its finished artifact to `{artifact_file}`. Before
+anything is published, that file is held to the same signature, bare
+`ROLE=<role>` line, and exact head that readback will demand, so a lane that
+crashed, wrote nothing, or reviewed another head can never put something
+unusable on the PR under the reviewer's name. Only then does the configured
+`relay.argv` run. It is an ordinary command using whatever `gh` session it
+already has; this tool mints and forwards nothing. Its exit status is not the
+proof either — the artifact is still read back from GitHub afterwards.
+
+The example ships this end to end: [`scripts/codex-reviewer.sh`](scripts/codex-reviewer.sh)
+is the repository-owned adapter that runs the installed Codex CLI against one
+head and refuses to start if a GitHub credential reached it, and the relay is
+`gh pr comment … --body-file {artifact_file}`. Set `PR_PROVER_CODEX` if the
+Codex binary is not on `PATH` as `codex`. A reviewer configured without a
+`relay` publishes for itself, as before.
+
 ### Budgets, and why quiet is not a hang
 
 A trusted builder reading a PR, editing, verifying, pushing, and commenting
 routinely runs 20–30 minutes with `--print` buffering its output. Only a lane's
-own `timeout` ever ends it. While it runs, the loop records elapsed time, bytes
-produced, and how long it has been quiet; when it ends, the report carries
-`exited` or `timed-out` with the duration and exit code. `check-config` prints
-an advisory for a builder budget under 20 minutes or a reviewer budget under 15.
+own `timeout` ever ends it, and the budget the run log names is the budget that
+is enforced: a lane with no `timeout` is reported as `unbounded` and really is
+unbounded, with no default underneath it. `check-config` prints an advisory for
+any lane that omits a budget, and for a builder budget under 20 minutes or a
+reviewer budget under 15.
+
+While a lane runs, the loop records elapsed time, bytes produced, and how long
+it has been quiet; when it ends, the report carries `exited` or `timed-out` with
+the duration and exit code.
+
+A lane is its whole process tree, not one process. Each child starts in its own
+process group, and a budget that runs out ends the group — politely first, then
+without asking — so a builder that started a test suite or an agent of its own
+cannot keep touching its worktree after the loop has reported the lane stopped.
+The group is always ended, not only when the direct child refuses to stop.
 
 Gates take `"kind": "baseline"` (default) or `"kind": "visual"`. Visual gates
 run only when `visual_qa_required` is `true`; setting that flag without a visual
@@ -165,6 +206,9 @@ head — by the review's own `commit_id` where GitHub records one, otherwise by 
 40-hex SHA in the body. The role line is matched whole, so one lane's artifact
 can never be read back as another's. Anything else is a `readback-mismatch`.
 
+This is applied identically whether the lane published for itself or a relay
+published for it. A successful relay is transport, not proof.
+
 ### The builder's push
 
 A push is accepted only when the PR head moved to exactly the commit the builder
@@ -202,8 +246,14 @@ held, the run stops and asks. After confirming no run is active, remove it with
 
 `invalid-config` · `invalid-command` · `lock-contention` · `unexpected-state` ·
 `malformed-verdict` · `lane-failure` · `stale-head` · `ambiguous-push` ·
-`readback-mismatch` · `scope-contamination` · `builder-refusal` ·
-`github-error` · `worktree-error`
+`readback-mismatch` · `relay-failure` · `scope-contamination` ·
+`builder-refusal` · `github-error` · `worktree-error`
+
+`unexpected-state` covers writing the local journal as well as reading it: a
+state file that cannot be created, written, or atomically replaced stops the run
+with evidence rather than escaping as a traceback. If persisting fails *while* a
+fail-closed stop is already being reported, the reason for that stop is what the
+report keeps, and the journal failure is recorded alongside it.
 
 Each carries evidence, and the worktree plus scratch directory are retained so
 the failure can be inspected.
@@ -226,8 +276,9 @@ bounded with explicit markers.
 - Every attempt gets a fresh worktree, detached at one verified SHA. An existing
   path is refused rather than reused, and worktrees this run did not create
   cannot be removed.
-- The frozen blocker set is written under the OS temp directory, never inside a
-  repository, so a builder's inputs cannot contaminate the diff.
+- The frozen blocker set and every prepared reviewer artifact are written under
+  the OS temp directory, never inside a repository, so a lane's inputs and
+  outputs cannot contaminate the diff.
 - The loop never pushes, comments, approves, or merges. The trusted agents act
   under their own identities; this loop only verifies what landed.
 - Any push invalidates every prior verdict, and at most two fix attempts can
@@ -241,7 +292,18 @@ python3 -m compileall -q pr-prover/src pr-prover/tests
 git diff --check origin/main...HEAD
 ```
 
+```bash
+python3.11 -m unittest discover -s pr-prover/tests -v
+python3.11 -m compileall -q pr-prover/src pr-prover/tests
+```
+
 The suite runs against deterministic doubles — no network and no `gh` — apart
-from `test_integration_git.py`, which drives the real `git` argv shapes against
-a throwaway repository, and the process tests in `test_trusted_agents.py`, which
-launch real quiet, slow, and timing-out children.
+from three places that deliberately use real processes: `test_integration_git.py`
+drives the real `git` argv shapes against a throwaway repository; the process
+tests in `test_trusted_agents.py` launch real quiet, slow, and timing-out
+children, including one whose descendant must not survive the budget, and drive
+a real runner through the loop to compare the logged budget with the enforced
+one; and `test_reviewer_relay.py` runs the whole credential-free reviewer
+lifecycle — real reviewer executable, real relay, real
+[`scripts/codex-reviewer.sh`](scripts/codex-reviewer.sh) against a stub Codex —
+against a GitHub boundary that can only see what a process actually published.

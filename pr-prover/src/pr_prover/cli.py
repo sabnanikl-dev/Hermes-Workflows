@@ -66,7 +66,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"({len(config.gates)} gate(s), {len(config.reviewers)} reviewer lane(s))"
         )
         for reviewer in config.reviewers:
-            print(f"  reviewer {reviewer.name}: role {reviewer.role}, publishes as {reviewer.artifact_author}")
+            how = (
+                f"relays as {reviewer.artifact_author} via {reviewer.relay.argv[0]}"
+                if reviewer.relay is not None
+                else f"publishes as {reviewer.artifact_author}"
+            )
+            print(f"  reviewer {reviewer.name}: role {reviewer.role}, {how}")
         print(f"  builder: comments as {config.builder.comment_author}")
         for note in config.advisories():
             print(f"  advisory: {note}")

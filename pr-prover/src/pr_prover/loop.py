@@ -54,6 +54,15 @@ login, carrying its own role line and this exact head. The signature and the
 head SHA both become public the moment a real artifact is posted, so neither can
 carry the proof on its own.
 
+**Reviewer transport.** A reviewer is trusted to judge, not to be handed the
+identity it publishes under, so a lane with a configured relay runs with the
+GitHub credential variables removed and writes its finished artifact to a file
+under the OS temp directory. That file is validated against the same signature,
+role line, and exact head readback will demand, and only then does the
+separately configured relay command publish it under the reviewer identity —
+after which the artifact is still read back from GitHub like any other. A lane
+without a relay publishes for itself, unchanged.
+
 Trusted agents are given room to work. A builder or reviewer that prints nothing
 for twenty minutes is a lane doing its job behind buffered output, and only its
 own wall-clock budget ever ends it; what the loop keeps is the observable state
@@ -86,6 +95,7 @@ from .errors import (
     LaneFailure,
     PrProverError,
     ReadbackMismatch,
+    ReviewerRelayError,
     ScopeContamination,
     StaleHead,
     StateError,
@@ -99,6 +109,8 @@ from .findings import (
 )
 from .github import Comment, GitHubBoundary, PullRequest
 from .redaction import evidence as redact_evidence
+from .reviewers import artifact_matches, artifact_path, read_prepared
+from .reviewers import credential_free as credential_free_env
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
     BuilderReport,
@@ -215,12 +227,28 @@ class ProverLoop:
         try:
             result = self._prove(state)
         except FailClosed:
-            state.outcome = NEEDS_KARAN
-            state.save()
+            self._journal(state, NEEDS_KARAN, already_failing=True)
             raise
-        state.outcome = result.outcome
-        state.save()
+        self._journal(state, result.outcome, already_failing=False)
         return result
+
+    def _journal(self, state: RunState, outcome: str, *, already_failing: bool) -> None:
+        """Record the terminal outcome durably, without losing why it happened.
+
+        Persisting can fail — a read-only parent, a full disk, a replacement
+        that cannot complete — and that failure is itself unexpected state, so
+        on the success path it stops the run and asks Karan. While a fail-closed
+        stop is already being reported, though, the reason for *that* is the one
+        worth keeping: the journal failure is recorded as an event and the
+        original error goes on propagating.
+        """
+        state.outcome = outcome
+        try:
+            state.save()
+        except StateError as exc:
+            if not already_failing:
+                raise
+            self._event(f"the {outcome} outcome could not be journalled: {exc.message}")
 
     # -- main loop --------------------------------------------------------
     def _prove(self, state: RunState) -> RunResult:
@@ -425,21 +453,33 @@ class ProverLoop:
     ) -> tuple[ReviewerVerdict, ...]:
         verdicts: list[ReviewerVerdict] = []
         for reviewer in self.config.reviewers:
-            argv = render_argv(
-                reviewer.argv,
-                self._values(
-                    pull,
-                    head,
-                    worktree,
-                    extra={"reviewer": reviewer.name, "role": reviewer.role},
-                ),
-                what=f"reviewer {reviewer.name!r}",
+            relayed = reviewer.relay is not None
+            # Where a credential-free lane leaves its finished artifact. Outside
+            # every repository, and cleared before the lane can be launched.
+            prepared = artifact_path(
+                self._scratch_dir(), reviewer=reviewer.name, head=head
             )
+            values = self._values(
+                pull,
+                head,
+                worktree,
+                extra={
+                    "reviewer": reviewer.name,
+                    "role": reviewer.role,
+                    "artifact_file": str(prepared),
+                },
+            )
+            argv = render_argv(reviewer.argv, values, what=f"reviewer {reviewer.name!r}")
             lane = f"reviewer {reviewer.name}"
             # Everything already published, captured before this lane can post.
             known = self._artifact_identities()
             result = self._run_lane(
-                argv, lane=lane, cwd=worktree, timeout=reviewer.timeout, env=reviewer.env
+                argv,
+                lane=lane,
+                cwd=worktree,
+                timeout=reviewer.timeout,
+                env=reviewer.env,
+                credential_free=relayed,
             )
             self._reject_timed_out(result, lane=lane, head=head)
             verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
@@ -449,6 +489,8 @@ class ProverLoop:
             self._require_success_for_clean(
                 result, lane=lane, status=verdict.status, clean="pass", head=head
             )
+            if relayed:
+                self._relay_artifact(reviewer, head, prepared, values, cwd=worktree)
             self._read_back_reviewer(reviewer, head, known)
             verdicts.append(verdict)
             self._event(
@@ -458,32 +500,82 @@ class ProverLoop:
             )
         return tuple(verdicts)
 
+    def _relay_artifact(
+        self,
+        reviewer: ReviewerConfig,
+        head: str,
+        prepared: Path,
+        values: Mapping[str, str],
+        *,
+        cwd: Path,
+    ) -> None:
+        """Publish a credential-free reviewer's prepared artifact, once it validates.
+
+        This is the whole transport half of the lifecycle. The lane that just
+        exited had no GitHub credential, so nothing is on the PR yet; the file
+        it wrote is held to this reviewer's signature, role line, and this exact
+        head before the configured relay command is allowed to post it. An
+        artifact that would fail readback therefore never reaches GitHub at all,
+        and a relay that cannot publish stops the run rather than leaving the
+        next step to discover an absence it cannot explain.
+        """
+        relay = reviewer.relay
+        if relay is None:  # pragma: no cover - the caller only relays what has one
+            return
+        artifact = read_prepared(
+            prepared,
+            reviewer=reviewer.name,
+            role=reviewer.role,
+            signature=reviewer.artifact_signature,
+            head=head,
+        )
+        self._event(
+            f"reviewer {reviewer.name} prepared a {artifact.size}-byte artifact for {head} "
+            "with no GitHub credential in its lane"
+        )
+        lane = f"relay {reviewer.name}"
+        argv = render_argv(relay.argv, values, what=f"reviewer {reviewer.name!r} relay")
+        result = self._run_lane(
+            argv, lane=lane, cwd=cwd, timeout=relay.timeout, env=relay.env
+        )
+        self._reject_timed_out(result, lane=lane, head=head)
+        if not result.ok:
+            raise ReviewerRelayError(
+                f"the relay for reviewer {reviewer.name} did not publish its prepared artifact",
+                evidence={
+                    "reviewer": reviewer.name,
+                    "head": head,
+                    "artifact_file": str(prepared),
+                    "returncode": result.returncode,
+                    "output": redact_evidence(_combined(result), limit=2000),
+                },
+            )
+        self._event(
+            f"reviewer {reviewer.name} artifact relayed for {head} as {reviewer.artifact_author}"
+        )
+
     def _read_back_reviewer(
         self, reviewer: ReviewerConfig, head: str, known: frozenset[str]
     ) -> None:
         """Find this reviewer's published artifact on the PR, or stop.
 
-        A lane's stdout is only what a process said about itself; the artifact
+        A lane's stdout is only what a process said about itself, and a relay's
+        exit status only what the transport said about itself; the artifact
         Karan and the next reviewer act on is the one on the PR. So it must be
         new since this lane was launched, published under the configured login,
-        carry this lane's role on its own line — a role read as a substring
-        would let ``ROLE=Auditor`` satisfy ``ROLE=A`` — and be bound to this
-        exact head, by the review's own ``commit_id`` where GitHub records one.
+        carry this lane's role on its own line, and be bound to this exact head.
         """
         role_line = f"ROLE={reviewer.role}"
         published = self._artifacts()
         fresh = [item for item in published if item.identifier not in known]
         for artifact in fresh:
-            if artifact.author != reviewer.artifact_author:
-                continue
-            if reviewer.artifact_signature not in artifact.body:
-                continue
-            if not any(line.strip() == role_line for line in artifact.body.splitlines()):
-                continue
-            if artifact.commit_id:
-                if artifact.commit_id != head:
-                    continue
-            elif head not in artifact.body:
+            if not artifact_matches(
+                artifact,
+                author=reviewer.artifact_author,
+                signature=reviewer.artifact_signature,
+                role=reviewer.role,
+                head=head,
+            ):
                 continue
             self._event(
                 f"reviewer {reviewer.name} {artifact.kind} {artifact.identifier} "
@@ -523,19 +615,29 @@ class ProverLoop:
         cwd: Path,
         timeout: float | None,
         env: LaneEnv,
+        credential_free: bool = False,
     ) -> CommandResult:
         """Launch one lane and keep its observable state.
 
         The environment is inherited and then adjusted by the lane's own named
         overlay, so the trusted agent keeps the session it authenticates with.
-        While it runs, progress is recorded; when it ends, so is how it ended.
-        Silence is written down, never converted into a failure.
+        A ``credential_free`` lane additionally has the GitHub credential
+        variables removed by name: it audits and prepares an artifact, and its
+        relay publishes. While it runs, progress is recorded; when it ends, so
+        is how it ended. Silence is written down, never converted into a failure.
+
+        The budget passed here is the budget enforced: a lane with none named
+        runs to its own completion, which is what ``unbounded`` in the run log
+        means.
         """
         self._event(f"{lane} launched: {argv[0]} (budget {_budget(timeout)})")
+        resolved = env.apply(os.environ)
+        if credential_free:
+            resolved = credential_free_env(resolved, base=os.environ)
         result = self.runner.run(
             argv,
             cwd=cwd,
-            env=env.apply(os.environ),
+            env=resolved,
             timeout=timeout,
             progress=lambda update: self._observe(lane, update),
         )

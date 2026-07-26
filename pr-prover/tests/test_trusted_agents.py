@@ -15,10 +15,13 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from _support import (
     HEAD_A,
@@ -26,6 +29,7 @@ from _support import (
     HEAD_C,
     REVIEWER_LOGIN,
     REVIEWER_SIGNATURE,
+    Call,
     FakeGitHub,
     FakeRemote,
     FakeRunner,
@@ -38,14 +42,32 @@ from _support import (
     reviewer_output,
 )
 from pr_prover import cli
-from pr_prover.commands import EXITED, TIMED_OUT, Progress, SubprocessRunner
+from pr_prover.commands import EXITED, TIMED_OUT, Progress, SubprocessRunner, validate_argv
 from pr_prover.config import REALISTIC_BUILDER_BUDGET, LaneEnv, RunConfig
 from pr_prover.errors import CommandContractError, ConfigError
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop
+from pr_prover import state as state_module
 from pr_prover.report import as_dict
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
 
 BLOCKER = ("blocking", "null-deref", "crashes on empty input")
+
+
+def _alive(pid: int) -> bool:
+    """Is this process still there? Signal 0 asks without disturbing it."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - alive, and not ours to signal
+        return True
+    return True
+
+
+def _kill_if_alive(pid: int) -> None:
+    """Leave nothing running behind a failed process-tree assertion."""
+    with contextlib.suppress(OSError):
+        os.kill(pid, 9)
 
 
 class TrustedLaneHarness(unittest.TestCase):
@@ -231,7 +253,8 @@ class ObservableProcessStateTests(unittest.TestCase):
     def runner(self, **kwargs) -> SubprocessRunner:
         kwargs.setdefault("poll_interval", 0.01)
         kwargs.setdefault("progress_interval", 0.05)
-        return SubprocessRunner(default_timeout=30.0, **kwargs)
+        kwargs.setdefault("default_timeout", 30.0)
+        return SubprocessRunner(**kwargs)
 
     def python(self, source: str) -> list[str]:
         return [sys.executable, "-c", source]
@@ -296,6 +319,62 @@ class ObservableProcessStateTests(unittest.TestCase):
         )
 
         self.assertTrue(result.timed_out)
+
+    def test_nothing_the_lane_started_survives_its_timeout(self) -> None:
+        """A lane is its whole process tree, and the budget ends all of it.
+
+        The direct child here exits the moment it is asked to; what it started
+        does not, and would happily go on writing after the loop had reported
+        the lane stopped. Its evidence is delayed past the timeout on purpose,
+        so a descendant that outlived the budget leaves a file behind saying so.
+        """
+        scratch = Path(tempfile.mkdtemp(prefix="pr-prover-tree-"))
+        self.addCleanup(shutil.rmtree, scratch, True)
+        pid_file = scratch / "descendant.pid"
+        heartbeat = scratch / "descendant.heartbeat"
+        lane = self.python(
+            "import subprocess, sys, time\n"
+            "descendant = subprocess.Popen([\n"
+            "    sys.executable, '-c',\n"
+            "    \"import sys, time; time.sleep(2.0); \"\n"
+            "    \"open(sys.argv[1], 'w').write('still here')\",\n"
+            "    sys.argv[2],\n"
+            "])\n"
+            "open(sys.argv[1], 'w').write(str(descendant.pid))\n"
+            "time.sleep(300)\n"
+        ) + [str(pid_file), str(heartbeat)]
+
+        result = self.runner(kill_grace=0.2).run(lane, timeout=0.5)
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.returncode, 124)
+        descendant = int(pid_file.read_text(encoding="utf-8").strip())
+        self.addCleanup(_kill_if_alive, descendant)
+        # Past the moment it would have written, had anything let it.
+        deadline = time.monotonic() + 4.0
+        while _alive(descendant) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(_alive(descendant), "the lane's descendant outlived the budget")
+        self.assertFalse(
+            heartbeat.exists(), "the lane's descendant kept working after the lane was stopped"
+        )
+
+    def test_an_omitted_budget_is_not_secretly_the_runners_default(self) -> None:
+        """``timeout=None`` is a budget of none, not a budget of whatever's handy."""
+        result = self.runner(default_timeout=0.15).run(
+            self.python("import time; time.sleep(0.6); print('finished')"), timeout=None
+        )
+
+        self.assertFalse(result.timed_out)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stdout.strip(), "finished")
+
+    def test_a_caller_that_names_no_budget_still_gets_the_runners_default(self) -> None:
+        """The short internal git/gh calls keep their safety net."""
+        result = self.runner(default_timeout=0.2).run(self.python("import time; time.sleep(30)"))
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.returncode, 124)
 
     def test_a_failing_lane_reports_its_exit_code_rather_than_raising(self) -> None:
         result = self.runner().run(self.python("raise SystemExit(3)"))
@@ -374,6 +453,140 @@ class LaneObservationReportTests(TrustedLaneHarness):
         result = loop.run()
 
         self.assertIn("reviewer A launched: lane-reviewer-A (budget unbounded)", result.events)
+
+
+class RealRunnerBudgetTests(TrustedLaneHarness):
+    """The budget the report names is the budget a real child actually gets.
+
+    These drive a real :class:`SubprocessRunner` through ``ProverLoop`` rather
+    than a double, because the failure they exist for lived precisely in the
+    gap between the two: a lane the run log called unbounded, ended by a default
+    the log never mentioned.
+    """
+
+    def build_with_real_gate(self, *, gate: dict, default_timeout: float) -> ProverLoop:
+        real = SubprocessRunner(
+            default_timeout=default_timeout, poll_interval=0.01, progress_interval=30.0
+        )
+        self.runner = _RealLaneRunner(self.remote, self.script, real)
+        config = make_config(self.tmp, source_repo=self.source_repo, gates=[gate])
+        source = SourceRepo(runner=self.runner, path=config.source_repo)
+        return ProverLoop(
+            config,
+            runner=self.runner,
+            github=self.github,
+            worktrees=WorktreeProvider(source, config.worktree_root),
+            scratch_root=self.tmp / "scratch",
+        )
+
+    def test_an_omitted_lane_budget_is_the_budget_the_report_names(self) -> None:
+        loop = self.build_with_real_gate(
+            gate={
+                "name": "slow",
+                "argv": [sys.executable, "-c", "import time; time.sleep(0.6); print('ok')"],
+            },
+            # Shorter than the gate: if anything but the lane's own budget were
+            # in force, this child would not survive to print.
+            default_timeout=0.15,
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertIn(f"gate slow launched: {sys.executable} (budget unbounded)", result.events)
+        self.assertEqual([gate.passed for gate in result.gates], [True])
+        self.assertEqual(result.outcome, MERGE_READY)
+
+    def test_a_named_lane_budget_is_enforced_exactly_as_it_is_named(self) -> None:
+        loop = self.build_with_real_gate(
+            gate={
+                "name": "slow",
+                "argv": [sys.executable, "-c", "import time; time.sleep(30)"],
+                "timeout": 1,
+            },
+            default_timeout=600.0,
+        )
+        # The gate becomes a blocking finding, so an attempt opens; this run is
+        # about the budget, and the builder declining ends it without noise.
+        self.script.add(
+            "lane-builder", builder_output(HEAD_A, addressed=["gate-slow"], status="failure")
+        )
+
+        result = loop.run()
+
+        self.assertIn(f"gate slow launched: {sys.executable} (budget 1s)", result.events)
+        self.assertEqual([gate.passed for gate in result.gates], [False])
+        self.assertEqual([gate.returncode for gate in result.gates], [124])
+        self.assertEqual(result.reason, "builder-refusal")
+
+
+class _RealLaneRunner(FakeRunner):
+    """The fake runner, except that a real executable really is launched.
+
+    Git stays scripted — these tests are about budgets, not about git — while
+    anything else goes to a real :class:`SubprocessRunner` with the same budget
+    the loop asked for, so the enforced budget and the logged one can be
+    compared on one run.
+    """
+
+    def __init__(self, remote, script, real: SubprocessRunner) -> None:
+        super().__init__(remote, script)
+        self.real = real
+
+    def run(self, argv, *, cwd=None, env=None, timeout=None, progress=None):
+        checked = validate_argv(argv)
+        if checked[0] == sys.executable:
+            self.calls.append(Call(argv=checked, cwd=str(cwd) if cwd is not None else None))
+            self.envs.append(env)
+            return self.real.run(
+                checked, cwd=cwd, env=env, timeout=timeout, progress=progress
+            )
+        return super().run(argv, cwd=cwd, env=env, timeout=timeout, progress=progress)
+
+
+# -- persisting the run journal -------------------------------------------
+class StatePersistenceFailureTests(TrustedLaneHarness):
+    """A state file that cannot be written is unexpected state, not a traceback."""
+
+    def test_a_state_write_failure_becomes_the_documented_needs_karan_report(self) -> None:
+        loop = self.build()
+        # A directory standing where the atomic replacement's temporary file has
+        # to be written: the same OSError a read-only parent or a full disk
+        # raises, injected without touching the code under test.
+        (self.config.state_file.parent / (self.config.state_file.name + ".tmp")).mkdir()
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "unexpected-state")
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("could not persist", result.evidence["message"])
+
+    def test_a_failure_while_journalling_a_fail_closed_stop_keeps_the_real_reason(self) -> None:
+        """The journal is not the news. Whatever stopped the run still is."""
+        loop = self.build()
+        # Nothing is published, so the reviewer readback is what stops this run.
+        self.runner.publish_reviewer_artifacts = False
+        self.review_round(HEAD_A)
+        real_replace = state_module.os.replace
+
+        def replace(src, dst):
+            # Every save up to the terminal one lands; recording the outcome is
+            # the one that cannot.
+            if '"outcome": null' not in Path(src).read_text(encoding="utf-8"):
+                raise OSError(28, "No space left on device")
+            return real_replace(src, dst)
+
+        with mock.patch.object(state_module.os, "replace", replace):
+            result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        self.assertTrue(
+            any("could not be journalled" in event for event in result.events),
+            result.events,
+        )
+        self.assertNotIn("needs-karan", self.config.state_file.read_text(encoding="utf-8"))
 
 
 # -- reviewer artifacts: identity, role, exact head ------------------------
@@ -598,11 +811,27 @@ class ShippedConfigTests(unittest.TestCase):
         self.assertGreaterEqual(config.builder.timeout, REALISTIC_BUILDER_BUDGET)
         self.assertEqual(config.advisories(), ())
 
-    def test_the_example_lanes_drop_the_operator_token(self) -> None:
-        config = self.example()
-        self.assertEqual(config.builder.env.unset, ("GH_TOKEN",))
-        for reviewer in config.reviewers:
-            self.assertEqual(reviewer.env.unset, ("GH_TOKEN",))
+    def test_the_example_builder_drops_the_operator_token(self) -> None:
+        self.assertEqual(self.example().builder.env.unset, ("GH_TOKEN",))
+
+    def test_every_example_reviewer_ships_the_credential_free_relay_lifecycle(self) -> None:
+        """The reviewer prepares; the relay publishes. Neither half is missing."""
+        for reviewer in self.example().reviewers:
+            with self.subTest(reviewer=reviewer.name):
+                self.assertIsNotNone(reviewer.relay)
+                self.assertIn("{artifact_file}", reviewer.argv)
+                self.assertIn("{artifact_file}", reviewer.relay.argv)
+                # The relay is the only half that talks to GitHub.
+                self.assertEqual(reviewer.relay.argv[0], "gh")
+
+    def test_the_example_reviewer_adapter_exists_and_is_executable(self) -> None:
+        """The shipped example may not point at a wrapper nobody has."""
+        adapter = Path(__file__).resolve().parents[1] / "scripts" / "codex-reviewer.sh"
+        self.assertTrue(adapter.is_file(), f"{adapter} is missing")
+        self.assertTrue(os.access(adapter, os.X_OK), f"{adapter} is not executable")
+        for reviewer in self.example().reviewers:
+            with self.subTest(reviewer=reviewer.name):
+                self.assertTrue(reviewer.argv[0].endswith("scripts/codex-reviewer.sh"))
 
     def test_the_shipped_empty_mcp_config_is_empty(self) -> None:
         payload = json.loads((self.examples / "claude-empty-mcp.json").read_text(encoding="utf-8"))
@@ -631,7 +860,8 @@ class ShippedConfigTests(unittest.TestCase):
         self.assertEqual(code, 0)
         printed = stdout.getvalue()
         self.assertIn("reviewer Integration Auditor: role integration-auditor", printed)
-        self.assertIn("publishes as the-reviewer-login", printed)
+        # Who the artifact must come from, and which half actually posts it.
+        self.assertIn("relays as the-reviewer-login via gh", printed)
         self.assertIn("builder: comments as the-builder-login", printed)
 
 

@@ -208,6 +208,7 @@ class RemovedFrameworkScanTests(unittest.TestCase):
                 "loop.py",
                 "redaction.py",
                 "report.py",
+                "reviewers.py",
                 "state.py",
                 "verdicts.py",
                 "worktrees.py",

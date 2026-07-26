@@ -18,6 +18,15 @@ actually behave:
   verification can buffer its stdout for twenty minutes. Only the lane's own
   wall-clock budget ever ends a child. Quiet time is measured and reported so
   Hermes can see it, never acted on.
+* **The budget that is reported is the budget that is enforced.** A caller that
+  names ``timeout=None`` is saying "no deadline", and gets exactly that; the
+  runner's ``default_timeout`` applies only to callers that name no budget at
+  all — the short ``git``/``gh`` calls. There is no hidden cap underneath a lane
+  the report describes as unbounded.
+* **A lane is a process tree, not a process.** Each child starts in its own
+  process group, so when a budget runs out the whole group is ended rather than
+  just the one process the runner can see. A builder that spawns a test suite
+  cannot keep mutating its worktree after the loop has reported it stopped.
 * **The state stays observable.** While a child runs, ``progress`` reports
   elapsed time, bytes produced, and how long it has been quiet; when it ends,
   :class:`CommandResult` says whether it exited or timed out, and how long it
@@ -25,14 +34,16 @@ actually behave:
 """
 from __future__ import annotations
 
+import os
 import re
+import signal
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Union
 
 from .errors import CommandContractError
 
@@ -40,6 +51,28 @@ _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 
 EXITED = "exited"
 TIMED_OUT = "timed-out"
+# Signalling a whole process group is POSIX; on anything else the runner falls
+# back to the single child it holds, which is still better than nothing.
+_POSIX = os.name == "posix"
+
+
+class _RunnerDefault:
+    """The "no budget was named" sentinel.
+
+    ``timeout=None`` has to mean one thing only — no deadline — or a lane the
+    report calls unbounded can be killed by a default nobody asked for. So the
+    runner's own default is reachable only by omitting the argument, which is
+    what the short internal ``git``/``gh`` calls do.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<runner default>"
+
+
+RUNNER_DEFAULT = _RunnerDefault()
+Budget = Union[float, None, _RunnerDefault]
 
 
 @dataclass(frozen=True)
@@ -158,7 +191,7 @@ class CommandRunner(Protocol):
         *,
         cwd: Path | str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: Budget = RUNNER_DEFAULT,
         progress: ProgressCallback | None = None,
     ) -> CommandResult: ...
 
@@ -190,11 +223,15 @@ class SubprocessRunner:
         *,
         cwd: Path | str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: Budget = RUNNER_DEFAULT,
         progress: ProgressCallback | None = None,
     ) -> CommandResult:
         checked = validate_argv(argv)
-        effective_timeout = self.default_timeout if timeout is None else timeout
+        # A named budget is honoured exactly, ``None`` included; the default is
+        # for callers that named nothing at all.
+        effective_timeout = (
+            self.default_timeout if isinstance(timeout, _RunnerDefault) else timeout
+        )
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="pr-prover-io-") as scratch:
             out_path = Path(scratch) / "stdout"
@@ -211,19 +248,28 @@ class SubprocessRunner:
                         stdout=out_file,
                         stderr=err_file,
                         shell=False,
+                        # Its own process group, so everything this lane starts
+                        # can be ended with it rather than outliving it.
+                        start_new_session=_POSIX,
                     )
                 except OSError as exc:
                     raise CommandContractError(
                         f"could not launch {checked[0]}: {exc}",
                         evidence={"argv": list(checked)},
                     ) from exc
-                timed_out, quiet_seconds = self._supervise(
-                    child,
-                    argv=checked,
-                    timeout=effective_timeout,
-                    progress=progress,
-                    outputs=(out_path, err_path),
-                )
+                try:
+                    timed_out, quiet_seconds = self._supervise(
+                        child,
+                        argv=checked,
+                        timeout=effective_timeout,
+                        progress=progress,
+                        outputs=(out_path, err_path),
+                    )
+                except BaseException:
+                    # An interrupt or a progress callback that raised still
+                    # leaves this run owning the tree it started.
+                    self._stop(child)
+                    raise
             stdout = _read_text(out_path)
             stderr = _read_text(err_path)
         return CommandResult(
@@ -285,13 +331,58 @@ class SubprocessRunner:
         return False, now - last_output
 
     def _stop(self, child: subprocess.Popen[bytes]) -> None:
-        """End a child that ran out of budget: ask first, then insist."""
-        child.terminate()
+        """End a lane that ran out of budget: ask the tree first, then insist.
+
+        The lane is its whole process group. A builder that started a test suite
+        or an agent of its own can exit politely while what it started keeps
+        running, so the group is always ended — not only when the direct child
+        ignored the polite stop — before the runner reports the lane stopped.
+        """
+        group = self._group(child)
+        self._signal(child, group, hard=False)
         try:
             child.wait(timeout=self.kill_grace)
         except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
+            pass
+        self._signal(child, group, hard=True)
+        try:
+            child.wait(timeout=self.kill_grace)
+        except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL is not refusable
+            pass
+
+    def _group(self, child: subprocess.Popen[bytes]) -> int | None:
+        """This lane's process group, or ``None`` when it cannot be one safely.
+
+        A lane that somehow shares this process's own group is never signalled
+        as a group: ending it that way would end the prover with it.
+        """
+        if not _POSIX:
+            return None
+        try:
+            group = os.getpgid(child.pid)
+        except OSError:  # already reaped, or no such process
+            return None
+        return None if group == os.getpgrp() else group
+
+    def _signal(
+        self, child: subprocess.Popen[bytes], group: int | None, *, hard: bool
+    ) -> None:
+        """Signal the whole group, falling back to the one child it holds."""
+        if group is not None:
+            try:
+                os.killpg(group, signal.SIGKILL if hard else signal.SIGTERM)
+                return
+            except ProcessLookupError:
+                return
+            except OSError:  # pragma: no cover - permission loss mid-run
+                pass
+        try:
+            if hard:
+                child.kill()
+            else:
+                child.terminate()
+        except OSError:  # pragma: no cover - the child is already gone
+            pass
 
 
 def _size(path: Path) -> int:

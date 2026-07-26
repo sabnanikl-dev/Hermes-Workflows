@@ -9,9 +9,17 @@ Placeholders available to every template::
 
     {repo} {owner} {name} {pr} {branch} {base} {head} {worktree}
 
-Reviewer templates also get ``{reviewer}`` and ``{role}``; builder templates also
-get ``{attempt}``, ``{mode}`` (``initial`` or ``corrective``), and
-``{blockers_file}`` — a path under the OS temp directory, never inside a repo.
+Reviewer templates also get ``{reviewer}``, ``{role}``, and ``{artifact_file}``;
+builder templates also get ``{attempt}``, ``{mode}`` (``initial`` or
+``corrective``), and ``{blockers_file}``. Both file paths live under the OS temp
+directory, never inside a repo.
+
+A reviewer may publish its own artifact, or — the shipped default — declare a
+``relay``: the reviewer writes its finished artifact to ``{artifact_file}`` with
+no GitHub credential in its environment, and the separately configured relay
+argv publishes that file under the reviewer identity. The relay is an ordinary
+command; it is given no credential by this tool and uses whatever ``gh`` session
+it already has.
 
 The argv arrays are where the trusted agents are named. Hermes writes the exact
 invocation of the installed Claude/Codex wrapper it wants — model, empty MCP
@@ -46,6 +54,7 @@ from typing import Any
 
 from .commands import validate_argv
 from .errors import ConfigError
+from .reviewers import CREDENTIAL_ENV
 
 SCHEMA_VERSION = 1
 GATE_KINDS = ("baseline", "visual")
@@ -80,8 +89,22 @@ _TOP_LEVEL_KEYS = frozenset(
 )
 _GATE_KEYS = frozenset({"name", "argv", "kind", "timeout", "env", "env_unset"})
 _REVIEWER_KEYS = frozenset(
-    {"name", "argv", "timeout", "role", "artifact_author", "artifact_signature", "env", "env_unset"}
+    {
+        "name",
+        "argv",
+        "timeout",
+        "role",
+        "artifact_author",
+        "artifact_signature",
+        "relay",
+        "env",
+        "env_unset",
+    }
 )
+_RELAY_KEYS = frozenset({"argv", "timeout", "env", "env_unset"})
+# The token every relayed lane has to be handed, on both sides of the handoff:
+# the reviewer needs somewhere to write, and the relay needs something to post.
+_ARTIFACT_FILE = "{artifact_file}"
 _BUILDER_KEYS = frozenset(
     {"argv", "signature", "comment_author", "timeout", "env", "env_unset"}
 )
@@ -135,6 +158,20 @@ class GateConfig:
 
 
 @dataclass(frozen=True)
+class RelayConfig:
+    """The trusted command that publishes one reviewer's prepared artifact.
+
+    It runs after the reviewer lane has exited and its prepared artifact has
+    validated, under whatever GitHub identity its own session already holds.
+    This tool hands it a file path and nothing else.
+    """
+
+    argv: tuple[str, ...]
+    timeout: float | None = None
+    env: LaneEnv = LaneEnv()
+
+
+@dataclass(frozen=True)
 class ReviewerConfig:
     """One exact-head reviewer lane, and the artifact it must publish.
 
@@ -142,6 +179,10 @@ class ReviewerConfig:
     It is substituted into the argv template and it must appear on its own line
     in the published artifact, so one reviewer's post can never be read back as
     another's.
+
+    With a ``relay``, the lane itself is credential-free: it writes its artifact
+    to ``{artifact_file}`` and the relay publishes it. Without one, the lane
+    publishes for itself, which is the older path and still supported.
     """
 
     name: str
@@ -151,6 +192,7 @@ class ReviewerConfig:
     role: str
     timeout: float | None = None
     env: LaneEnv = LaneEnv()
+    relay: RelayConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -203,9 +245,17 @@ class RunConfig:
 
         The budgets are the ones that matter operationally: a trusted agent cut
         off mid-verification looks exactly like a hang, and that misreading is
-        what the two-cycle loop pays for.
+        what the two-cycle loop pays for. An omitted budget is the other end of
+        the same problem — nothing will ever end that lane — so it is said out
+        loud here rather than quietly capped somewhere the report cannot see.
         """
         notes: list[str] = []
+        for lane, timeout in self._budgets():
+            if timeout is None:
+                notes.append(
+                    f"{lane} has no timeout, so nothing but the lane itself will ever end it; "
+                    "the run log will report its budget as unbounded"
+                )
         if self.builder.timeout is not None and self.builder.timeout < REALISTIC_BUILDER_BUDGET:
             notes.append(
                 f"builder timeout is {self.builder.timeout:.0f}s; a trusted builder that reads "
@@ -219,6 +269,22 @@ class RunConfig:
                     f"exact-head review usually needs {REALISTIC_REVIEWER_BUDGET:.0f}s or more"
                 )
         return tuple(notes)
+
+    def _budgets(self) -> tuple[tuple[str, float | None], ...]:
+        """Every lane that runs a child, and the budget it will actually get."""
+        return (
+            ("builder", self.builder.timeout),
+            *((f"gate {gate.name!r}", gate.timeout) for gate in self.gates),
+            *(
+                (f"reviewer {reviewer.name!r}", reviewer.timeout)
+                for reviewer in self.reviewers
+            ),
+            *(
+                (f"reviewer {reviewer.name!r} relay", reviewer.relay.timeout)
+                for reviewer in self.reviewers
+                if reviewer.relay is not None
+            ),
+        )
 
     @classmethod
     def load(cls, path: Path) -> RunConfig:
@@ -388,14 +454,58 @@ def _reviewer(item: object, index: int) -> ReviewerConfig:
             f"reviewers[{index}].artifact_signature must be a distinctive string to read back",
             evidence={"artifact_signature": signature},
         )
+    argv = validate_argv(item.get("argv"), what=f"reviewers[{index}].argv")
+    env = _lane_env(item, what=f"reviewers[{index}]")
+    relay = _relay(item.get("relay"), what=f"reviewers[{index}].relay")
+    if relay is not None:
+        # The handoff only works if both halves are handed the file: a reviewer
+        # with nowhere to write, or a relay with nothing to post, would fail at
+        # readback with no way to tell which half was misconfigured.
+        if not any(_ARTIFACT_FILE in part for part in argv):
+            raise ConfigError(
+                f"reviewers[{index}] has a relay but its argv never receives "
+                f"{_ARTIFACT_FILE}, so the lane has nowhere to prepare its artifact",
+                evidence={"reviewer": name},
+            )
+        if not any(_ARTIFACT_FILE in part for part in relay.argv):
+            raise ConfigError(
+                f"reviewers[{index}].relay argv never receives {_ARTIFACT_FILE}, "
+                "so it has no prepared artifact to publish",
+                evidence={"reviewer": name},
+            )
+        # A relayed lane is the credential-free one. Naming a token for it in
+        # the config contradicts the lifecycle rather than tightening it.
+        for variable, _ in env.set:
+            if variable in CREDENTIAL_ENV:
+                raise ConfigError(
+                    f"reviewers[{index}] uses the relay lifecycle, so it runs without a "
+                    f"GitHub credential; remove {variable} from its env and let the relay publish",
+                    evidence={"reviewer": name, "name": variable},
+                )
     return ReviewerConfig(
         name=name,
-        argv=validate_argv(item.get("argv"), what=f"reviewers[{index}].argv"),
+        argv=argv,
         artifact_author=author,
         artifact_signature=signature.strip(),
         role=role,
         timeout=_timeout(item, what=f"reviewers[{index}]"),
-        env=_lane_env(item, what=f"reviewers[{index}]"),
+        env=env,
+        relay=relay,
+    )
+
+
+def _relay(item: object, *, what: str) -> RelayConfig | None:
+    if item is None:
+        return None
+    if not isinstance(item, Mapping):
+        raise ConfigError(f"{what} must be an object")
+    unknown = sorted(set(item) - _RELAY_KEYS)
+    if unknown:
+        raise ConfigError(f"{what} has unknown keys", evidence={"unknown_keys": unknown})
+    return RelayConfig(
+        argv=validate_argv(item.get("argv"), what=f"{what}.argv"),
+        timeout=_timeout(item, what=what),
+        env=_lane_env(item, what=what),
     )
 
 
@@ -482,6 +592,7 @@ __all__ = [
     "BuilderConfig",
     "GateConfig",
     "LaneEnv",
+    "RelayConfig",
     "ReviewerConfig",
     "RunConfig",
 ]

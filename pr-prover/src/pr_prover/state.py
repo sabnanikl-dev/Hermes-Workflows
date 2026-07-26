@@ -142,7 +142,14 @@ class RunState:
         )
 
     def save(self) -> None:
-        """Write the state file atomically."""
+        """Write the state file atomically, or fail closed with the reason.
+
+        This file is how the attempt cap survives a restart, so a directory that
+        is really a file, a read-only parent, a full disk, or a replacement that
+        cannot complete is unexpected state — not an exception to let escape. It
+        reaches the caller as :class:`StateError`, which is what turns it into
+        the documented needs-Karan report with evidence instead of a traceback.
+        """
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "repo": self.repo,
@@ -152,10 +159,25 @@ class RunState:
             "corrective_rerun_attempts": list(self.corrective_rerun_attempts),
             "outcome": self.outcome,
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, self.path)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            os.replace(temporary, self.path)
+        except OSError as exc:
+            _discard(temporary)
+            raise StateError(
+                f"could not persist the run state file: {exc}",
+                evidence={
+                    "state_file": str(self.path),
+                    "temp_file": str(temporary),
+                    "error": type(exc).__name__,
+                    "attempt": self.attempt,
+                    "outcome": self.outcome,
+                },
+            ) from exc
 
     # -- invariants -------------------------------------------------------
     @property
@@ -197,6 +219,14 @@ def _is_full_sha(value: str) -> bool:
     return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
 
 
+def _discard(path: Path) -> None:
+    """Drop a half-written temporary. Best effort: the real failure is the news."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 class RunLock:
     """A run-exists lockfile. Contention stops the run; it never takes over."""
 
@@ -232,14 +262,30 @@ class RunLock:
         self._held = True
         return self
 
-    def __exit__(self, *_exc: object) -> None:
+    def __exit__(self, exc_type: object = None, *_rest: object) -> None:
         if not self._held:
             return
         self._held = False
         try:
             self.path.unlink()
         except FileNotFoundError:
-            pass
+            return
+        except OSError as exc:
+            if exc_type is not None:
+                # Something is already failing closed and that reason is the one
+                # worth keeping; a lock this run could not release is reported
+                # by the next run refusing to start.
+                return
+            raise StateError(
+                f"could not release the run lockfile: {exc}",
+                evidence={
+                    "lock_file": str(self.path),
+                    "error": type(exc).__name__,
+                    "resolution": (
+                        "confirm no other run is active, then remove the lockfile by hand"
+                    ),
+                },
+            ) from exc
 
     def _peek(self) -> str:
         """Read the existing lock for evidence only; it is never used to decide.
