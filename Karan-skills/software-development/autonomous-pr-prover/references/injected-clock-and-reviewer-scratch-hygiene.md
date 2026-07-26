@@ -32,11 +32,11 @@ Required regressions for **each gate layer** that consumes the clock:
 4. Tests assert positive error/action counts, not vacuous predicates such as `array.every(...)` on an empty array.
 5. Mutation-check the guard when practical: reverting `Number.isFinite` to a type-only check must make the regression fail.
 
-Reviewer prompts should explicitly inspect clock injection/default behavior whenever a PR adds time-dependent test seams.
+Clock injection and default behavior deserve explicit inspection whenever a PR adds time-dependent test seams; a seam only the tests exercise is exactly where a fail-open slips through.
 
 ## Reviewer temporary-file hygiene
 
-External reviewer CLIs may create a Markdown body file before running `gh pr comment`. If the prompt does not constrain the path, they may leave untracked `.reviewer-*` files inside the product worktree.
+External reviewer CLIs may create a Markdown body file before publishing a comment. If the prompt does not constrain the path, they may leave untracked `.reviewer-*` files inside the product worktree.
 
 Reviewer prompt rule:
 
@@ -44,11 +44,10 @@ Reviewer prompt rule:
 Write any review/comment body file under /tmp (or the OS temp directory), never inside the repository.
 ```
 
-After every reviewer exits:
+After a lane exits:
 
-1. Read back the signed GitHub artifact.
-2. Run `git status --short --branch` in the bound worktree.
-3. Remove only clearly reviewer-generated scratch files after confirming their provenance.
-4. Do not begin the builder fix lane until the worktree is clean and current HEAD still equals the PR `headRefOid`.
+1. Run `git status --short --branch` in the bound worktree.
+2. Remove only clearly lane-generated scratch files, and only after confirming their provenance.
+3. Treat an unclean worktree as a stop condition, not as something to commit around.
 
-This prevents reviewer bookkeeping from contaminating the builder diff or being accidentally committed under Claude provenance.
+This prevents reviewer bookkeeping from contaminating the builder diff or being accidentally committed under builder provenance.

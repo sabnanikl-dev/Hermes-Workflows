@@ -38,6 +38,6 @@ Fixtures for public copy, reviews, testimonials, case studies, or client claims 
 - Use `example.com` / fixture IDs like `fixture/not-a-real-...`.
 - Do not include approval, consent, or source-authenticity claims unless they are true and evidenced.
 
-## PR-bus discipline for terminal-only reviewer findings
+## Terminal-only reviewer findings
 
-If a reviewer CLI returns blocking findings only in terminal output, post a compact blocker capsule to the PR before sending the fix lane. This preserves the PR as the coordination bus and gives the builder/fix lane a live GitHub source to read. After the fix, post a closeout comment with the head SHA and verification commands.
+If a checker or reviewer CLI returns blocking findings only in its terminal output, those findings are not durable evidence and nothing downstream can read them. Capture the exact command, exit code, and affected contract so the finding survives outside a transcript; where that evidence is published and read back is `pr-prover`'s job, not this reference's.

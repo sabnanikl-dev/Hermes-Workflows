@@ -41,14 +41,12 @@ If a generated evidence note changes, update the producer template in the same c
 - complete exact-tuple/four-pass items support the separately reviewed enablement gate;
 - overall `run.status: partial` remains honest and does not itself grant enablement.
 
-## Review-loop closeout
+## Sweep closeout
 
-A broad first reconciliation often leaves one narrow generated or handoff claim behind. Before current-head A/B re-review:
+A broad first reconciliation often leaves one narrow generated or handoff claim behind. Before the reconciliation can be called complete:
 
 1. run a full-branch stale-token sweep;
-2. inspect the live PR body separately (it is not in the git search);
-3. verify local HEAD = remote branch = PR head;
-4. rerun determinism/validator/browser gates;
-5. require both role-signed reviews on the new exact head.
+2. inspect the live PR body separately — it is not in the git search;
+3. rerun the determinism/validator/browser gates that consume the evidence.
 
-Old request-changes reviews remain useful audit history but cannot count against or approve the new head. Final merge-readiness requires current-head A/B outcomes and no unresolved current review threads.
+Old change-request artifacts remain useful audit history but cannot count for or against a new head; the head is re-proved, not re-argued.

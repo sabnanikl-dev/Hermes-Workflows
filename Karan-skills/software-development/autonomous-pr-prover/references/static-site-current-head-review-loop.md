@@ -4,8 +4,8 @@ Use this reference when proving an existing static-site / SEO PR merge-ready aft
 
 ## Patterns that worked
 
-- Treat public copy blockers as a **class**, not a single line. After Claude fixes the cited files, run a targeted sweep across PR-changed customer-visible pages for the same phrases before re-review. Example patterns: `approved public`, `approved rental`, `approved starting`, `inside the approved scope`, `public rental copy`, `approved details`, plus a broader `approv` sweep to separate visible customer copy from docs/developer comments.
-- If the sweep finds a residual same-class leak, send it back to the Claude fix lane as part of the same fix cycle. Keep the prompt pointer-first when possible, but include the precise residual finding when Hermes discovered it after the original live review.
+- Treat public copy blockers as a **class**, not a single line. Once the cited files are fixed, the same phrases still have to be swept across every PR-changed customer-visible page before the class can be called closed. Example patterns: `approved public`, `approved rental`, `approved starting`, `inside the approved scope`, `public rental copy`, `approved details`, plus a broader `approv` sweep to separate visible customer copy from docs/developer comments.
+- If the sweep finds a residual same-class leak, it belongs to the open blocker set: name the precise residual finding, since it was discovered after the original live review and no reviewer artifact carries it yet.
 - For static SEO pages, combine normal repo gates with small deterministic probes:
   - each new route returns HTTP 200 from a local static server;
   - exactly one `<h1>`;
@@ -18,10 +18,10 @@ Use this reference when proving an existing static-site / SEO PR merge-ready aft
 
 ## Current-head review closeout
 
-- A fix commit makes prior approvals stale. Re-run Reviewer A and B on the new head and verify their signed reviews by `commit_id`, not only `reviewDecision` or `latestReviews`.
-- If the same reviewer GitHub account posts both A and B reviews, `latestReviews` may collapse or hide role separation. Read the full reviews API and filter by both current `commit_id` and role signature lines.
-- A prior `CHANGES_REQUESTED` on an old head can remain in review history; do not treat it as current if both reviewer roles have signed `APPROVED` reviews on the current head and review threads are resolved/absent.
-- Non-blocking follow-ups called out by reviewers do not block merge-ready status, but include them in the final report so Karan understands what remains optional.
+- A fix commit makes every prior pass stale. The outcome is re-proved on the new exact head by `pr-prover`; a static-site PR gets no shortcut around that.
+- When one reviewer account carries more than one lane, a collapsed account-level summary can hide role separation. Judge each artifact by its declared role, verdict, and exact head.
+- A change-request artifact against an old head is audit history, not a current-head blocker.
+- The copy sweep is the part that is easy to skip and expensive to miss: a same-class residual leak on an unchanged-looking page is still a current-head blocker.
 
 ## Example public-copy sweep
 
