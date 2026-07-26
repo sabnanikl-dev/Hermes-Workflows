@@ -42,11 +42,16 @@ for required in "$role" "$repo" "$pr" "$head" "$worktree" "$artifact_file"; do
 done
 
 # This lane reviews; it never publishes. A credential reaching it means the
-# lifecycle was misconfigured, and running anyway would hide that.
-if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ]; then
-	echo "$0: a GitHub credential reached the reviewer lane; the relay publishes, not this" >&2
-	exit 78
-fi
+# lifecycle was misconfigured, and running anyway would hide that. The names
+# are the same four pr-prover strips from the lane's environment (CREDENTIAL_ENV
+# in reviewers.py); checking only some of them would let the rest through.
+for name in GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN; do
+	eval "value=\${$name:-}"
+	if [ -n "$value" ]; then
+		echo "$0: a GitHub credential ($name) reached the reviewer lane; the relay publishes, not this" >&2
+		exit 78
+	fi
+done
 
 [ -d "$worktree" ] || { echo "$0: worktree is not a directory: $worktree" >&2; exit 66; }
 

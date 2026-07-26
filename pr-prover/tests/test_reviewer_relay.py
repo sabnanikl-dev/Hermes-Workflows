@@ -40,6 +40,7 @@ from pr_prover.commands import SubprocessRunner, validate_argv
 from pr_prover.config import RunConfig
 from pr_prover.github import Comment, PullRequest, ReviewThread
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN, ProverLoop
+from pr_prover.reviewers import CREDENTIAL_ENV
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
 
 ADAPTER = Path(__file__).resolve().parents[1] / "scripts" / "codex-reviewer.sh"
@@ -389,8 +390,8 @@ class ShippedAdapterTests(unittest.TestCase):
 
     def adapter(self, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         environment = dict(os.environ)
-        environment.pop("GH_TOKEN", None)
-        environment.pop("GITHUB_TOKEN", None)
+        for name in CREDENTIAL_ENV:
+            environment.pop(name, None)
         environment.update(
             {
                 "PR_PROVER_CODEX": str(self.codex),
@@ -436,12 +437,39 @@ class ShippedAdapterTests(unittest.TestCase):
         self.assertIn("You have no GitHub credential", prompt.replace("\n", " "))
 
     def test_it_refuses_to_run_with_a_github_credential_in_its_environment(self) -> None:
-        for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        """Every name the lifecycle calls a credential, not just the first two.
+
+        ``CREDENTIAL_ENV`` is what pr-prover strips from the lane; an adapter
+        that rejects a subset of it lets a real credential reach Codex while
+        still claiming the lane is credential-free.
+        """
+        self.assertEqual(
+            CREDENTIAL_ENV,
+            ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"),
+        )
+        for name in CREDENTIAL_ENV:
             with self.subTest(name=name):
                 result = self.adapter(env={name: "ghp_" + "x" * 36})
-                self.assertEqual(result.returncode, 78)
+                self.assertEqual(result.returncode, 78, result.stderr)
                 self.assertIn("credential", result.stderr)
+                self.assertIn(name, result.stderr)
                 self.assertFalse(self.prompt.exists(), "Codex was launched anyway")
+
+    def test_an_empty_credential_variable_is_not_a_credential(self) -> None:
+        """Exported-but-empty is how a shell clears one; it must not fail closed."""
+        result = self.adapter(env={name: "" for name in CREDENTIAL_ENV})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.prompt.exists(), "Codex was not launched")
+
+    def test_a_credential_leaves_a_prepared_artifact_untouched(self) -> None:
+        """The refusal happens before the adapter does anything at all."""
+        self.artifact.write_text("an earlier artifact\n", encoding="utf-8")
+
+        result = self.adapter(env={"GITHUB_ENTERPRISE_TOKEN": "ghp_" + "x" * 36})
+
+        self.assertEqual(result.returncode, 78)
+        self.assertEqual(self.artifact.read_text(encoding="utf-8"), "an earlier artifact\n")
 
     def test_a_missing_argument_is_a_usage_error_not_a_review(self) -> None:
         result = subprocess.run(

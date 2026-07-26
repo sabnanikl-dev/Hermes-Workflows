@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -24,6 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from _support import (
+    BRANCH,
     HEAD_A,
     HEAD_B,
     HEAD_C,
@@ -42,10 +44,18 @@ from _support import (
     reviewer_output,
 )
 from pr_prover import cli
-from pr_prover.commands import EXITED, TIMED_OUT, Progress, SubprocessRunner, validate_argv
+from pr_prover.commands import (
+    EXITED,
+    TIMED_OUT,
+    Progress,
+    SubprocessRunner,
+    render_argv,
+    validate_argv,
+)
 from pr_prover.config import REALISTIC_BUILDER_BUDGET, LaneEnv, RunConfig
 from pr_prover.errors import CommandContractError, ConfigError
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop
+from pr_prover.reviewers import HEAD_PREFIX, head_binding
 from pr_prover import state as state_module
 from pr_prover.report import as_dict
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
@@ -844,6 +854,30 @@ class ShippedConfigTests(unittest.TestCase):
         config = RunConfig.from_mapping(payload, base_dir=self.tmp)
         self.assertTrue(any("builder timeout" in note for note in config.advisories()))
 
+    def test_the_example_builder_prompt_asks_for_the_canonical_head_declaration(self) -> None:
+        """The prompt's comment format is the one readback actually accepts.
+
+        ``check-config`` cannot see this: a prompt is opaque text to it. A
+        prompt that asks for ``HEAD: <sha>`` renders a builder that succeeds at
+        its work and is then stopped with ``readback-mismatch`` after pushing.
+        """
+        prompt = self.example().builder.argv[-1]
+        standalone = [line.strip() for line in prompt.splitlines() if line.strip()]
+
+        declarations = [line for line in standalone if line.startswith(HEAD_PREFIX)]
+        self.assertEqual(len(declarations), 1, declarations)
+        # It asks for the pushed commit, not the head the builder started from.
+        self.assertIn("pushed", declarations[0])
+        # And no line asks for the non-canonical form readback refuses.
+        self.assertEqual([line for line in standalone if line.startswith("HEAD:")], [])
+        # The signature the loop compares against is still dictated verbatim.
+        self.assertIn(self.example().builder.signature, prompt)
+        # The final stdout marker the router parses is unchanged.
+        self.assertTrue(
+            standalone[-1].startswith("DONE: PR={pr} BRANCH={branch} STATUS=success|failure"),
+            standalone[-1],
+        )
+
     def test_check_config_prints_the_identities_it_will_hold_lanes_to(self) -> None:
         payload = json.loads((self.examples / "run.example.json").read_text(encoding="utf-8"))
         payload["source_repo"] = str(self.clone)
@@ -863,6 +897,142 @@ class ShippedConfigTests(unittest.TestCase):
         # Who the artifact must come from, and which half actually posts it.
         self.assertIn("relays as the-reviewer-login via gh", printed)
         self.assertIn("builder: comments as the-builder-login", printed)
+
+
+# -- the shipped builder prompt, end to end against readback ---------------
+_ANGLE_PLACEHOLDER = re.compile(r"<[^>]*>")
+
+
+class ShippedBuilderCommentContractTests(TrustedLaneHarness):
+    """A builder that obeys the shipped prompt must survive readback.
+
+    The static config check cannot prove this, and neither can reading the
+    prompt: only running it can. So the real shipped builder block — prompt,
+    signature, and comment author verbatim — drives a real loop here, the lane
+    posts exactly the comment that prompt describes, and the push has to be
+    read back. The declaration is lifted out of the *rendered prompt* rather
+    than restated in the test, so a prompt that drifts back to a form readback
+    refuses fails here instead of shipping.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        examples = Path(__file__).resolve().parents[1] / "examples"
+        payload = json.loads((examples / "run.example.json").read_text(encoding="utf-8"))
+        block = dict(payload["builder"])
+        # Only the executable is swapped, for a lane the scripted runner can
+        # service. The prompt, the signature, and the identity all stand.
+        block["argv"] = ["lane-builder", *block["argv"][1:]]
+        self.builder_block = block
+        self.author = block["comment_author"]
+
+    def rendered_prompt(self) -> str:
+        """The prompt as the loop itself would hand it to the builder."""
+        values = {
+            "repo": "example/repo",
+            "owner": "example",
+            "name": "repo",
+            "pr": "7",
+            "branch": BRANCH,
+            "base": "main",
+            "head": HEAD_A,
+            "worktree": str(self.tmp / "worktrees" / "attempt-1"),
+            "blockers_file": str(self.tmp / "blockers.json"),
+            "attempt": "1",
+            "mode": "fix",
+        }
+        return render_argv(self.builder_block["argv"], values, what="builder")[-1]
+
+    def instructed_head_line(self, pushed: str) -> str:
+        """The one declaration the rendered prompt asks for, filled in."""
+        declarations = [
+            line.strip()
+            for line in self.rendered_prompt().splitlines()
+            if line.strip().startswith(HEAD_PREFIX)
+        ]
+        self.assertEqual(len(declarations), 1, declarations)
+        return _ANGLE_PLACEHOLDER.sub(pushed, declarations[0])
+
+    def comment(self, pushed: str, *, head_line: str | None = None, extra: str = "") -> str:
+        """The comment a builder following the shipped prompt would post."""
+        line = self.instructed_head_line(pushed) if head_line is None else head_line
+        body = [
+            "Fixed the frozen blockers; the repository's own verification passed.",
+            "",
+            "---",
+            self.builder_block["signature"],
+            "PR: #7",
+        ]
+        body.extend(part for part in (line, extra) if part)
+        return "\n".join(body) + "\n"
+
+    def run_with(self, body: str):
+        """One cycle: reviewers block, the builder pushes and posts ``body``."""
+        loop = self.build(builder=self.builder_block)
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=body, author=self.author),
+        )
+        self.review_round(HEAD_B)
+        return loop.run()
+
+    def assert_refused(self, result, note: str) -> None:
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        rejected = result.evidence["evidence"]["rejected_head_declarations"]
+        self.assertEqual(len(rejected), 1, rejected)
+        self.assertIn(note, rejected[0])
+
+    def test_the_comment_the_shipped_prompt_asks_for_is_read_back(self) -> None:
+        body = self.comment(HEAD_B)
+        self.assertTrue(head_binding(body, head=HEAD_B).ok, body)
+
+        result = self.run_with(body)
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.head, HEAD_B)
+        self.assertIn(f"push verified: {HEAD_A} -> {HEAD_B} (1 new commit(s))", result.events)
+        self.assertTrue(
+            any("fix comment" in event and HEAD_B in event for event in result.events),
+            result.events,
+        )
+
+    def test_the_signature_line_form_that_shipped_before_is_still_refused(self) -> None:
+        """``PR: #7 | HEAD: <sha>`` is prose to the parser, not a declaration."""
+        result = self.run_with(self.comment(HEAD_B, head_line=f"PR: #7 | HEAD: {HEAD_B}"))
+
+        self.assert_refused(result, "carries no standalone HEAD=")
+
+    def test_a_comment_with_no_declaration_is_refused(self) -> None:
+        result = self.run_with(self.comment(HEAD_B, head_line=""))
+
+        self.assert_refused(result, "carries no standalone HEAD=")
+
+    def test_a_repeated_declaration_is_refused(self) -> None:
+        result = self.run_with(
+            self.comment(HEAD_B, extra=self.instructed_head_line(HEAD_B))
+        )
+
+        self.assert_refused(result, "carries 2 standalone HEAD= lines")
+
+    def test_two_conflicting_declarations_are_refused(self) -> None:
+        result = self.run_with(
+            self.comment(HEAD_B, extra=self.instructed_head_line(HEAD_C))
+        )
+
+        self.assert_refused(result, "carries 2 standalone HEAD= lines")
+
+    def test_a_declaration_of_another_head_is_refused(self) -> None:
+        result = self.run_with(self.comment(HEAD_B, head_line=f"HEAD={HEAD_C}"))
+
+        self.assert_refused(result, "not the head this run is bound to")
+
+    def test_a_declaration_that_is_not_a_full_sha_is_refused(self) -> None:
+        result = self.run_with(self.comment(HEAD_B, head_line=f"HEAD={HEAD_B[:12]}"))
+
+        self.assert_refused(result, "not a full 40-hex lowercase SHA")
 
 
 if __name__ == "__main__":  # pragma: no cover

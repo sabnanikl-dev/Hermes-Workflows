@@ -379,6 +379,7 @@ def make_config(
     comment_author: str = BUILDER_LOGIN,
     reviewer_author: str = REVIEWER_LOGIN,
     branch: str | None = BRANCH,
+    builder: Mapping[str, object] | None = None,
     builder_env: Mapping[str, object] | None = None,
     reviewer_env: Mapping[str, object] | None = None,
 ) -> RunConfig:
@@ -422,6 +423,10 @@ def make_config(
     }
     if branch is None:
         payload.pop("branch")
+    if builder is not None:
+        # A whole builder block from elsewhere — the shipped example's, say —
+        # so a test can drive the real prompt and signature through this loop.
+        payload["builder"] = dict(builder)
     if builder_env:
         payload["builder"].update(builder_env)  # type: ignore[union-attr]
     if reviewer_env:
