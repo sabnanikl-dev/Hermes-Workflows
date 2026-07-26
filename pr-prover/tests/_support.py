@@ -60,7 +60,7 @@ def fix_comment(head: str) -> str:
 # -- fakes ----------------------------------------------------------------
 @dataclass
 class FakeRemote:
-    """The remote branch head plus the PR conversation, in one place."""
+    """The remote branch head, the PR commit list, and the PR conversation."""
 
     head: str = HEAD_A
     branch: str = BRANCH
@@ -69,10 +69,17 @@ class FakeRemote:
     state: str = "OPEN"
     is_draft: bool = True
     comments: list[Comment] = field(default_factory=list)
+    commit_oids: list[str] = field(default_factory=list)
     _next_comment_id: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.commit_oids:
+            self.commit_oids = [self.head]
 
     def push(self, head: str, *, comment: str | None = None, author: str = BUILDER_LOGIN) -> None:
         self.head = head
+        if head not in self.commit_oids:
+            self.commit_oids.append(head)
         if comment is not None:
             self.comment(comment, author=author)
 
@@ -105,10 +112,15 @@ class FakeGitHub:
         self.remote = remote
         self.pull_request_calls = 0
         self.comment_calls = 0
+        self.commit_calls = 0
 
     def pull_request(self, repo: str, number: int) -> PullRequest:
         self.pull_request_calls += 1
         return self.remote.pull_request()
+
+    def commits(self, repo: str, number: int) -> tuple[str, ...]:
+        self.commit_calls += 1
+        return tuple(self.remote.commit_oids)
 
     def comments(self, repo: str, number: int) -> tuple[Comment, ...]:
         self.comment_calls += 1
@@ -188,6 +200,10 @@ class FakeRunner:
         self.calls: list[Call] = []
         self.worktree_status = ""
         self.fetch_failures = 0
+        # ``git rev-parse HEAD`` inside a run-owned worktree. ``None`` models a
+        # builder that really did commit and push from that worktree, so the
+        # local HEAD follows the remote; a test sets it to pin a stale one.
+        self.worktree_head: str | None = None
 
     def run(
         self,
@@ -213,6 +229,9 @@ class FakeRunner:
                 self.fetch_failures -= 1
                 return CommandResult(argv=argv, returncode=1, stdout="", stderr="fetch refused")
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
+        if rest[0] == "rev-parse" and rest[1] == "HEAD":
+            head = self.remote.head if self.worktree_head is None else self.worktree_head
+            return CommandResult(argv=argv, returncode=0, stdout=head + "\n", stderr="")
         if rest[0] == "rev-parse":
             return CommandResult(argv=argv, returncode=0, stdout=self.remote.head + "\n", stderr="")
         if rest[0] == "worktree" and rest[1] == "add":
@@ -241,6 +260,8 @@ def make_config(
     visual_qa_required: bool = False,
     comment_author: str = BUILDER_LOGIN,
     branch: str | None = BRANCH,
+    state_file: str | None = None,
+    lock_file: str | None = None,
 ) -> RunConfig:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -250,8 +271,8 @@ def make_config(
         "base": "main",
         "source_repo": str(source_repo),
         "worktree_root": str(tmp / "worktrees"),
-        "state_file": str(tmp / "state.json"),
-        "lock_file": str(tmp / "run.lock"),
+        "state_file": state_file or str(tmp / "state.json"),
+        "lock_file": lock_file or str(tmp / "run.lock"),
         "visual_qa_required": visual_qa_required,
         "gates": list(gates),
         "reviewers": [

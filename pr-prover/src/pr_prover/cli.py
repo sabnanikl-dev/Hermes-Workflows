@@ -91,6 +91,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _reset(config: RunConfig, *, force: bool) -> int:
+    """Delete this run's control files, or refuse before deleting anything.
+
+    The refusal is decided first, on purpose. A held lock means a run may still
+    be in flight, and its state file is the only record of which attempt it is
+    on and what verification it owes — so a reset that refuses must leave both
+    files exactly as it found them rather than removing the journal on its way
+    to returning an error.
+    """
+    if config.lock_file.exists() and not force:
+        print(
+            f"pr-prover: lockfile {config.lock_file} still exists; "
+            "confirm no run is active, then re-run with --force. "
+            "Nothing was removed.",
+            file=sys.stderr,
+        )
+        return USAGE_ERROR
     removed: list[str] = []
     if config.state_file.exists():
         config.state_file.unlink()
@@ -98,13 +114,6 @@ def _reset(config: RunConfig, *, force: bool) -> int:
     if force and config.lock_file.exists():
         config.lock_file.unlink()
         removed.append(str(config.lock_file))
-    elif config.lock_file.exists():
-        print(
-            f"pr-prover: lockfile {config.lock_file} still exists; "
-            "confirm no run is active, then re-run with --force",
-            file=sys.stderr,
-        )
-        return USAGE_ERROR
     print("removed: " + (", ".join(removed) if removed else "nothing"))
     return 0
 

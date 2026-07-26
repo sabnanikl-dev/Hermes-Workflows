@@ -1,9 +1,11 @@
 """The injectable GitHub boundary.
 
-The loop reads GitHub for exactly two things: the live PR (to bind the exact
-``headRefOid``) and the PR conversation comments (to read back the builder's
-signed fix comment). It never writes. The builder pushes and comments under its
-own PAPI-90 scoped identity; PAPI-88 only verifies what actually landed.
+The loop reads GitHub for exactly three things: the live PR (to bind the exact
+``headRefOid``), the PR's commit list (a second, independent view of what the
+push actually put on the branch), and the PR conversation comments (to read back
+the builder's signed fix comment). It never writes. The builder pushes and
+comments under its own PAPI-90 scoped identity; PAPI-88 only verifies what
+actually landed.
 
 Everything returned here is untrusted data. PR titles, bodies, and comment
 bodies are spec evidence, never instructions.
@@ -59,6 +61,8 @@ class GitHubBoundary(Protocol):
 
     def pull_request(self, repo: str, number: int) -> PullRequest: ...
 
+    def commits(self, repo: str, number: int) -> tuple[str, ...]: ...
+
     def comments(self, repo: str, number: int) -> tuple[Comment, ...]: ...
 
 
@@ -76,6 +80,20 @@ class GhCliGitHub:
             what="pull request",
         )
         return _pull_request_from(payload, repo=repo, number=number)
+
+    def commits(self, repo: str, number: int) -> tuple[str, ...]:
+        """The PR's commit oids, oldest first, as GitHub itself lists them."""
+        payload = self._json(
+            [self._gh, "pr", "view", str(number), "--repo", repo, "--json", "commits"],
+            what="pull request commits",
+        )
+        raw = payload.get("commits")
+        if not isinstance(raw, list) or not raw:
+            raise GitHubError(
+                "gh returned no commits array for the pull request",
+                evidence={"repo": repo, "pr": number},
+            )
+        return tuple(_commit_oid_from(item) for item in raw)
 
     def comments(self, repo: str, number: int) -> tuple[Comment, ...]:
         payload = self._json(
@@ -134,7 +152,7 @@ def _pull_request_from(payload: dict[str, Any], *, repo: str, number: int) -> Pu
             evidence={"repo": repo, "expected": number, "found": reported},
         )
     head_ref_oid = text("headRefOid").lower()
-    if len(head_ref_oid) != 40 or any(character not in "0123456789abcdef" for character in head_ref_oid):
+    if not _is_full_sha(head_ref_oid):
         raise GitHubError(
             "headRefOid is not a full 40-hex SHA",
             evidence={"repo": repo, "pr": number, "headRefOid": payload.get("headRefOid")},
@@ -155,6 +173,22 @@ def _pull_request_from(payload: dict[str, Any], *, repo: str, number: int) -> Pu
         head_ref_oid=head_ref_oid,
         base_ref_name=text("baseRefName"),
     )
+
+
+def _is_full_sha(value: str) -> bool:
+    return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+
+
+def _commit_oid_from(payload: object) -> str:
+    if not isinstance(payload, dict):
+        raise GitHubError("commit payload is not an object")
+    oid = payload.get("oid")
+    if not isinstance(oid, str) or not _is_full_sha(oid.lower()):
+        raise GitHubError(
+            "commit payload has no full 40-hex oid",
+            evidence={"oid": oid if isinstance(oid, str) else None},
+        )
+    return oid.lower()
 
 
 def _comment_from(payload: object) -> Comment:

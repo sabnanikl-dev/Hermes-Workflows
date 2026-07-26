@@ -10,7 +10,8 @@ inspect live PR → bind exact headRefOid → verify remote head
   → exact-head Reviewer A/B → machine-readable verdicts
   → classify: blocking / non-blocking / false-positive / needs-karan
   → at most two isolated fix attempts (one corrective rerun each)
-  → verify push + read the signed fix comment back from GitHub
+  → agree marker + PR head + remote head + commit list + worktree HEAD
+  → read the signed fix comment back from GitHub
   → invalidate every prior verdict, inspect again
   → merge-ready | blocked | needs-karan, tied to the final exact head
 ```
@@ -48,6 +49,13 @@ tokens, and an unknown token fails the run rather than rendering literally:
 
 `builder.comment_author` is **required** and must be the exact GitHub login the
 builder comments under. See [Fix-comment readback](#fix-comment-readback).
+
+`state_file` and `lock_file` must resolve **outside** `source_repo`, and a path
+equal to or nested inside the clone is a configuration error. The run writes both
+while it is also asserting that the operational clone is never modified and that
+an attempt worktree is clean, so a control file living in that clone would
+contaminate the very tree being judged. Siblings and any other outside path are
+unaffected; `worktree_root` is held to the same rule where worktrees are created.
 
 The gate, reviewer, and builder commands themselves are supplied by the
 operator — the example's `./scripts/*-lane.sh` names are placeholders. PAPI-90
@@ -126,6 +134,27 @@ and immediately before a fix attempt opens**, and requires all of the PR number,
 the snapshot the work was measured against. Any difference is `stale-head`: the
 run reports nothing and spends no attempt on a head that has already moved.
 
+## Push agreement
+
+A builder's push is accepted only when five independent views of it agree:
+
+| View | Where it comes from | What it alone cannot prove |
+|---|---|---|
+| the `DONE:` marker | the builder lane's own output | anything — it is a claim |
+| the live PR head | `gh pr view` after the lane exits | that *this* attempt caused it |
+| the remote branch head | `git fetch` + `rev-parse` in the source clone | that *this* attempt caused it |
+| the PR commit list | `gh pr view --json commits` | that *this* attempt caused it |
+| the attempt worktree's local `HEAD` | `git rev-parse HEAD` in that exact worktree | that the push reached GitHub |
+
+The last row is the one an outside actor cannot move. An unrelated push to the
+branch shifts the PR head, the remote head, and the commit list together, so
+those three agreeing says only that *someone* pushed. A clean `git status`
+does not close the gap either: a worktree that committed nothing is clean too.
+So the attempt worktree's own `HEAD` is read explicitly and must equal the head
+that landed — a builder that pushed from somewhere else, or a worktree left
+sitting on the pre-attempt commit, is `stale-head` and the run stops rather than
+crediting the attempt with work it cannot account for.
+
 ## Fix-comment readback
 
 After a push is bound to exactly one new head, the builder's fix comment is read
@@ -147,10 +176,43 @@ is mandatory configuration rather than an optional tightening.
 ## State and locking
 
 One JSON state file holds a single attempt integer plus the head, the corrective
-reruns already spent, and the terminal outcome. One `O_EXCL` lockfile marks that
-a run exists. There is no PID inspection and no takeover path: if the lock is
-held, the run stops and asks. After confirming no run is active, remove it with
-`pr-prover reset --force`.
+reruns already spent, the terminal outcome, and the phase of the run. One
+`O_EXCL` lockfile marks that a run exists. There is no PID inspection and no
+takeover path: if the lock is held, the run stops and asks.
+
+### An interrupted attempt cannot be resumed into a clean result
+
+A fix attempt is not over when the builder exits — the push still has to be
+bound to one new head and the signed fix comment still has to be read back. The
+state file records `phase: "attempt-in-flight"` together with the pre-attempt
+head **before** the builder is invoked, and clears it only once that verification
+passes.
+
+So a run killed anywhere in that window restarts holding explicit proof that it
+owes work. It stops as `unexpected-state` before its first GitHub read, and the
+recorded head is left exactly as the interrupted attempt wrote it — the loop
+never re-inspects, rebinds itself to whatever head is live by then, and reports
+`merge-ready` for a push nothing verified. Confirm on the PR what that attempt
+actually did, then `pr-prover reset` before running again.
+
+### Reset refuses before it deletes
+
+`pr-prover reset` removes the state file; `--force` also removes the lockfile.
+An unforced reset that finds a lock decides the refusal **first** and removes
+nothing at all: a held lock may mean a run is still in flight, and its state file
+is the only record of which attempt it is on and what verification it owes.
+After confirming no run is active, `pr-prover reset --force` discards both.
+
+### Persistence fails closed
+
+Every filesystem step behind the state file — creating the parent, writing the
+temporary file, replacing the real one — is translated into `unexpected-state`
+with the stage that broke, and lockfile creation and release into
+`lock-contention`. An unusable control path (`/dev/null/state.json` and its
+relatives) is therefore a `needs-karan` report with evidence, never a traceback
+out of `ProverLoop.run()`. When the run is already stopping for another reason
+and *recording* that stop is what fails, the original reason is what gets
+reported; the save failure is noted in the run log rather than replacing it.
 
 ## What stops the run and asks Karan
 
@@ -182,6 +244,9 @@ bounded with explicit markers.
   cannot be removed.
 - The frozen blocker set is written under the OS temp directory, never inside a
   repository, so a builder's inputs cannot contaminate the diff.
+- The state file and the lockfile must live outside the operational clone, so
+  this run's own bookkeeping can never show up as a change to the tree it is
+  judging.
 - The loop never pushes, comments, approves, or merges. The builder pushes and
   comments under its own identity; this loop only verifies what landed.
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,13 +23,20 @@ from _support import (
     make_source_repo,
     reviewer_output,
 )
+from pr_prover.errors import StateError
 from pr_prover.findings import Finding
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop
-from pr_prover.state import MAX_ATTEMPTS, RunState
+from pr_prover.state import (
+    MAX_ATTEMPTS,
+    PHASE_ATTEMPT_IN_FLIGHT,
+    PHASE_IDLE,
+    RunState,
+)
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
 
 BLOCKER = ("blocking", "null-deref", "crashes on empty input")
 SECOND_BLOCKER = ("blocking", "bad-copy", "public copy contradicts the contract")
+DEV_NULL = Path("/dev/null")
 
 
 class LoopHarness(unittest.TestCase):
@@ -1116,6 +1124,290 @@ class LaneResultAgreementTests(LoopHarness):
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "builder-refusal")
         self.assertFalse(result.gates[0].passed)
+
+
+class InterruptedAttemptTests(LoopHarness):
+    """PAPI88-RESUME-READBACK: a killed attempt cannot be resumed into a clean result.
+
+    The reproduced bypass: the journal recorded ``attempt=1`` and the old head
+    but nothing about the verification that attempt still owed, so a restart
+    re-inspected, rebound itself to whatever head was live by then, and — with
+    the reviewers now passing — reported ``merge-ready`` having invoked no
+    builder and read no comment.
+    """
+
+    def crash_after_pushing(self) -> None:
+        self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+        raise KeyboardInterrupt("the run was killed mid-attempt")
+
+    def interrupted_run(self) -> None:
+        """Drive one real attempt that pushes and is then killed before verification."""
+        first = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=self.crash_after_pushing,
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            first.run()
+
+    def test_the_interrupted_attempt_is_journaled_as_owing_verification(self) -> None:
+        self.interrupted_run()
+        journal = self.state()
+        self.assertEqual(journal["phase"], PHASE_ATTEMPT_IN_FLIGHT)
+        self.assertEqual(journal["attempt"], 1)
+        self.assertEqual(journal["attempt_head"], HEAD_A)
+        self.assertEqual(journal["head"], HEAD_A)
+        self.assertIsNone(journal["outcome"])
+
+    def test_a_restart_cannot_reach_merge_ready_without_verifying_the_push(self) -> None:
+        self.interrupted_run()
+        # The world the restart wakes up in: the push already landed, the PR is
+        # on HEAD_B, and a fresh reviewer round on HEAD_B would come back clean.
+        second = self.build()
+        self.review_round(HEAD_B)
+        self.github.pull_request_calls = 0
+        self.github.comment_calls = 0
+        calls_before = len(self.runner.calls)
+
+        result = second.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "unexpected-state")
+        self.assertEqual(result.evidence["evidence"]["attempt_head"], HEAD_A)
+        self.assertEqual(result.evidence["evidence"]["attempt"], 1)
+        # The bypass measured exactly as it was reproduced: zero builder
+        # invocations and zero comment reads can no longer produce a verdict.
+        self.assertEqual(self.runner.calls[calls_before:], [])
+        self.assertEqual(self.github.comment_calls, 0)
+        self.assertEqual(self.github.pull_request_calls, 0)
+        self.assertFalse(self.script.exhausted, "no lane may run on a restart that owes verification")
+
+    def test_a_restart_leaves_the_old_head_evidence_intact(self) -> None:
+        self.interrupted_run()
+        second = self.build()
+        self.review_round(HEAD_B)
+
+        second.run()
+
+        journal = self.state()
+        self.assertEqual(journal["head"], HEAD_A, "the recorded head must not be rebound")
+        self.assertEqual(journal["attempt_head"], HEAD_A)
+        self.assertEqual(journal["phase"], PHASE_ATTEMPT_IN_FLIGHT)
+        self.assertEqual(journal["outcome"], NEEDS_KARAN)
+
+    def test_inspection_refuses_to_rebind_the_head_while_verification_is_owed(self) -> None:
+        """The guard sits on the write itself, not only at startup."""
+        loop = self.build()
+        state = RunState(
+            repo="example/repo", pr=7, path=self.tmp / "state.json", attempt=1, head=HEAD_A
+        )
+        state.begin_pending_verification(HEAD_A)
+        state.save()
+        self.remote.push(HEAD_B)
+
+        with self.assertRaises(StateError) as caught:
+            loop._inspect(state)
+
+        self.assertEqual(caught.exception.evidence["live_head"], HEAD_B)
+        self.assertEqual(state.head, HEAD_A)
+        self.assertEqual(self.state()["head"], HEAD_A)
+
+    def test_the_attempt_is_journaled_before_the_builder_is_invoked(self) -> None:
+        """The marker has to exist before the builder can push, or a crash hides it."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        during: dict = {}
+
+        def capture() -> None:
+            during.update(self.state())
+            self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+
+        self.script.add(
+            "lane-builder", builder_output(HEAD_B, addressed=["null-deref"]), after=capture
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(during["phase"], PHASE_ATTEMPT_IN_FLIGHT)
+        self.assertEqual(during["attempt_head"], HEAD_A)
+        self.assertEqual(during["attempt"], 1)
+
+    def test_a_verified_attempt_clears_the_pending_verification(self) -> None:
+        """The positive control: a completed attempt does not strand the next run."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        journal = self.state()
+        self.assertEqual(journal["phase"], PHASE_IDLE)
+        self.assertIsNone(journal["attempt_head"])
+        self.assertEqual(journal["attempt"], 1)
+
+
+class LocalHeadAgreementTests(LoopHarness):
+    """PAPI88-LOCAL-HEAD: the attempt worktree's own HEAD is part of push proof.
+
+    The reproduced bypass: the remote and the PR moved to HEAD_B while the
+    attempt worktree stayed on HEAD_A, and the loop reported ``merge-ready``
+    having never read that worktree's local ``HEAD`` once.
+    """
+
+    def attempt_round(self, *, after=None) -> None:
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=after or (lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))),
+        )
+
+    def test_a_clean_but_stale_attempt_worktree_fails_closed(self) -> None:
+        loop = self.build()
+        self.runner.worktree_head = HEAD_A
+        self.attempt_round()
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        evidence = result.evidence["evidence"]
+        self.assertEqual(evidence["local_head"], HEAD_A)
+        self.assertEqual(evidence["landed_head"], HEAD_B)
+        self.assertTrue(evidence["worktree_never_moved"])
+        self.assertEqual(self.runner.worktree_status, "", "the worktree was clean throughout")
+
+    def test_an_attempt_worktree_on_an_unrelated_commit_fails_closed(self) -> None:
+        loop = self.build()
+        self.runner.worktree_head = HEAD_C
+        self.attempt_round()
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        self.assertEqual(result.evidence["evidence"]["local_head"], HEAD_C)
+        self.assertFalse(result.evidence["evidence"]["worktree_never_moved"])
+
+    def test_the_local_head_is_read_in_the_exact_attempt_worktree(self) -> None:
+        """The green agreement case, and proof of where the read happened."""
+        loop = self.build()
+        self.attempt_round()
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        rev_parse = [
+            call
+            for call in self.runner.calls
+            if call.argv[0] == "git" and call.argv[3] == "rev-parse" and call.argv[4] == "HEAD"
+        ]
+        self.assertEqual(len(rev_parse), 1, "the attempt worktree's HEAD is read exactly once")
+        self.assertIn("attempt1", rev_parse[0].argv[2])
+        self.assertIn(
+            f"attempt worktree local HEAD agrees with the landed head {HEAD_B}", result.events
+        )
+
+    def test_the_pr_commit_list_must_end_at_the_landed_head(self) -> None:
+        def push_then_move_the_list() -> None:
+            self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+            self.remote.commit_oids.append(HEAD_C)
+
+        loop = self.build()
+        self.attempt_round(after=push_then_move_the_list)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "ambiguous-push")
+        self.assertEqual(result.evidence["evidence"]["last_listed_commit"], HEAD_C)
+        self.assertEqual(result.evidence["evidence"]["landed_head"], HEAD_B)
+
+    def test_a_pr_that_lists_no_commits_fails_closed(self) -> None:
+        def push_then_empty_the_list() -> None:
+            self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+            self.remote.commit_oids.clear()
+
+        loop = self.build()
+        self.attempt_round(after=push_then_empty_the_list)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "ambiguous-push")
+
+    def test_the_commit_list_is_read_back_on_a_clean_fix_cycle(self) -> None:
+        loop = self.build()
+        self.attempt_round()
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(self.github.commit_calls, 1)
+        self.assertIn(f"PR commit list ends at {HEAD_B} (2 commit(s))", result.events)
+
+
+class StatePersistenceFailClosedTests(LoopHarness):
+    """PAPI88-STATE-FAIL-CLOSED: run() keeps its 'never raises' promise."""
+
+    @unittest.skipUnless(DEV_NULL.exists(), "/dev/null is not available")
+    def test_an_unusable_state_file_returns_needs_karan_instead_of_raising(self) -> None:
+        """The Integration Auditor's probe: /dev/null/state.json escaped as OSError."""
+        loop = self.build(state_file=str(DEV_NULL / "state.json"))
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "unexpected-state")
+        self.assertEqual(result.evidence["evidence"]["stage"], "parent-directory")
+        self.assertEqual(result.exit_code, 2)
+
+    @unittest.skipUnless(DEV_NULL.exists(), "/dev/null is not available")
+    def test_an_unusable_lock_file_returns_needs_karan_instead_of_raising(self) -> None:
+        loop = self.build(lock_file=str(DEV_NULL / "run.lock"))
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lock-contention")
+
+    def test_a_failed_save_does_not_replace_the_reason_the_run_stopped(self) -> None:
+        """A secondary failure while recording the stop must not become the story."""
+        control = self.tmp / "control"
+        loop = self.build(state_file=str(control / "state.json"))
+
+        def drift_and_break_the_state_directory() -> None:
+            self.remote.push(HEAD_B)
+            shutil.rmtree(control)
+            control.write_text("no longer a directory\n", encoding="utf-8")
+
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
+        self.script.add(
+            "lane-reviewer-B", reviewer_output(HEAD_A), after=drift_and_break_the_state_directory
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head", "the save failure must not mask the drift")
+        self.assertTrue(
+            any("could not be recorded" in event for event in result.events),
+            "the unrecordable outcome is still reported as an event",
+        )
 
 
 class ResumeTests(LoopHarness):

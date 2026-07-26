@@ -12,17 +12,18 @@ One pass is::
 and then either reports, or opens a bounded fix attempt::
 
     fresh isolated worktree from the verified remote head
+    record that this attempt owes push and comment verification
     builder lane over the frozen blocker set
     at most one corrective rerun inside that same open attempt
     verify the push and read the signed fix comment back from GitHub
-    invalidate every prior verdict and inspect again
+    clear the pending verification, invalidate every prior verdict, inspect again
 
 At most two attempts ever open. A third is structurally unreachable: the only
 increment lives behind :meth:`RunState.begin_attempt`, which refuses past the
 cap, and the corrective rerun completes an open attempt rather than creating a
 new one.
 
-Three rules hold the loop's conclusions to what is still true:
+Four rules hold the loop's conclusions to what is still true:
 
 **Freshness.** Gates and reviewer lanes take minutes to hours, and nothing stops
 a push, a close, or a retarget while they run. :meth:`ProverLoop._assert_live_state`
@@ -44,11 +45,28 @@ agree, so a marker alone never decides:
   finish"; swallowing that as an infrastructure error would lose the findings
   the blocker set is built from.
 
+**Push agreement.** A push is bound only when five independent views of it
+agree: the builder's own marker, the live PR head, the verified remote branch,
+the PR's commit list, and — the one view no lane can narrate — the exact commit
+the attempt's own worktree is sitting on. ``git status`` cannot supply that
+last one: a worktree that committed nothing is clean too, so a builder that
+pushed from somewhere else, or an unrelated push that arrived mid-attempt,
+leaves a clean-but-stale worktree behind. :meth:`ProverLoop._assert_local_head`
+reads ``git rev-parse HEAD`` in that exact worktree and fails closed on any
+disagreement.
+
 **Comment identity.** The builder's fix comment is accepted only from the exact
 configured login, and only if GitHub's own comment id was not already present
 before the builder was invoked. The signature and the head SHA both become
 public the moment the real comment is posted, so neither can carry the proof on
 its own.
+
+Push and comment verification is also *durable*. The attempt is journaled as
+in-flight before the builder is invoked and cleared only once that verification
+passes, so a run killed anywhere in between cannot restart, re-inspect its way
+onto whatever head is live by then, and report merge-ready for a push it never
+checked. Such a restart stops as unexpected state with the old head evidence
+intact.
 
 Every ambiguity — a malformed verdict, a stale head, a lane whose result
 contradicts its verdict, a push that cannot be bound to exactly one new head, a
@@ -78,6 +96,7 @@ from .errors import (
     ScopeContamination,
     StaleHead,
     StateError,
+    WorktreeError,
 )
 from .findings import (
     Adjudicator,
@@ -184,14 +203,51 @@ class ProverLoop:
         state = RunState.load(self.config.state_file, repo=self.config.repo, pr=self.config.pr)
         self._state = state
         try:
+            self._assert_no_pending_verification(state)
             result = self._prove(state)
         except FailClosed:
             state.outcome = NEEDS_KARAN
-            state.save()
+            # Recording the stop is best-effort: if the state file itself is
+            # what broke, that must not replace the reason the run stopped.
+            try:
+                state.save()
+            except StateError as exc:
+                self._event(f"the fail-closed outcome could not be recorded: {exc.message}")
             raise
         state.outcome = result.outcome
         state.save()
         return result
+
+    def _assert_no_pending_verification(self, state: RunState) -> None:
+        """Refuse to resume a run that still owes an attempt's push verification.
+
+        A fix attempt is journaled as in-flight before the builder is invoked
+        and cleared only after the push is bound to one new head and the signed
+        fix comment is read back. So finding that phase set at startup means the
+        previous process died somewhere in that window, and nothing local can
+        say which side of the push it died on. Resuming would re-inspect, bind
+        to whatever head is live by then, and — if the reviewers now pass —
+        report merge-ready for a push no run ever verified and a fix comment no
+        run ever read. The run stops here instead, before any GitHub read, with
+        the recorded head left exactly as the interrupted attempt wrote it.
+        """
+        if not state.verification_pending:
+            return
+        raise StateError(
+            "a fix attempt was interrupted before its push and fix-comment readback "
+            "completed; this run will not resume past unverified builder work",
+            evidence={
+                "state_file": str(state.path),
+                "attempt": state.attempt,
+                "phase": state.phase,
+                "attempt_head": state.attempt_head,
+                "recorded_head": state.head,
+                "resolution": (
+                    "confirm on the PR whether that attempt pushed and commented, then "
+                    "run `pr-prover reset` before starting another run"
+                ),
+            },
+        )
 
     # -- main loop --------------------------------------------------------
     def _prove(self, state: RunState) -> RunResult:
@@ -241,9 +297,15 @@ class ProverLoop:
             # live one before spending an attempt on it.
             self._assert_live_state(pull, before="open a fix attempt")
             attempt = state.begin_attempt()
+            # Journaled before the builder can run, cleared only once the push
+            # and the fix comment are verified: an interruption anywhere in
+            # between is then visible to the next run instead of invisible.
+            state.begin_pending_verification(head)
             state.save()
             self._event(f"attempt {attempt}/{MAX_ATTEMPTS} opened on head {head}")
             self._attempt(state, pull, verified, classification)
+            state.complete_pending_verification()
+            state.save()
             self._event(f"push landed; every verdict for {head} is invalidated")
 
         raise StateError(  # pragma: no cover - the attempt cap makes this unreachable
@@ -268,6 +330,20 @@ class ProverLoop:
             raise StateError(
                 "the live PR base branch does not match the configured base",
                 evidence={"configured": self.config.base, "live": pull.base_ref_name},
+            )
+        # The recorded head is the evidence an interrupted attempt left behind.
+        # Rebinding the run to a newer head here is what would erase it, so the
+        # write is guarded at the point it happens and not only at startup.
+        if state.verification_pending:
+            raise StateError(
+                "refusing to rebind the run to a new head while an interrupted "
+                "attempt's push verification is still owed",
+                evidence={
+                    "recorded_head": state.head,
+                    "attempt_head": state.attempt_head,
+                    "live_head": pull.head_ref_oid,
+                    "attempt": state.attempt,
+                },
             )
         state.head = pull.head_ref_oid
         state.save()
@@ -512,7 +588,13 @@ class ProverLoop:
                     evidence={"attempt": state.attempt, "reported_head": report.head},
                 )
             self._assert_clean(worktree)
-            self._verify_push(pull, old_head=head, report=report, known_comments=known_comments)
+            self._verify_push(
+                pull,
+                old_head=head,
+                report=report,
+                known_comments=known_comments,
+                worktree=worktree,
+            )
         except Exception:
             self._retain(worktree, why=f"attempt {state.attempt} failed")
             raise
@@ -567,7 +649,13 @@ class ProverLoop:
         return report
 
     def _assert_clean(self, worktree: Path) -> None:
-        """A builder that pushed leaves nothing behind; leftovers are contamination."""
+        """A builder that pushed leaves nothing behind; leftovers are contamination.
+
+        Cleanliness is necessary and nowhere near sufficient: a worktree that
+        never committed anything is clean too. :meth:`_assert_local_head` is
+        what turns "nothing uncommitted here" into "this worktree is the commit
+        that landed".
+        """
         result = self.runner.run(
             ["git", "-C", str(worktree), "status", "--porcelain"], timeout=120.0
         )
@@ -596,8 +684,16 @@ class ProverLoop:
         old_head: str,
         report: BuilderReport,
         known_comments: frozenset[str],
+        worktree: Path,
     ) -> None:
-        """Bind the builder's push to exactly one new head, then read the comment back."""
+        """Bind the builder's push to exactly one new head, then read the comment back.
+
+        Five views of the push must agree before it is accepted: the builder's
+        marker, the live PR head, the verified remote branch, the PR's commit
+        list, and the attempt worktree's own local ``HEAD``. The first is a
+        claim, the next three are GitHub's account of what happened, and the
+        last is the only one tied to the tree this attempt actually ran in.
+        """
         if report.head == old_head:
             raise AmbiguousPush(
                 "the builder reported the pre-attempt head as its result",
@@ -621,8 +717,78 @@ class ProverLoop:
                 evidence={"before": pull.head_ref_name, "after": refreshed.head_ref_name},
             )
         self.worktrees.source.verified_head(refreshed.head_ref_name, new_head)
+        self._assert_local_head(worktree, new_head=new_head, old_head=old_head)
+        self._assert_commit_list(new_head)
         self._read_back_comment(new_head, known_comments)
         self._event(f"push verified: {old_head} -> {new_head}")
+
+    def _assert_local_head(self, worktree: Path, *, new_head: str, old_head: str) -> None:
+        """The commit that landed must be the one this attempt's worktree is on.
+
+        Marker, PR head, remote branch, and commit list can all move together
+        without this attempt having done anything: an unrelated push to the
+        branch moves every one of them. The attempt worktree's local ``HEAD``
+        is the view that cannot be moved from the outside, so a worktree still
+        sitting on the pre-attempt head — clean status and all — is a push this
+        run cannot claim, and the run stops rather than crediting it.
+        """
+        local = self._local_head(worktree)
+        if local != new_head:
+            raise StaleHead(
+                "the attempt worktree's local HEAD is not the commit that landed on the PR",
+                evidence={
+                    "worktree": str(worktree),
+                    "local_head": local,
+                    "landed_head": new_head,
+                    "pre_attempt_head": old_head,
+                    "worktree_never_moved": local == old_head,
+                },
+            )
+        self._event(f"attempt worktree local HEAD agrees with the landed head {new_head}")
+
+    def _local_head(self, worktree: Path) -> str:
+        """Read ``git rev-parse HEAD`` inside this exact attempt worktree."""
+        result = self.runner.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"], timeout=120.0
+        )
+        if not result.ok:
+            raise WorktreeError(
+                "could not read the attempt worktree's local HEAD",
+                evidence={
+                    "worktree": str(worktree),
+                    "returncode": result.returncode,
+                    "stderr": redact_evidence(result.stderr, limit=1000),
+                },
+            )
+        local = result.stdout.strip().lower()
+        if not _is_full_sha(local):
+            raise WorktreeError(
+                "the attempt worktree's local HEAD is not a full 40-hex SHA",
+                evidence={
+                    "worktree": str(worktree),
+                    "rev_parse": redact_evidence(result.stdout, limit=200),
+                },
+            )
+        return local
+
+    def _assert_commit_list(self, new_head: str) -> None:
+        """GitHub's own commit list for the PR must end at the head that landed."""
+        listed = tuple(self.github.commits(self.config.repo, self.config.pr))
+        if not listed:
+            raise AmbiguousPush(
+                "the PR lists no commits after the builder reported a push",
+                evidence={"landed_head": new_head},
+            )
+        if listed[-1] != new_head:
+            raise AmbiguousPush(
+                "the PR commit list does not end at the head that landed",
+                evidence={
+                    "landed_head": new_head,
+                    "last_listed_commit": listed[-1],
+                    "commits_listed": len(listed),
+                },
+            )
+        self._event(f"PR commit list ends at {new_head} ({len(listed)} commit(s))")
 
     def _comment_identities(self) -> frozenset[str]:
         """GitHub's own ids for the comments visible right now."""
@@ -812,6 +978,10 @@ def _combined(result: CommandResult) -> str:
     # No marker, or a marker on both streams: hand the parser everything so it
     # fails closed on "missing" or "ambiguous" with the full evidence.
     return "\n".join(part for part in (stdout, stderr) if part.strip())
+
+
+def _is_full_sha(value: str) -> bool:
+    return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
 
 
 def _marker_count(stream: str) -> int:

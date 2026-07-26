@@ -16,6 +16,13 @@ Reviewer templates also get ``{reviewer}``; builder templates also get
 ``builder.comment_author`` is required: the fix-comment readback is only worth
 anything if the expected commenter is pinned, so there is no "any author will
 do" configuration to fall into.
+
+``state_file`` and ``lock_file`` must live outside ``source_repo``. The loop
+writes both of them while it is also asserting that the operational clone is
+never modified and that an attempt worktree is clean, so a control file placed
+inside that clone would have the run contaminating exactly the tree it is
+judging. ``worktree_root`` is held to the same rule where the worktrees are
+created.
 """
 from __future__ import annotations
 
@@ -198,13 +205,18 @@ class RunConfig:
         branch = _optional_text(raw, "branch")
         base = _optional_text(raw, "base")
 
+        source_repo = resolve("source_repo")
+        state_file = resolve("state_file")
+        lock_file = resolve("lock_file")
+        _reject_control_paths_inside(source_repo, state_file=state_file, lock_file=lock_file)
+
         return cls(
             repo=repo,
             pr=pr,
-            source_repo=resolve("source_repo"),
+            source_repo=source_repo,
             worktree_root=resolve("worktree_root"),
-            state_file=resolve("state_file"),
-            lock_file=resolve("lock_file"),
+            state_file=state_file,
+            lock_file=lock_file,
             builder=_builder(raw.get("builder")),
             reviewers=reviewers,
             gates=gates,
@@ -213,6 +225,25 @@ class RunConfig:
             visual_qa_required=visual_required,
             source=source,
         )
+
+
+def _reject_control_paths_inside(source_repo: Path, **control_files: Path) -> None:
+    """Keep this run's own bookkeeping out of the clone it is judging.
+
+    ``RunState.save`` and ``RunLock`` write these paths, while the loop
+    separately guarantees that the operational clone is never modified and that
+    an attempt worktree is clean. A control file equal to, or nested inside, the
+    source clone would break both guarantees the moment the run started, so the
+    overlap is refused at configuration time rather than discovered as a dirty
+    tree later. Sibling and outside paths are untouched by this rule.
+    """
+    for key, path in sorted(control_files.items()):
+        if path == source_repo or path.is_relative_to(source_repo):
+            raise ConfigError(
+                f"config {key} is inside the operational clone; "
+                "state and lock files must live outside source_repo",
+                evidence={key: str(path), "source_repo": str(source_repo)},
+            )
 
 
 def _sequence(raw: Mapping[str, Any], key: str, *, required: bool) -> list[Any]:

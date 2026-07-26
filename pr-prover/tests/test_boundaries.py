@@ -159,6 +159,22 @@ class GhBoundaryTests(unittest.TestCase):
         with self.assertRaises(GitHubError):
             self.boundary(payload).comments("example/repo", 7)
 
+    def test_the_commit_list_is_bound_to_full_shas_in_order(self) -> None:
+        """PAPI88-LOCAL-HEAD: the commit list is one of the views a push must match."""
+        payload = json.dumps({"commits": [{"oid": HEAD_A.upper()}, {"oid": "b" * 40}]})
+        self.assertEqual(
+            self.boundary(payload).commits("example/repo", 7), (HEAD_A, "b" * 40)
+        )
+
+    def test_a_short_commit_oid_fails_closed(self) -> None:
+        payload = json.dumps({"commits": [{"oid": "abc1234"}]})
+        with self.assertRaises(GitHubError):
+            self.boundary(payload).commits("example/repo", 7)
+
+    def test_an_empty_commit_list_fails_closed(self) -> None:
+        with self.assertRaises(GitHubError):
+            self.boundary(json.dumps({"commits": []})).commits("example/repo", 7)
+
 
 class RedactionTests(unittest.TestCase):
     def test_github_tokens_are_removed(self) -> None:
@@ -450,6 +466,42 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(config.builder.comment_author, "hermes-builder[bot]")
 
+    def test_a_state_file_inside_the_operational_clone_fails_closed(self) -> None:
+        """PAPI88-CONTROL-PATHS: the run must not write inside the clone it judges."""
+        with self.assertRaises(ConfigError) as caught:
+            self.load(state_file=str(self.clone / ".pr-prover-state"))
+        self.assertIn("state_file", caught.exception.message)
+        self.assertEqual(caught.exception.evidence["source_repo"], str(self.clone))
+
+    def test_a_lock_file_inside_the_operational_clone_fails_closed(self) -> None:
+        with self.assertRaises(ConfigError) as caught:
+            self.load(lock_file=str(self.clone / "control" / "run.lock"))
+        self.assertIn("lock_file", caught.exception.message)
+
+    def test_a_control_file_equal_to_the_operational_clone_fails_closed(self) -> None:
+        for key in ("state_file", "lock_file"):
+            with self.subTest(key=key):
+                with self.assertRaises(ConfigError):
+                    self.load(**{key: str(self.clone)})
+
+    def test_a_control_file_reaching_into_the_clone_by_relative_path_fails_closed(self) -> None:
+        with self.assertRaises(ConfigError):
+            self.load(state_file="clone/nested/state.json")
+
+    def test_control_files_outside_the_operational_clone_are_accepted(self) -> None:
+        """Sibling and outside paths are exactly what the rule is protecting."""
+        config = self.load(
+            state_file=str(self.tmp / "control" / "state.json"),
+            lock_file=str(self.tmp / "run.lock"),
+        )
+        self.assertEqual(config.state_file, self.tmp / "control" / "state.json")
+        self.assertEqual(config.lock_file, self.tmp / "run.lock")
+
+    def test_a_control_file_beside_the_clone_with_a_shared_prefix_is_accepted(self) -> None:
+        """`clone-state` is not inside `clone`, and must not be rejected as if it were."""
+        config = self.load(state_file=str(self.tmp / "clone-state" / "state.json"))
+        self.assertEqual(config.state_file, self.tmp / "clone-state" / "state.json")
+
     def test_the_shipped_example_config_is_valid(self) -> None:
         """The example is documentation; it must not model a rejected shape."""
         example = Path(__file__).resolve().parents[1] / "examples" / "run.example.json"
@@ -518,11 +570,43 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.cli(["reset", "--config", str(self.config_path)]), cli.USAGE_ERROR)
         self.assertTrue(lock.exists())
 
+    def test_a_refused_reset_preserves_both_the_lock_and_the_state(self) -> None:
+        """PAPI88-RESET-PRESERVE: the refusal must not delete the journal on its way out."""
+        lock = self.tmp / "run.lock"
+        state = self.tmp / "state.json"
+        lock.write_text("held by an active run\n", encoding="utf-8")
+        state.write_text('{"attempt": 1}', encoding="utf-8")
+
+        self.assertEqual(self.cli(["reset", "--config", str(self.config_path)]), cli.USAGE_ERROR)
+
+        self.assertTrue(lock.exists(), "the held lock must survive the refusal")
+        self.assertTrue(state.exists(), "the active run's state must survive the refusal")
+        self.assertEqual(state.read_text(encoding="utf-8"), '{"attempt": 1}')
+        self.assertEqual(lock.read_text(encoding="utf-8"), "held by an active run\n")
+
     def test_reset_force_removes_the_lock(self) -> None:
         lock = self.tmp / "run.lock"
         lock.write_text("held\n", encoding="utf-8")
         self.assertEqual(self.cli(["reset", "--config", str(self.config_path), "--force"]), 0)
         self.assertFalse(lock.exists())
+
+    def test_reset_force_removes_both_the_state_and_the_lock(self) -> None:
+        """Forcing stays explicit: it is the only path that discards a held lock."""
+        lock = self.tmp / "run.lock"
+        state = self.tmp / "state.json"
+        lock.write_text("stale\n", encoding="utf-8")
+        state.write_text("{}", encoding="utf-8")
+
+        self.assertEqual(self.cli(["reset", "--config", str(self.config_path), "--force"]), 0)
+
+        self.assertFalse(lock.exists())
+        self.assertFalse(state.exists())
+
+    def test_reset_without_a_lock_still_removes_the_state(self) -> None:
+        state = self.tmp / "state.json"
+        state.write_text("{}", encoding="utf-8")
+        self.assertEqual(self.cli(["reset", "--config", str(self.config_path)]), 0)
+        self.assertFalse(state.exists())
 
     def test_a_missing_config_is_a_usage_error(self) -> None:
         self.assertEqual(
