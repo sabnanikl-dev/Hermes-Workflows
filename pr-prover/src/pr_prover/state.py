@@ -1,9 +1,16 @@
 """One local JSON state file and one run-exists lockfile.
 
-The state file holds a single attempt integer plus the minimum needed to keep
-the attempt cap honest across process restarts. It is deliberately small and
-strict: an unknown key, an out-of-range attempt, or a mismatched PR is
-unexpected state, and unexpected state stops the run.
+The state file holds a single attempt integer, the immutable GitHub ids of the
+artifacts this run proved it published, and the minimum else needed to keep the
+attempt cap honest across process restarts. It is deliberately small and strict:
+an unknown key, an out-of-range attempt, a repeated artifact id, or a mismatched
+PR is unexpected state, and unexpected state stops the run.
+
+The artifact ids are here rather than in memory for the same reason the attempt
+counter is: they have to survive both a new head and a restarted process. They
+are the run's own published evidence, and the alternative — recognising a lane's
+artifact by its author, signature, role line and head — is a predicate anybody
+sharing the publishing login can satisfy on purpose.
 
 The lock is a plain ``O_EXCL`` create. There is no PID inspection,
 proof-of-death, or takeover path: if the lock exists, this run stops and asks.
@@ -27,7 +34,16 @@ SCHEMA_VERSION = 1
 MAX_ATTEMPTS = 2
 OUTCOMES = ("merge-ready", "blocked", "needs-karan")
 _ALLOWED_KEYS = frozenset(
-    {"schema_version", "repo", "pr", "attempt", "head", "corrective_rerun_attempts", "outcome"}
+    {
+        "schema_version",
+        "repo",
+        "pr",
+        "attempt",
+        "head",
+        "corrective_rerun_attempts",
+        "outcome",
+        "verified_artifacts",
+    }
 )
 
 
@@ -42,6 +58,12 @@ class RunState:
     head: str | None = None
     corrective_rerun_attempts: tuple[int, ...] = ()
     outcome: str | None = None
+    # GitHub's own ids for the artifacts this run proved it published, in the
+    # order they were verified. They are kept here rather than in memory because
+    # they have to outlive the head they were published for: a second cycle
+    # classifies a new head, and the reviewer artifacts and fix comment from the
+    # first cycle are still this run's own evidence rather than human feedback.
+    verified_artifacts: tuple[str, ...] = ()
     events: list[str] = field(default_factory=list, repr=False, compare=False)
 
     # -- persistence ------------------------------------------------------
@@ -123,6 +145,26 @@ class RunState:
                 evidence={"state_file": str(path), "attempt": attempt, "reruns": normalized},
             )
 
+        artifacts = raw.get("verified_artifacts", [])
+        if not isinstance(artifacts, list):
+            raise StateError(
+                "state file verified_artifacts is not a list",
+                evidence={"state_file": str(path)},
+            )
+        verified: list[str] = []
+        for value in artifacts:
+            if not isinstance(value, str) or not value.strip():
+                raise StateError(
+                    "state file verified_artifacts holds a non-identifier value",
+                    evidence={"state_file": str(path)},
+                )
+            if value in verified:
+                raise StateError(
+                    "state file records a repeated verified artifact id",
+                    evidence={"state_file": str(path), "artifact": value},
+                )
+            verified.append(value)
+
         outcome = raw.get("outcome")
         if outcome is not None and outcome not in OUTCOMES:
             raise StateError(
@@ -143,6 +185,7 @@ class RunState:
             head=head,
             corrective_rerun_attempts=tuple(sorted(normalized)),
             outcome=None,
+            verified_artifacts=tuple(verified),
         )
 
     def save(self) -> None:
@@ -162,6 +205,7 @@ class RunState:
             "head": self.head,
             "corrective_rerun_attempts": list(self.corrective_rerun_attempts),
             "outcome": self.outcome,
+            "verified_artifacts": list(self.verified_artifacts),
         }
         temporary = self.path.with_name(self.path.name + ".tmp")
         try:
@@ -214,6 +258,26 @@ class RunState:
                 evidence={"attempt": self.attempt},
             )
         self.corrective_rerun_attempts = tuple(sorted(self.corrective_rerun_attempts + (self.attempt,)))
+
+    def remember_artifact(self, identifier: str) -> bool:
+        """Retain one immutable GitHub id this run proved it published.
+
+        Returns whether the id was new, so the caller only journals a retention
+        that actually happened. Retention is append-only and never removes an id:
+        an artifact this run published on an earlier head stays this run's own
+        evidence after the head moves, which is exactly the case where rebuilding
+        ownership from body shape would hand a lane's own artifact back to the
+        feedback seam as human feedback.
+        """
+        if not identifier or not identifier.strip():
+            raise StateError(
+                "a verified artifact must carry GitHub's own identifier",
+                evidence={"artifact": identifier},
+            )
+        if identifier in self.verified_artifacts:
+            return False
+        self.verified_artifacts = self.verified_artifacts + (identifier,)
+        return True
 
     def record(self, event: str) -> None:
         self.events.append(event)

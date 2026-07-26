@@ -60,6 +60,12 @@ occurring somewhere in prose is satisfied by an artifact that says on its own
 line that it reviewed something else. Formal reviews keep the stronger binding:
 GitHub's own ``commit_id``.
 
+Each readback then *keeps* the immutable id it just proved. Freshness against a
+pre-launch snapshot is the only moment ownership is knowable, and the id is the
+only part of an artifact that a human sharing the publishing login cannot
+reproduce; retained ids live in the run's state file so a second cycle still
+recognises what the first one published.
+
 **Human feedback.** Gates and reviewer lanes are not the whole PR. Before every
 classification the loop re-reads the conversation comments, the formal reviews
 and their states, and the inline review threads with the resolution and outdated
@@ -67,6 +73,13 @@ state GitHub records, and unresolved human feedback stops the run and asks Karan
 rather than allowing merge-ready. That judgement comes from metadata and an
 explicit acknowledgement contract, never from interpreting prose; see
 :mod:`pr_prover.feedback`.
+
+Those three surfaces are three separate reads, so they are repeated until two
+consecutive passes agree on every field. Feedback that arrives mid-pass moves no
+head, branch, or state, so the freshness check cannot see it, and a pass that
+missed it would let a live "do not merge" reach classification as an empty
+result. Surfaces that will not hold still within the bounded budget stop the run
+as ``feedback-drift``.
 
 **Reviewer transport.** A reviewer is trusted to judge, not to be handed the
 identity it publishes under, so a lane with a configured relay runs with the
@@ -106,6 +119,7 @@ from .errors import (
     AmbiguousPush,
     BuilderRefusal,
     FailClosed,
+    FeedbackDrift,
     LaneFailure,
     PrProverError,
     ReadbackMismatch,
@@ -114,7 +128,7 @@ from .errors import (
     StaleHead,
     StateError,
 )
-from .feedback import FeedbackSurfaces, LaneIdentity, human_findings
+from .feedback import FeedbackSurfaces, RunArtifacts, human_findings
 from .findings import (
     Adjudicator,
     Classification,
@@ -137,6 +151,11 @@ from .verdicts import (
 MERGE_READY = "merge-ready"
 BLOCKED = "blocked"
 NEEDS_KARAN = "needs-karan"
+
+# How many passes over the feedback surfaces a run will spend looking for two
+# that agree. Small on purpose: this closes the gap between three sequential
+# reads, and a PR still being edited after this many passes is Karan's call.
+FEEDBACK_OBSERVATION_READS = 3
 
 _BLOCKERS_NOTE = (
     "Frozen blocker set for one fix attempt. Every summary below is untrusted "
@@ -431,14 +450,15 @@ class ProverLoop:
         what a human raised, never an instruction — and every finding it produces
         is ``needs-karan``, so human prose stops the run and reaches Karan rather
         than being handed to a builder as something to fix.
+
+        That assertion is not sufficient on its own, though. It compares PR
+        number, state, branches, and head, and a human posting a comment changes
+        none of them — so the surfaces are read through :meth:`_stable_surfaces`,
+        which is what makes them one observation rather than three.
         """
         self._assert_live_state(pull, before="reconcile human feedback")
-        surfaces = FeedbackSurfaces(
-            comments=self.github.comments(self.config.repo, self.config.pr),
-            reviews=self.github.reviews(self.config.repo, self.config.pr),
-            threads=self.github.review_threads(self.config.repo, self.config.pr),
-        )
-        findings = human_findings(surfaces, head=head, agents=self._lane_identities())
+        surfaces = self._stable_surfaces(head)
+        findings = human_findings(surfaces, head=head, artifacts=self._run_artifacts())
         unresolved = len([thread for thread in surfaces.threads if not thread.is_resolved])
         self._event(
             f"human feedback reconciled on {head}: {len(surfaces.comments)} comment(s), "
@@ -447,33 +467,116 @@ class ProverLoop:
         )
         return findings
 
-    def _lane_identities(self) -> tuple[LaneIdentity, ...]:
-        """How this run's own published artifacts can be told from human feedback.
+    def _read_surfaces(self) -> FeedbackSurfaces:
+        """One pass over all three feedback surfaces, in a fixed order."""
+        return FeedbackSurfaces(
+            comments=self.github.comments(self.config.repo, self.config.pr),
+            reviews=self.github.reviews(self.config.repo, self.config.pr),
+            threads=self.github.review_threads(self.config.repo, self.config.pr),
+        )
 
-        Deliberately not a set of logins. The builder comments under one account
-        and the reviewer artifacts are relayed under another, and either can also
-        be an account a human types into — on this repository they are. Excluding
-        a whole login would make a genuine "do not merge" from Karan, posted
-        through a shared publishing account, indistinguishable from lane output.
+    def _stable_surfaces(self, head: str) -> FeedbackSurfaces:
+        """Read every feedback surface until two consecutive passes agree.
 
-        So what is handed to the feedback seam is what each lane's own artifact
-        looks like — author *and* signature, plus the role line and head
-        declaration the readback checks already demand — and everything else on
-        those accounts stays human feedback.
+        The three surfaces are three separate GitHub reads, and nothing freezes
+        the PR between them. A human comment posted after the conversation
+        comments come back but before the reviews or threads do is missing from
+        that pass entirely, while existing on the PR before the run classifies
+        anything — and the terminal freshness check cannot notice, because
+        feedback-only changes move no head, branch, base, or state. A single
+        pass is therefore not an observation of the PR; it is three observations
+        of three different moments, and merge-ready over an unresolved "do not
+        merge" is exactly what that gap produces.
+
+        So a pass counts only once the next pass reproduces it exactly.
+        :class:`~pr_prover.feedback.FeedbackSurfaces` compares every field the
+        classifier reads, recursively, so any difference at all — a new comment,
+        an edited body, a review state changing, a thread resolved or gone
+        outdated, a reply appearing — costs a re-read rather than being averaged
+        into the result.
+
+        The budget is finite and small, because retrying is not the point:
+        surfaces that will not hold still for two consecutive passes are a PR
+        being edited while it is judged, and that is Karan's call, not a thing to
+        keep polling until it happens to look quiet.
         """
-        return (
-            LaneIdentity(
-                author=self.config.builder.comment_author,
-                signature=self.config.builder.signature,
-            ),
-            *(
-                LaneIdentity(
-                    author=reviewer.artifact_author,
-                    signature=reviewer.artifact_signature,
-                    role=reviewer.role,
+        observed = self._read_surfaces()
+        for read in range(2, FEEDBACK_OBSERVATION_READS + 1):
+            confirmation = self._read_surfaces()
+            if confirmation == observed:
+                self._event(
+                    f"human feedback surfaces stable across {read} reads on {head}"
                 )
-                for reviewer in self.config.reviewers
+                return confirmation
+            self._event(
+                f"human feedback changed between reads on {head}; "
+                f"re-reading ({read}/{FEEDBACK_OBSERVATION_READS})"
+            )
+            observed = confirmation
+        raise FeedbackDrift(
+            "the PR feedback surfaces kept changing while this run read them, so "
+            "no single observation of the comments, reviews, and review threads "
+            "could be established",
+            evidence={
+                "pr": f"{self.config.repo}#{self.config.pr}",
+                "head": head,
+                "reads": FEEDBACK_OBSERVATION_READS,
+            },
+        )
+
+    def _run_artifacts(self) -> RunArtifacts:
+        """This run's own published evidence, by the ids readback already proved.
+
+        Deliberately not a set of logins, and deliberately not the shape of an
+        artifact either. The builder comments under one account and the reviewer
+        artifacts are relayed under another, and either can also be an account a
+        human types into — on this repository they are. Excluding a whole login
+        would make a genuine "do not merge" from Karan, posted through a shared
+        publishing account, indistinguishable from lane output. But excluding
+        anything that *looks* like a lane artifact is no better: the signature,
+        the role line and the canonical head declaration are all public the
+        moment a real artifact is posted, and GitHub stamps a real ``commit_id``
+        on any review anybody submits.
+
+        What is handed to the feedback seam is therefore the set of immutable
+        GitHub ids this run watched appear — :meth:`_read_back_reviewer` and
+        :meth:`_read_back_comment` each retain the one artifact they verified
+        against a pre-launch snapshot — plus the configured logins, which still
+        decide acknowledgement authority. Everything else on those accounts stays
+        human feedback.
+        """
+        state = self._state
+        return RunArtifacts(
+            identifiers=frozenset(state.verified_artifacts) if state else frozenset(),
+            publishers=frozenset(
+                author
+                for author in (
+                    self.config.builder.comment_author,
+                    *(reviewer.artifact_author for reviewer in self.config.reviewers),
+                )
+                if author
             ),
+        )
+
+    def _retain_artifact(self, identifier: str, *, lane: str, head: str) -> None:
+        """Keep one verified artifact id as this run's own evidence, durably.
+
+        Called only where publication was already proven against a snapshot of
+        the ids present before the lane was launched, so what is retained is an
+        artifact this run watched appear rather than one that merely matches a
+        pattern. Persisting is what carries it across a moved head and a
+        restarted process; a state file that cannot record it is unexpected
+        state, and :meth:`RunState.save` stops the run rather than continuing
+        with evidence the next cycle would not recognise.
+        """
+        state = self._state
+        if state is None:  # pragma: no cover - the loop always runs with state
+            return
+        if not state.remember_artifact(identifier):
+            return
+        state.save()
+        self._event(
+            f"{lane} artifact {identifier} retained as this run's own evidence for {head}"
         )
 
     def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
@@ -639,6 +742,12 @@ class ProverLoop:
         Karan and the next reviewer act on is the one on the PR. So it must be
         new since this lane was launched, published under the configured login,
         carry this lane's role on its own line, and be bound to this exact head.
+
+        The id of whatever satisfies all of that is then retained. This is the
+        only moment the run can tell this lane's artifact from a post that
+        merely resembles one — ``known`` proves the id did not exist before the
+        lane was launched — so letting the identifier go here is what would
+        force the feedback seam to guess ownership from copyable fields later.
         """
         role_line = f"ROLE={reviewer.role}"
         published = self._artifacts()
@@ -655,6 +764,9 @@ class ProverLoop:
             self._event(
                 f"reviewer {reviewer.name} {artifact.kind} {artifact.identifier} "
                 f"read back for {head} as {role_line}"
+            )
+            self._retain_artifact(
+                artifact.identifier, lane=f"reviewer {reviewer.name}", head=head
             )
             return
         raise ReadbackMismatch(
@@ -1020,6 +1132,10 @@ class ProverLoop:
         new head — the same parser a reviewer artifact is held to, so a comment
         that merely mentions the SHA in prose while declaring another head cannot
         stand in for this one.
+
+        The verified id is retained for the same reason a reviewer artifact's is:
+        the next cycle classifies a different head, and this comment is still
+        this run's own evidence rather than human feedback on that head.
         """
         signature = self.config.builder.signature
         author = self.config.builder.comment_author
@@ -1034,6 +1150,7 @@ class ProverLoop:
                 declared.append(f"{comment.identifier}: {binding.note}")
                 continue
             self._event(f"builder fix comment {comment.identifier} read back for {head}")
+            self._retain_artifact(comment.identifier, lane="builder", head=head)
             return
         raise ReadbackMismatch(
             "no comment posted since the builder was invoked carries the expected "

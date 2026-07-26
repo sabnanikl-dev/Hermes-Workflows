@@ -17,8 +17,8 @@ from _support import (
     HEAD_B,
     BUILDER_LOGIN,
     REVIEWER_LOGIN,
-    REVIEWER_SIGNATURE,
     SIGNATURE,
+    builder_output,
     fix_comment,
     reviewer_artifact,
 )
@@ -27,7 +27,7 @@ from pr_prover.errors import GitHubError
 from pr_prover.feedback import (
     ACKNOWLEDGEMENT,
     FeedbackSurfaces,
-    LaneIdentity,
+    RunArtifacts,
     human_findings,
 )
 from pr_prover.github import Comment, GhCliGitHub, ReviewThread
@@ -36,16 +36,17 @@ from test_loop import BLOCKER, LoopHarness
 
 HUMAN = "human-reviewer"
 BLOCKING_PROSE = "do not merge; the migration drops data"
-# The lanes as this run's configuration describes them: an artifact carries the
-# author *and* the signature, and a reviewer's also its whole role line.
-LANES = (
-    LaneIdentity(author=BUILDER_LOGIN, signature=SIGNATURE),
-    LaneIdentity(author=REVIEWER_LOGIN, signature=REVIEWER_SIGNATURE, role="reviewer-a"),
-    LaneIdentity(author=REVIEWER_LOGIN, signature=REVIEWER_SIGNATURE, role="reviewer-b"),
-    LaneIdentity(
-        author=REVIEWER_LOGIN, signature=REVIEWER_SIGNATURE, role="integration-auditor"
-    ),
-)
+# The publishing logins this run's configuration names. On this repository the
+# reviewer login is shared with a human, which is the whole reason ownership is
+# decided by retained id rather than by author or by artifact shape.
+PUBLISHERS = frozenset({BUILDER_LOGIN, REVIEWER_LOGIN})
+# A run that has proved nothing owns nothing: every post is somebody else's.
+NOTHING_PROVED = RunArtifacts(publishers=PUBLISHERS)
+
+
+def owning(*identifiers: str) -> RunArtifacts:
+    """A run that proved it published exactly these artifact ids."""
+    return RunArtifacts(identifiers=frozenset(identifiers), publishers=PUBLISHERS)
 
 
 class UnresolvedHumanFeedbackTests(LoopHarness):
@@ -227,28 +228,25 @@ class ResolvedHumanFeedbackTests(LoopHarness):
 
         self.assertEqual(result.outcome, NEEDS_KARAN)
 
-    def test_the_configured_agents_own_artifacts_are_not_human_feedback(self) -> None:
-        """The builder's and reviewers' own artifacts are the loop's evidence trail."""
-        loop = self.build()
-        self.remote.comment(fix_comment(HEAD_A), author=BUILDER_LOGIN)
-        self.remote.review(
-            reviewer_artifact("reviewer-a", HEAD_A), author=REVIEWER_LOGIN, state="COMMENTED"
-        )
-        self.review_round(HEAD_A)
+    def test_an_artifact_shaped_post_from_an_unknown_run_is_still_feedback(self) -> None:
+        """A lane artifact this run did not publish belongs to somebody else.
 
-        result = loop.run()
-
-        self.assertEqual(result.outcome, MERGE_READY)
-
-    def test_an_earlier_cycles_fix_comment_is_still_this_runs_own_evidence(self) -> None:
-        """A lane artifact belongs to the head it was written for, not to today's."""
+        It may well be a previous run's genuine evidence. This run cannot tell
+        that from a human copy, and the direction that fails closed is to hand
+        it to Karan rather than to assume it away. The artifacts this run *did*
+        publish are excluded by retained id — see the tests above.
+        """
         loop = self.build()
         self.remote.comment(fix_comment(HEAD_B), author=BUILDER_LOGIN)
         self.review_round(HEAD_A)
 
         result = loop.run()
 
-        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:comment"],
+        )
 
 
 class AcknowledgementChronologyTests(LoopHarness):
@@ -448,11 +446,19 @@ class SharedPublishingIdentityTests(LoopHarness):
             ["human-feedback:review-thread"],
         )
 
-    def test_a_signed_artifact_from_the_same_login_is_not_human_feedback(self) -> None:
-        """The distinction is the artifact, so both halves must hold at once."""
+    def test_a_perfectly_shaped_change_request_this_run_did_not_publish_blocks(self) -> None:
+        """REVIEWER-A-P1 / REVIEWER-B-P1 / IA-P1-1 / ADAPTER-SMOKE-1.
+
+        The frozen reproducer. Every field the old predicate checked is public
+        the moment a real artifact exists, and GitHub stamps a genuine
+        ``commit_id`` on any review anybody submits — so a human on the shared
+        publishing login can produce a ``CHANGES_REQUESTED`` review that matches
+        the lane's author, signature, role line and head exactly. It used to be
+        discarded as lane output and the run reported ``merge-ready``.
+        """
         loop = self.build()
         self.remote.review(
-            reviewer_artifact("reviewer-b", HEAD_A),
+            reviewer_artifact("reviewer-b", HEAD_A) + "\nKaran: do not merge this PR\n",
             author=REVIEWER_LOGIN,
             state="CHANGES_REQUESTED",
             commit_id=HEAD_A,
@@ -461,7 +467,81 @@ class SharedPublishingIdentityTests(LoopHarness):
 
         result = loop.run()
 
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:review"],
+        )
+
+    def test_a_perfectly_shaped_comment_this_run_did_not_publish_blocks(self) -> None:
+        """The same collision on the conversation-comment surface."""
+        loop = self.build()
+        self.remote.comment(fix_comment(HEAD_A), author=BUILDER_LOGIN)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:comment"],
+        )
+
+    def test_a_perfectly_shaped_thread_reply_this_run_did_not_publish_blocks(self) -> None:
+        """And on review threads, where no lane ever publishes at all."""
+        loop = self.build()
+        self.remote.thread(
+            reviewer_artifact("reviewer-a", HEAD_A), author=REVIEWER_LOGIN
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:review-thread"],
+        )
+
+    def test_the_runs_own_published_artifacts_are_not_human_feedback(self) -> None:
+        """The other direction: retention must actually happen, or nothing passes.
+
+        The reviewer lanes publish three artifacts under the shared login during
+        this run. They are excluded because readback proved each id appeared
+        while the lane ran — not because of how they read — so a run that failed
+        to retain them would stop on its own evidence.
+        """
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
         self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(len(self.remote.comments), 3)
+        self.assertEqual(
+            [comment.identifier for comment in self.remote.comments],
+            list(self.state()["verified_artifacts"]),
+        )
+
+    def test_retained_ids_still_exclude_the_runs_artifacts_after_the_head_moves(self) -> None:
+        """Across heads: cycle 1's artifacts are not feedback on cycle 2's head."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.head, HEAD_B)
+        # Three reviewer artifacts for HEAD_A, the fix comment, then three more
+        # for HEAD_B — all retained, none reclassified as feedback on the new head.
+        self.assertEqual(len(self.state()["verified_artifacts"]), 7)
 
     def test_the_signature_alone_does_not_make_a_post_a_lane_artifact(self) -> None:
         """A signature is public the moment a real artifact is posted."""
@@ -569,13 +649,160 @@ class FeedbackFreshnessTests(LoopHarness):
         self.assertEqual(result.evidence["evidence"]["before"], "report merge-ready")
 
     def test_the_feedback_check_is_re_read_before_the_terminal_report(self) -> None:
-        """Not a snapshot taken when the lanes launched: read again at the end."""
+        """Not a snapshot taken when the lanes launched: read again at the end.
+
+        Two passes, not one: a pass counts only once the next one reproduces it,
+        which is what makes it an observation rather than three reads of three
+        different moments.
+        """
         loop = self.build()
         self.review_round(HEAD_A)
 
         loop.run()
 
-        self.assertEqual(self.github.review_thread_calls, 1)
+        self.assertEqual(self.github.review_thread_calls, 2)
+
+
+class StableFeedbackObservationTests(LoopHarness):
+    """REVIEWER-A-P1 / REVIEWER-B-P1 / IA-P1-2: feedback that arrives mid-pass.
+
+    The defect these pin down: comments, reviews, and review threads are three
+    separate GitHub reads. Feedback created after the first returned and before
+    the last was absent from the assembled surfaces while existing on the PR
+    before classification — and the terminal freshness check could not see it,
+    because a new comment moves no head, branch, base, or state. The run
+    reported ``merge-ready`` over a live human stop.
+    """
+
+    def racing(self, inject):
+        """A boundary that fires ``inject`` once, just after the comments read."""
+        github = self.github
+
+        class RacingReads:
+            fired = False
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(github, name)
+
+            def comments(self, repo: str, number: int):
+                seen = github.comments(repo, number)
+                if not RacingReads.fired:
+                    RacingReads.fired = True
+                    inject()
+                return seen
+
+        return RacingReads()
+
+    def test_a_comment_arriving_between_surface_reads_still_blocks(self) -> None:
+        """The frozen ``FEEDBACK_SNAPSHOT_RACE`` probe, with the head held still."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+        loop.github = self.racing(
+            lambda: self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        )
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.head, HEAD_A, "the head never moved")
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:comment"],
+        )
+
+    def test_a_change_request_arriving_between_surface_reads_still_blocks(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+        loop.github = self.racing(
+            lambda: self.remote.review(
+                "please rework the migration", author=HUMAN, state="CHANGES_REQUESTED"
+            )
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:review"],
+        )
+
+    def test_a_thread_arriving_between_surface_reads_still_blocks(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+        loop.github = self.racing(
+            lambda: self.remote.thread("this branch is unreachable", author=HUMAN)
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:review-thread"],
+        )
+
+    def test_an_edited_body_is_a_change_the_observation_must_settle_on(self) -> None:
+        """Not only new posts: every field the classifier reads is compared."""
+        loop = self.build()
+        self.remote.comment("nit: rename this helper", author=HUMAN)
+        raised = self.remote.comments[-1]
+        self.review_round(HEAD_A)
+
+        def edit() -> None:
+            self.remote.comments[-1] = Comment(
+                identifier=raised.identifier,
+                author=HUMAN,
+                body=BLOCKING_PROSE,
+                created_at=raised.created_at,
+            )
+
+        loop.github = self.racing(edit)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        finding = result.classification.needs_karan[0].finding
+        self.assertIn("do not merge", finding.detail, "the settled body is the one used")
+
+    def test_surfaces_that_never_settle_stop_the_run(self) -> None:
+        """A PR being edited while it is judged is Karan's call, not a poll loop."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+        github = self.github
+        remote = self.remote
+
+        class NeverSettles:
+            def __getattr__(self, name: str) -> object:
+                return getattr(github, name)
+
+            def comments(self, repo: str, number: int):
+                seen = github.comments(repo, number)
+                remote.comment("still typing", author=HUMAN)
+                return seen
+
+        loop.github = NeverSettles()
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "feedback-drift")
+
+    def test_a_quiet_pr_settles_on_the_first_confirmation(self) -> None:
+        """The bounded budget is not spent when nothing is changing."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(self.github.review_thread_calls, 2)
+        self.assertTrue(
+            any("stable across 2 reads" in event for event in result.events),
+            result.events,
+        )
 
 
 class OmittedFeedbackTests(LoopHarness):
@@ -622,21 +849,40 @@ class OmittedFeedbackTests(LoopHarness):
         findings = human_findings(
             FeedbackSurfaces(comments=comments),
             head=HEAD_A,
-            agents=LANES,
+            # Page one is a hundred artifacts this run proved it published, so
+            # only the human comment on page two is left to find.
+            artifacts=owning(*(str(index) for index in range(100))),
         )
 
         self.assertEqual([item.source for item in findings], ["human-feedback:comment"])
         self.assertEqual(findings[0].severity, "needs-karan")
         self.assertEqual(findings[0].id, "human-comment-100")
 
-    def test_an_all_agent_thread_slice_cannot_be_read_as_no_human_feedback(self) -> None:
-        """Why the boundary must raise: the truncated slice classifies as clean.
+    def test_an_all_owned_slice_cannot_be_read_as_no_human_feedback(self) -> None:
+        """Why the boundary must raise: a slice of owned posts classifies as clean.
 
-        The slice has to be all *lane artifacts*, not merely all lane logins —
-        an unsigned reply from a publishing account is human feedback now — but
-        the point stands: a partial thread whose returned replies all belong to
-        this run produces nothing, so completeness cannot be decided here.
+        A truncated read hands the classifier a partial surface it cannot
+        recognise as partial. When everything that did arrive is this run's own
+        retained evidence, the answer is legitimately "nothing here" — which is
+        indistinguishable from a complete PR with no feedback on it, so
+        completeness has to be established at the boundary rather than inferred.
         """
+        owned = Comment(
+            identifier="IC_1", author=BUILDER_LOGIN, body=fix_comment(HEAD_A)
+        )
+
+        self.assertEqual(
+            human_findings(
+                FeedbackSurfaces(comments=(owned,)),
+                head=HEAD_A,
+                artifacts=owning("IC_1"),
+            ),
+            (),
+            "an all-owned slice is silently clean, so completeness must be decided earlier",
+        )
+
+    def test_a_thread_reply_that_merely_looks_owned_is_not_owned(self) -> None:
+        """No lane publishes thread replies, so none can be excluded as one."""
         truncated = (
             ReviewThread(
                 identifier="T1",
@@ -652,15 +898,13 @@ class OmittedFeedbackTests(LoopHarness):
             ),
         )
 
-        self.assertEqual(
-            human_findings(
-                FeedbackSurfaces(threads=truncated),
-                head=HEAD_A,
-                agents=LANES,
-            ),
-            (),
-            "an all-agent slice is silently clean, so completeness must be decided earlier",
+        findings = human_findings(
+            FeedbackSurfaces(threads=truncated),
+            head=HEAD_A,
+            artifacts=NOTHING_PROVED,
         )
+
+        self.assertEqual([item.source for item in findings], ["human-feedback:review-thread"])
 
     def test_an_incomplete_thread_read_stops_the_run_instead_of_reporting(self) -> None:
         loop = self.build()
@@ -708,7 +952,7 @@ class FeedbackUnitTests(LoopHarness):
                 ),
             ),
             head=HEAD_A,
-            agents=LANES,
+            artifacts=NOTHING_PROVED,
         )
 
         self.assertEqual(len(findings), 2)
@@ -717,7 +961,7 @@ class FeedbackUnitTests(LoopHarness):
 
     def test_an_empty_pr_produces_nothing(self) -> None:
         self.assertEqual(
-            human_findings(self.surfaces(), head=HEAD_A, agents=()), ()
+            human_findings(self.surfaces(), head=HEAD_A, artifacts=NOTHING_PROVED), ()
         )
 
     def test_a_whitespace_only_comment_is_not_feedback(self) -> None:
@@ -726,7 +970,7 @@ class FeedbackUnitTests(LoopHarness):
                 comments=(Comment(identifier="IC_1", author=HUMAN, body="   \n"),)
             ),
             head=HEAD_A,
-            agents=(),
+            artifacts=NOTHING_PROVED,
         )
 
         self.assertEqual(findings, ())
@@ -737,7 +981,7 @@ class FeedbackUnitTests(LoopHarness):
                 comments=(Comment(identifier="IC_kwDO", author=HUMAN, body=BLOCKING_PROSE),)
             ),
             head=HEAD_A,
-            agents=(),
+            artifacts=NOTHING_PROVED,
         )
 
         self.assertEqual(findings[0].id, "human-comment-ic-kwdo")

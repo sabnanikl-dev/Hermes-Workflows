@@ -304,20 +304,32 @@ Nothing acknowledges itself, and an acknowledgement posted from a configured
 builder or reviewer login does not count, because a lane clearing the comment it
 was told to answer is marking its own homework.
 
-**Who counts as human is decided per post, not per account.** A configured login
-is a publishing channel: the builder reports and the relayed reviewer artifacts
-go through accounts a human also uses. So a post is excluded only when it is
-positively identifiable as this run's own artifact — the configured author *and*
-that lane's signature, its whole `ROLE=` line where it has one, and a canonical
-head declaration (or a review's own `commit_id`). Every other comment, review,
-thread reply, or acknowledgement from those accounts is human feedback, because
-an unattributed post from a shared publishing account is exactly where a real
-"do not merge" would otherwise vanish.
+**Who counts as human is decided per post, not per account, and by id rather
+than by shape.** A configured login is a publishing channel: the builder reports
+and the relayed reviewer artifacts go through accounts a human also uses. Every
+visible part of an artifact is copyable the moment a real one exists — the
+signature, the `ROLE=` line, the canonical `HEAD=` declaration — and GitHub
+stamps a genuine `commit_id` on any review anybody submits, so matching on those
+fields is a test a human on the shared login can pass on purpose.
 
-The head in that check is deliberately *a* head rather than the head being
-proved: an earlier cycle's fix comment belongs to the commit it announced, and
-demanding today's SHA would turn this run's own evidence back into human
-feedback.
+So a post is excluded only when this run already proved it published *that exact
+GitHub id*. Each readback checks its artifact against a snapshot of the ids
+present before the lane was launched, and keeps the id of whatever satisfied it;
+those retained ids live in the run's state file, so a second cycle still
+recognises what the first one published after the head moves. Every other
+comment, review, thread reply, or acknowledgement from those accounts is human
+feedback — including a post that looks exactly like a lane artifact but belongs
+to some other run — because an unattributed post from a shared publishing
+account is exactly where a real "do not merge" would otherwise vanish.
+
+**The three surfaces are read until two consecutive passes agree.** Comments,
+reviews, and review threads are three separate GitHub reads, and feedback that
+arrives between them would otherwise be missing from the result while existing
+on the PR before classification. The freshness check cannot catch that, because
+a new comment moves no head, branch, base, or state. A pass therefore counts
+only once the next one reproduces every field it saw; surfaces that will not
+hold still within a small fixed budget stop the run as `feedback-drift` rather
+than being averaged into a verdict.
 
 The two rules run in opposite directions on purpose. Treating a post as feedback
 makes a run stop more, so that judgement is per artifact; letting a post *clear*
@@ -345,8 +357,10 @@ on a partial view.
 ## State and locking
 
 One JSON state file holds a single attempt integer plus the head, the corrective
-reruns already spent, and the terminal outcome. One `O_EXCL` lockfile marks that
-a run exists. There is no PID inspection and no takeover path: if the lock is
+reruns already spent, the GitHub ids of the artifacts this run proved it
+published, and the terminal outcome. The ids are here for the same reason the
+attempt counter is: both have to survive a moved head and a restarted process.
+One `O_EXCL` lockfile marks that a run exists. There is no PID inspection and no takeover path: if the lock is
 held, the run stops and asks. After confirming no run is active, remove it with
 `pr-prover reset --force`.
 
@@ -361,9 +375,9 @@ failure stays the reason and the cleanup outcome is recorded beside it.
 ## What stops the run and asks Karan
 
 `invalid-config` · `invalid-command` · `lock-contention` · `unexpected-state` ·
-`malformed-verdict` · `lane-failure` · `stale-head` · `ambiguous-push` ·
-`readback-mismatch` · `relay-failure` · `scope-contamination` ·
-`builder-refusal` · `github-error` · `worktree-error`
+`malformed-verdict` · `lane-failure` · `stale-head` · `feedback-drift` ·
+`ambiguous-push` · `readback-mismatch` · `relay-failure` ·
+`scope-contamination` · `builder-refusal` · `github-error` · `worktree-error`
 
 `unexpected-state` covers writing the local journal as well as reading it, and
 acquiring the lock as well as contending for it: a state file that cannot be

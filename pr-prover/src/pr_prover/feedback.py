@@ -52,14 +52,27 @@ guess, and treating it as one would let feedback be dismissed before it was
 written.
 
 **Identity.** A configured login is not by itself proof that a post came from a
-lane. The same account can publish this run's artifacts and be the account a
-human types into — which is exactly the shared-account arrangement this tool
-runs under — so exclusion is decided per artifact, not per account: a post is
-run-owned only when it carries the configured author *and* that lane's
-signature, role line where one applies, and a canonical head declaration. Every
-other post from those logins is human feedback, because an unattributed comment
-from a shared publishing account is precisely the case where a real human stop
-would otherwise disappear.
+lane, and neither is the shape of the post. The same account can publish this
+run's artifacts and be the account a human types into — which is exactly the
+shared-account arrangement this tool runs under — and every visible part of an
+artifact becomes copyable the moment a real one is published: the signature, the
+role line, the canonical head declaration, even the ``commit_id`` GitHub fills
+in for anybody who submits a review. Matching on those fields is therefore a
+predicate a human can satisfy on purpose, and a human who satisfies it while
+writing "do not merge" disappears from the run.
+
+So exclusion is decided by the one field nobody but GitHub assigns: the
+artifact's immutable id. A post is run-owned only when this run already proved
+it published *that exact id* — the loop snapshots the ids on the PR before each
+lane is launched, finds the single fresh artifact that satisfies the author,
+signature, role line, and exact head it demanded, and keeps that id. Every other
+post from those logins is human feedback, because an unattributed comment from a
+shared publishing account is precisely the case where a real human stop would
+otherwise disappear.
+
+Retained ids outlive the head they were published for. A second fix cycle still
+has to recognise what the first cycle published, so the run keeps its verified
+ids in its own state file rather than rediscovering them from body shape.
 
 Both of those rules take the direction that fails closed, which is why they use
 different granularity. Excluding a whole account from *being* feedback would
@@ -76,14 +89,12 @@ explicitly labelled as untrusted.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
 from .findings import Finding
 from .github import Comment, ReviewThread
 from .redaction import evidence as redact_evidence
-from .reviewers import carries_role, declares_a_head, is_full_sha
 
 # The acknowledgement contract for surfaces GitHub gives no resolution state.
 ACKNOWLEDGEMENT = "PR-PROVER: ACKNOWLEDGED"
@@ -102,43 +113,51 @@ UNTRUSTED_NOTE = (
 
 
 @dataclass(frozen=True)
-class LaneIdentity:
-    """How one configured lane's own published artifacts can be recognised.
+class RunArtifacts:
+    """What this run proved it published, by GitHub's own immutable ids.
 
-    Not "this login is an agent". A login is a publishing channel, and the same
-    channel can carry a lane's artifact and a human's comment — so what is
-    recognised here is the artifact, by every part of it the lane was configured
-    to produce together: the exact author, the configured signature, the whole
-    ``ROLE=`` line where the lane has a role, and a canonical head declaration
-    (or a review's GitHub-recorded ``commit_id``, which the author cannot type).
+    Not "these logins are agents", and not "this post has the right shape".
+    ``identifiers`` holds the ids readback verified at publication: for each one
+    the loop had already snapshotted the ids present on the PR before the lane
+    was launched, so a retained id is a post that did not exist until this run's
+    own lane published it. That is the single thing about an artifact a human
+    sharing the publishing account cannot reproduce. They can copy a signature,
+    a role line and a canonical ``HEAD=`` declaration out of any published
+    artifact, and GitHub will fill in a real ``commit_id`` for any review they
+    submit — but they cannot post under an id this run already recorded.
 
-    The head is deliberately not pinned to the head being proved. A lane's
-    artifact belongs to the head it was written for, and on a second cycle that
-    is an earlier commit; requiring today's SHA would reclassify this run's own
-    earlier evidence as human feedback. Requiring *a* canonical declaration is
-    what ordinary prose from the same account does not have.
+    ``publishers`` is the configured publishing logins, and it answers two
+    questions at deliberately different granularity. Ownership requires the
+    author to *still* match the retained id, so an id whose author no longer
+    agrees stops being recognised rather than being trusted. Acknowledgement
+    authority, in :func:`_acknowledgements`, excludes the whole login instead:
+    classifying a post as feedback by login would make a run stop less, while
+    refusing a login the power to clear feedback makes it stop more, and each
+    rule takes the direction that fails closed.
     """
 
-    author: str
-    signature: str
-    role: str = ""
+    identifiers: frozenset[str] = frozenset()
+    publishers: frozenset[str] = frozenset()
 
     def owns(self, item: Comment) -> bool:
-        """Is this published post that lane's own artifact?"""
-        if not self.author or item.author != self.author:
+        """Is this published post one this run proved it published itself?"""
+        if not item.identifier or item.identifier not in self.identifiers:
             return False
-        if not self.signature or self.signature not in item.body:
-            return False
-        if self.role and not carries_role(item.body, self.role):
-            return False
-        if item.commit_id:
-            return is_full_sha(item.commit_id)
-        return declares_a_head(item.body)
+        return item.author in self.publishers
 
 
 @dataclass(frozen=True)
 class FeedbackSurfaces:
-    """Every human-visible PR surface, read together at one moment."""
+    """Every human-visible PR surface, read together at one moment.
+
+    Equality here is the run's stable-observation check. Both this container and
+    everything it holds are frozen dataclasses, so ``==`` compares every field
+    the classifier can read — ids, authors, bodies, review states, commit
+    bindings, timestamps, thread resolution and outdated state, and each
+    thread's replies — recursively and without a hand-maintained field list that
+    could fall behind. Two reads that compare equal are one observation the
+    surfaces held still for; see :meth:`~pr_prover.loop.ProverLoop._stable_surfaces`.
+    """
 
     comments: tuple[Comment, ...] = ()
     reviews: tuple[Comment, ...] = ()
@@ -158,37 +177,33 @@ class _Acknowledgements:
 
 
 def human_findings(
-    surfaces: FeedbackSurfaces, *, head: str, agents: Iterable[LaneIdentity]
+    surfaces: FeedbackSurfaces, *, head: str, artifacts: RunArtifacts
 ) -> tuple[Finding, ...]:
     """Unresolved human feedback on this PR, as needs-Karan findings.
 
-    ``agents`` is the configured lanes' artifact identities, not their logins:
-    what is excluded is each lane's own published evidence, never everything a
-    shared publishing account ever said.
+    ``artifacts`` is what this run proved it published, by immutable id — not
+    the logins it published under. What is excluded is this run's own verified
+    evidence, never everything a shared publishing account ever said.
     """
-    lanes = tuple(agents)
-    acknowledged = _acknowledgements(surfaces, agents=lanes)
+    acknowledged = _acknowledgements(surfaces, artifacts=artifacts)
     findings: list[Finding] = []
-    findings.extend(_review_findings(surfaces.reviews, head=head, agents=lanes))
-    findings.extend(_thread_findings(surfaces.threads, head=head, agents=lanes))
+    findings.extend(_review_findings(surfaces.reviews, head=head, artifacts=artifacts))
+    findings.extend(_thread_findings(surfaces.threads, head=head, artifacts=artifacts))
     findings.extend(
-        _prose_findings(surfaces, head=head, agents=lanes, acknowledged=acknowledged)
+        _prose_findings(
+            surfaces, head=head, artifacts=artifacts, acknowledged=acknowledged
+        )
     )
     return tuple(findings)
 
 
-def _lane_artifact(item: Comment, agents: tuple[LaneIdentity, ...]) -> bool:
-    """Is this post one of the configured lanes' own published artifacts?"""
-    return any(lane.owns(item) for lane in agents)
-
-
 def _review_findings(
-    reviews: tuple[Comment, ...], *, head: str, agents: tuple[LaneIdentity, ...]
+    reviews: tuple[Comment, ...], *, head: str, artifacts: RunArtifacts
 ) -> list[Finding]:
     """Human authors whose latest decisive review still requests changes."""
     latest: dict[str, Comment] = {}
     for review in reviews:
-        if _lane_artifact(review, agents) or review.state not in _DECISIVE_REVIEW_STATES:
+        if artifacts.owns(review) or review.state not in _DECISIVE_REVIEW_STATES:
             continue
         latest[review.author] = review
     findings: list[Finding] = []
@@ -213,7 +228,7 @@ def _review_findings(
 
 
 def _thread_findings(
-    threads: tuple[ReviewThread, ...], *, head: str, agents: tuple[LaneIdentity, ...]
+    threads: tuple[ReviewThread, ...], *, head: str, artifacts: RunArtifacts
 ) -> list[Finding]:
     """Inline threads that are still live, by GitHub's own resolution state."""
     findings: list[Finding] = []
@@ -224,7 +239,7 @@ def _thread_findings(
             {
                 comment.author
                 for comment in thread.comments
-                if not _lane_artifact(comment, agents)
+                if not artifacts.owns(comment)
             }
         )
         if not humans:
@@ -251,12 +266,12 @@ def _prose_findings(
     surfaces: FeedbackSurfaces,
     *,
     head: str,
-    agents: tuple[LaneIdentity, ...],
+    artifacts: RunArtifacts,
     acknowledged: _Acknowledgements,
 ) -> list[Finding]:
     """Human prose on surfaces with no resolution state, and no acknowledgement."""
     findings: list[Finding] = []
-    for item, kind in _prose_items(surfaces, agents=agents):
+    for item, kind in _prose_items(surfaces, artifacts=artifacts):
         if item.identifier in acknowledged.cleared:
             continue
         if item.identifier in acknowledged.clearing:
@@ -290,19 +305,19 @@ def _prose_findings(
 
 
 def _prose_items(
-    surfaces: FeedbackSurfaces, *, agents: tuple[LaneIdentity, ...]
+    surfaces: FeedbackSurfaces, *, artifacts: RunArtifacts
 ) -> list[tuple[Comment, str]]:
     items: list[tuple[Comment, str]] = [
         (comment, "comment")
         for comment in surfaces.comments
-        if not _lane_artifact(comment, agents) and comment.body.strip()
+        if not artifacts.owns(comment) and comment.body.strip()
     ]
     items.extend(
         (review, "review-note")
         for review in surfaces.reviews
         # A review with a decisive state is handled by its state; one without —
         # a plain COMMENTED review — is prose with nothing to resolve it.
-        if not _lane_artifact(review, agents)
+        if not artifacts.owns(review)
         and review.state not in _DECISIVE_REVIEW_STATES
         and review.body.strip()
     )
@@ -310,7 +325,7 @@ def _prose_items(
 
 
 def _acknowledgements(
-    surfaces: FeedbackSurfaces, *, agents: tuple[LaneIdentity, ...]
+    surfaces: FeedbackSurfaces, *, artifacts: RunArtifacts
 ) -> _Acknowledgements:
     """Ids a human explicitly acknowledged *later*, by id and never by sentiment.
 
@@ -336,7 +351,7 @@ def _acknowledgements(
       a PR.
     """
     known = {item.identifier: item for item in (*surfaces.comments, *surfaces.reviews)}
-    publishing = frozenset(lane.author for lane in agents if lane.author)
+    publishing = artifacts.publishers
     cleared: set[str] = set()
     clearing: set[str] = set()
     for item in (*surfaces.comments, *surfaces.reviews):
@@ -425,6 +440,6 @@ __all__ = [
     "EXCERPT_LIMIT",
     "UNTRUSTED_NOTE",
     "FeedbackSurfaces",
-    "LaneIdentity",
+    "RunArtifacts",
     "human_findings",
 ]

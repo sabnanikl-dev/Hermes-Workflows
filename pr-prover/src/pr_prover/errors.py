@@ -73,6 +73,12 @@ class StaleHead(FailClosed):
     reason = "stale-head"
 
 
+class FeedbackDrift(FailClosed):
+    """The PR feedback surfaces changed while the run was reading them."""
+
+    reason = "feedback-drift"
+
+
 class AmbiguousPush(FailClosed):
     """The builder push cannot be bound to exactly one new remote head."""
 

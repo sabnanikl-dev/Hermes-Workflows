@@ -26,6 +26,7 @@ from _support import (
     reviewer_output,
 )
 from pr_prover import state as state_module
+from pr_prover.feedback import ACKNOWLEDGEMENT
 from pr_prover.findings import Finding
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop
 from pr_prover.state import MAX_ATTEMPTS, RunState
@@ -899,7 +900,12 @@ class PromptInjectionTests(LoopHarness):
         self.review_round(HEAD_A, [BLOCKER])
         # Signed, canonically bound to the head about to be pushed, and — the
         # part that decides — already on the PR before the builder was invoked.
-        self.remote.comment(fix_comment(HEAD_B))
+        # A copy this run did not publish is also unattributed feedback, so a
+        # human clears it explicitly; readback must still refuse to count it.
+        planted = self.remote.comment(fix_comment(HEAD_B))
+        self.remote.comment(
+            f"{ACKNOWLEDGEMENT} {planted.identifier}\n", author="karan"
+        )
         self.script.add(
             "lane-builder",
             builder_output(HEAD_B, addressed=["null-deref"]),
@@ -1085,8 +1091,13 @@ class CommentIdentityTests(LoopHarness):
         loop = self.build()
         self._blocked_round()
         # Posted before the run, with the right author, the right signature, and
-        # the SHA the builder is about to push.
-        self.remote.comment(fix_comment(HEAD_B), author=BUILDER_LOGIN)
+        # the SHA the builder is about to push. Since this run never published
+        # it, it is also unacknowledged feedback from a shared publishing login;
+        # a human clears that so the attempt still opens and readback decides.
+        planted = self.remote.comment(fix_comment(HEAD_B), author=BUILDER_LOGIN)
+        self.remote.comment(
+            f"{ACKNOWLEDGEMENT} {planted.identifier}\n", author="karan"
+        )
         self.script.add(
             "lane-builder",
             builder_output(HEAD_B, addressed=["null-deref"]),

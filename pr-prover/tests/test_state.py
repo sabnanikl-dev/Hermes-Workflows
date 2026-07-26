@@ -63,7 +63,16 @@ class StateFileTests(unittest.TestCase):
         self.assertEqual(payload["attempt"], 1)
         self.assertEqual(
             set(payload),
-            {"schema_version", "repo", "pr", "attempt", "head", "corrective_rerun_attempts", "outcome"},
+            {
+                "schema_version",
+                "repo",
+                "pr",
+                "attempt",
+                "head",
+                "corrective_rerun_attempts",
+                "outcome",
+                "verified_artifacts",
+            },
         )
 
     def test_unknown_keys_are_unexpected_state(self) -> None:
@@ -112,6 +121,85 @@ class StateFileTests(unittest.TestCase):
         with self.assertRaises(StateError) as caught:
             self.load()
         self.assertIn("reset", caught.exception.message)
+
+
+class VerifiedArtifactLedgerTests(unittest.TestCase):
+    """The ids readback proved are durable run evidence, not a cache.
+
+    They outlive the head they were published for on purpose: a second cycle
+    classifies a different commit, and the artifacts the first cycle published
+    are still this run's own evidence rather than human feedback on that head.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-artifacts-")
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "state.json"
+
+    def load(self) -> RunState:
+        return RunState.load(self.path, repo="example/repo", pr=7)
+
+    def test_a_fresh_run_owns_no_artifacts(self) -> None:
+        self.assertEqual(self.load().verified_artifacts, ())
+
+    def test_retained_ids_survive_a_restart_in_the_order_they_were_proved(self) -> None:
+        state = self.load()
+        self.assertTrue(state.remember_artifact("review:1"))
+        self.assertTrue(state.remember_artifact("IC_comment4"))
+        state.save()
+
+        self.assertEqual(self.load().verified_artifacts, ("review:1", "IC_comment4"))
+
+    def test_retaining_the_same_id_twice_changes_nothing(self) -> None:
+        state = self.load()
+        state.remember_artifact("review:1")
+        self.assertFalse(state.remember_artifact("review:1"))
+        self.assertEqual(state.verified_artifacts, ("review:1",))
+
+    def test_an_artifact_without_an_identifier_is_unexpected_state(self) -> None:
+        state = self.load()
+        for identifier in ("", "   "):
+            with self.subTest(identifier=identifier):
+                with self.assertRaises(StateError):
+                    state.remember_artifact(identifier)
+
+    def test_a_non_identifier_entry_on_disk_is_unexpected_state(self) -> None:
+        self.path.write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "repo": "example/repo",
+                    "pr": 7,
+                    "attempt": 0,
+                    "head": None,
+                    "corrective_rerun_attempts": [],
+                    "outcome": None,
+                    "verified_artifacts": [17],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(StateError):
+            self.load()
+
+    def test_a_repeated_artifact_id_on_disk_is_unexpected_state(self) -> None:
+        self.path.write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "repo": "example/repo",
+                    "pr": 7,
+                    "attempt": 0,
+                    "head": None,
+                    "corrective_rerun_attempts": [],
+                    "outcome": None,
+                    "verified_artifacts": ["review:1", "review:1"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(StateError):
+            self.load()
 
 
 class StateWriteFailureTests(unittest.TestCase):
