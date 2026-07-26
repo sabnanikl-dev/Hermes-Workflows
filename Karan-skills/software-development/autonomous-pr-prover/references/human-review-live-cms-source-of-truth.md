@@ -6,7 +6,7 @@ Session-derived pattern from a PR prover loop where the automated review lanes a
 
 1. **Human PR comments are merge blockers even when GitHub says the PR is approved and mergeable.**
    - An approving review decision, green checks, and a clean mergeable state are not sufficient if a human leaves a PR comment saying it is not mergeable.
-   - Read the PR conversation itself at closeout. A summary field that reports review state does not report human objections.
+   - A summary field that reports review state does not report human objections; when and how the conversation itself is read back is `pr-prover`'s, not this reference's.
 
 2. **Source-of-truth blockers are product blockers, not merely docs nits.**
    - If the intended source is a CMS/live data path, repo-local fallback assets may be acceptable only as fallback snapshots, not the canonical implementation.
@@ -26,7 +26,6 @@ Session-derived pattern from a PR prover loop where the automated review lanes a
 
 Head, commit, review, and thread readback belong to `pr-prover`; so does who authors a fix and how that authorship is disclosed. The source-of-truth half is what this reference adds:
 
-- the PR conversation since the last pass contains no human “not mergeable” blocker;
 - the endpoint/CMS projection returns the expected count, order, and public-safe fields **from the live source**, not merely from the upload response;
 - repo artifacts, fallback data, docs, and PR body all agree on which system is canonical;
 - tests and build pass after the source-of-truth fix.

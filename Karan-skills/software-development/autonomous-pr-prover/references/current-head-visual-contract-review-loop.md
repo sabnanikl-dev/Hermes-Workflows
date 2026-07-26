@@ -15,7 +15,7 @@ Use this reference when an already-open static/site PR gets a human visual-contr
 6. Pair the DOM probe with visual inspection (`browser_vision`) for changed visual components. For anchored sections, scroll the target into view and offset for sticky nav; if an anchor capture is misleading, use a taller full-page/section view plus DOM assertions.
 7. Treat the fix as a new exact head. Prior passes are historical; `pr-prover` re-runs the gates and the ordered review lifecycle, and this reference does not reassemble that closeout by hand.
 8. A lane that timed out after useful reads is not a pass. Useful partial reads and a real verdict are different things, and only the second one counts; `pr-prover` owns timeouts, retries, and how the lifecycle continues.
-9. Confirm by evidence that the human blocking comment has an actual later response — a fix commit or a reply that addresses it — not merely that automated checks went green again.
+9. Automated checks going green again is not a response to a human blocking comment. Whether a later fix commit or reply actually addresses it is exact-head evidence `pr-prover` reads back, not a closeout this reference reassembles.
 
 ## 320px iframe probe sketch
 

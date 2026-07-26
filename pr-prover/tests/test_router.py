@@ -16,18 +16,26 @@ also stay discoverable, linked, and truthful about what is shipped — including
 a status column that cannot be flattened to "everything shipped" without a
 test failing.
 
+What this module proves about the third property is deliberately bounded. It
+checks the exact committed reference set: the inventory, the router index, the
+named domain lesson each file exists for, and a fixed list of known conflicting
+command, API, credential, and role spellings that must not return. It does not
+decide whether an arbitrary English sentence is a lifecycle instruction. An
+earlier attempt to do that — pattern rules over concept vocabularies, proved
+against a curated sentence corpus — overclaimed, and three independent review
+lanes walked ordinary synonyms straight through it. Judging new reference prose
+is exact-head human/agent review; whether a bounded linter is worth building at
+all is PAPI-98 research and does not gate this slice.
+
 The scans deliberately describe the surface that exists on current ``main``.
 Nothing here assumes a later slice's module has already landed.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import unittest
-from collections import Counter
 from pathlib import Path
-from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parents[2]
 SKILL_DIR = REPO / "Karan-skills" / "software-development" / "autonomous-pr-prover"
@@ -105,10 +113,15 @@ CORE_MODULES = (
 # demonstrated "mark every row shipped" mutation, or a blanket "owed" — fails.
 QUALIFIED_INVARIANTS = ("M2", "M4", "M5", "M6", "M7", "M8", "M10", "M13")
 
-# Lifecycle prose the references must not carry. The router and ``MISSION.md``
-# own the A → B → Integration Auditor lifecycle, and ``pr-prover`` owns reviewer
-# publication, transport, credentials, and GitHub readback. A reference that
-# restates any of it becomes a second, conflicting implementation in prose.
+# The exact conflicting spellings already found in these references, pinned so
+# they cannot come back. The router and ``MISSION.md`` own the A → B →
+# Integration Auditor lifecycle, and ``pr-prover`` owns reviewer publication,
+# transport, credentials, and GitHub readback; a reference restating any of it
+# becomes a second, conflicting implementation in prose.
+#
+# This is a fixed inventory of known forms, not a decision procedure for
+# English. A new phrasing that means the same thing is caught by exact-head
+# review of the committed prose, not here.
 CONFLICTING_LIFECYCLE = (
     r"\bA/B\b",
     r"Reviewer A and (?:Reviewer )?B\b",
@@ -123,237 +136,6 @@ CONFLICTING_LIFECYCLE = (
     r"\breviewDecision\b",
 )
 
-
-class _Directive(NamedTuple):
-    """One ordinary-prose lifecycle instruction the references must not carry.
-
-    Deliberately no co-located sample. The previous shape paired each pattern
-    with an example sentence and then proved the pattern against that same
-    sentence, which is a tautology: three independent lanes each showed the
-    scan returning nothing for ordinary synonyms of the very instructions it
-    claimed to guard, while every focused test stayed green. Proof now comes
-    from ``LIFECYCLE_CORPUS``, a data file no rule here was written from.
-    """
-
-    name: str
-    pattern: str
-
-
-def _one_of(*alternatives: str) -> str:
-    return "(?:" + "|".join(alternatives) + ")"
-
-
-# The command spellings above are only half the failure. Deleting ``gh pr`` from
-# a reference while leaving "post it on the PR, hand it to the builder, aim the
-# next review pass" behind keeps the same parallel procedure, written in
-# English — which is exactly the false pass the auditor demonstrated by
-# appending one sentence to a clean reference and watching the scan stay green.
-#
-# The rules below are composed from concept vocabularies rather than written one
-# sentence at a time, because a list built around one set of spellings is what
-# ordinary synonyms walked straight through. A lifecycle *action* (publish, hand
-# off, review, control the cycle) is paired with the lifecycle *target* it acts
-# on, and the pair only counts in an instruction mood: a clause-initial
-# imperative, its negation, or a causative such as "have Codex inspect …".
-#
-# Mood is what keeps this from becoming a keyword ban. A reference may
-# *describe* a PR comment, a builder, Claude, a review, or the cycle cap as
-# domain evidence; banning those nouns would gut the lessons the files exist
-# for. What it may not do is *instruct* the operator to publish, hand off,
-# sequence a review, or control the cycle — those belong to ``MISSION.md`` and
-# ``pr-prover``.
-#
-# This is pattern matching over normalized clauses, not language understanding.
-# It is proportional to what it guards: fifteen short domain references, checked
-# against an independent corpus that decides whether the rules are broad enough.
-
-# Sentence structure.
-_MOOD = r"^(?:do not |don't |never |avoid )?"
-# "re-post", "re-run", and "re-review" are the same instruction as their bases.
-_AGAIN = r"(?:re-?)?"
-_GAP = r"[^.;:!?]{0,120}"
-
-# Lifecycle actions, grouped by the concern each one exercises.
-_PUBLISH = _one_of(
-    "post", "publish", "add", "record", "write", "note", "file", "submit",
-    "attach", "leave", "drop", "put", "place", "relay", "announce", "comment",
-    "push", "copy", "move",
-)
-_HANDOFF = _one_of(
-    "give", "hand", "pass", "send", "route", "forward", "deliver", "dispatch",
-    "launch", "prompt", "point", "assign", "task", "ask", "tell",
-)
-_REVIEWING = _one_of(
-    "review", "audit", "inspect", "assess", "evaluate", "examine", "check",
-    "run", "repeat", "redo", "schedule", "request", "aim", "direct", "target",
-    "order", "sequence",
-)
-_CYCLING = _one_of(
-    "start", "begin", "open", "allow", "permit", "use", "run", "spend",
-    "grant", "limit", "cap", "restrict", "repeat", "take",
-)
-_CAUSATIVE = _one_of(
-    "have", "ask", "get", "make", "tell", "let", "require", "instruct", "direct",
-)
-
-# Who work is handed to. Agent-shaped noun phrases only, so "scope the fix to
-# the visual blocker" stays the domain sentence it is.
-_AGENT = _one_of(
-    "claude", "codex",
-    r"(?:the|a|another|one)\s+(?:quiet\s+)?builder(?:\s+(?:lane|agent|pass|session))?",
-    r"(?:the|a|another)\s+fixer",
-    r"(?:the|a|another)\s+(?:fix|repair|corrective|correction|builder|build)\s+"
-    r"(?:lane|agent|pass|round|session)",
-    r"(?:fix|repair|corrective|builder|build)\s+lanes?",
-)
-# A published lifecycle artifact: a GitHub-ish venue word plus an artifact word.
-_PR_ARTIFACT = (
-    _one_of("pr", "prs", "pull[- ]request", "github", "blocking", "reviewer",
-            "review", "closeout", "adjudication", "issue")
-    + r"\b[^.;:!?]{0,40}?\b"
-    + _one_of("comments?", "threads?", "discussion", "conversation", "artifact",
-              "bus", "body", "description")
-)
-_PR_VENUE = _one_of("pr", "pull[- ]request", "github", "issue")
-# What a review instruction points at: the next pass, or the head it runs on.
-_REVIEW_TARGET = _one_of(
-    r"(?:new|newest|updated|latest|repaired|fixed|corrected|next|revised)\s+"
-    r"(?:exact\s+)?(?:head|revision|commit|diff|version)",
-    r"(?:fresh|new|another|second|follow-?up)\s+(?:audit|review|pass)",
-    r"review\s+(?:pass(?:es)?|rounds?|lanes?|prompts?|sequence)",
-    r"(?:reviewer|review)\s+lanes?",
-    r"(?:integration|three)\s+reviews?",
-    r"a,?\s*b,?\s*and\s+integration\s+reviews?",
-)
-# What a cycle instruction counts.
-_CYCLE_TARGET = _one_of(
-    r"(?:repair|fix|correction|corrective|builder|review)\s+"
-    r"(?:rounds?|cycles?|passes|pass)",
-    r"cycle[- ]cap",
-    r"another\s+(?:fix\s+|repair\s+)?cycle",
-)
-
-MANUAL_LIFECYCLE_DIRECTIVES = (
-    _Directive(
-        "publish-a-pr-artifact",
-        _MOOD + _AGAIN + _PUBLISH + r"\b" + _GAP + r"\b" + _PR_ARTIFACT + r"\b",
-    ),
-    _Directive(
-        "put-it-on-the-pr",
-        _MOOD + _AGAIN + _PUBLISH + r"\b" + _GAP
-        + r"\b(?:on|onto|to|into|in|under)\s+(?:the|this|that|a|an)\s+"
-        + _PR_VENUE + r"\b",
-    ),
-    _Directive(
-        "edit-the-pr-metadata",
-        _MOOD
-        + _one_of("update", "edit", "rewrite", "correct", "amend", "revise")
-        + r"\b" + _GAP + r"\b" + _one_of("pr", "pull[- ]request")
-        + r"\s+(?:body|title|description)\b",
-    ),
-    _Directive(
-        "hand-work-to-an-agent",
-        _MOOD + _AGAIN + _HANDOFF + r"\b" + _GAP + r"\b" + _AGENT + r"\b"
-        + r"|\bhand(?:s|ed|ing)?(?:\s+off)?\b[^.;:!?]{0,60}\bover\b"
-        + r"|" + _MOOD + r"escalate\b[^.;:!?]{0,60}\b(?:karan|hermes)\b",
-    ),
-    _Directive(
-        "direct-the-next-review",
-        _MOOD + _AGAIN + _REVIEWING + r"\b" + _GAP + r"\b" + _REVIEW_TARGET + r"\b"
-        + r"|^(?:the\s+)?(?:review|reviewer)\s+(?:lanes?|prompts?|passes)\s+"
-        r"(?:should|must|need to|have to|will|shall)\b"
-        + r"|\bask the (?:review )?lanes\b",
-    ),
-    _Directive(
-        "have-an-agent-do-the-work",
-        _MOOD + _CAUSATIVE + r"\s+(?:all\s+)?(?:the\s+|each\s+)?(?:three\s+)?"
-        + _one_of(_AGENT, "reviewers?", r"(?:review|reviewer)\s+lanes?",
-                  "auditors?", "integration auditor")
-        + r"\b[^.;:!?]{0,60}\b" + _AGAIN
-        + _one_of("review", "inspect", "assess", "evaluate", "examine", "audit",
-                  "check", "look", "repair", "fix", "correct", "address",
-                  "handle", "redo", "repeat")
-        + r"\b",
-    ),
-    _Directive(
-        "control-the-repair-cycle",
-        _MOOD + _AGAIN + _CYCLING + r"\b" + _GAP + r"\b" + _CYCLE_TARGET + r"\b"
-        + r"|\b(?:no more than|at most|not more than|up to)\s+"
-        r"(?:one|two|three|four|\d+)\s+[^.;:!?]{0,30}\b" + _CYCLE_TARGET + r"\b"
-        + r"|^respect the (?:cycle|fix)[- ]cap\b"
-        + r"|\bif another (?:fix |repair )?cycle is needed\b"
-        + r"|\bobtain explicit (?:human|karan)[a-z' ]{0,12}approval before continuing\b"
-        + r"|\b(?:two|three|\d+) (?:fix |repair )?cycles,? (?:maximum|max)\b",
-    ),
-)
-
-_FENCE = re.compile(r"^```")
-_LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
-_MARKUP = re.compile(r"[*_`>#\[\]]")
-# ", then …" and ", and then …" open a second instruction inside one sentence.
-_CLAUSE_BREAK = re.compile(r"(?<=[.;:!?])\s+|\s+—\s+|,\s+(?=(?:and\s+)?then\b)")
-_SMART = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'})
-# "If Karan expresses the preference in chat, put it on the PR first" and "On
-# the updated head, repeat the reviews" are the same imperatives as their bare
-# forms; a conditional or prepositional lead-in must not hide the verb from a
-# clause-anchored match.
-_LEAD_IN = re.compile(
-    r"^(?:if|when|once|whenever|after|before|unless|while|where|for|on|in|at|"
-    r"upon|during|from|with|as|given|assuming|following)\b[^,]{0,140},\s*"
-)
-_LEAD_ADVERB = re.compile(
-    r"^(?:and\s+)?(?:also|then|next|now|first|always|finally|instead|again|"
-    r"please|so)\b[,\s]+"
-)
-
-
-def prose_clauses(text: str) -> list[str]:
-    """Split Markdown prose into normalized clause openings.
-
-    Fenced code, table rows, and list/emphasis markup are dropped: the scan is
-    about instructions written to a human operator, and a probe sketch or a
-    boundary matrix row is domain content, not a procedure. What survives is
-    lowercased, whitespace-collapsed, and stripped of lead-ins, so mood can be
-    read off the opening word instead of off one particular spelling.
-    """
-    clauses: list[str] = []
-    fenced = False
-    for line in text.translate(_SMART).splitlines():
-        stripped = line.strip()
-        if _FENCE.match(stripped):
-            fenced = not fenced
-            continue
-        if fenced or not stripped or stripped.startswith("|"):
-            continue
-        stripped = _MARKUP.sub("", _LIST_MARKER.sub("", stripped)).strip().lower()
-        for clause in _CLAUSE_BREAK.split(re.sub(r"\s+", " ", stripped)):
-            clause = clause.strip()
-            while clause:
-                clauses.append(clause)
-                trimmed = _LEAD_ADVERB.sub("", _LEAD_IN.sub("", clause)).strip()
-                if trimmed == clause:
-                    break
-                clause = trimmed
-    return clauses
-
-
-def lifecycle_directives_in(text: str) -> list[tuple[str, str]]:
-    """Every (directive name, offending clause) pair the prose scan finds."""
-    return [
-        (directive.name, clause)
-        for clause in prose_clauses(text)
-        for directive in MANUAL_LIFECYCLE_DIRECTIVES
-        if re.search(directive.pattern, clause)
-    ]
-
-
-# The independent oracle. It is a data file on purpose: it holds sentences and
-# provenance, never patterns, so the scan above cannot be "proved" by the
-# examples it was built from. Every mutation the three lanes reported at
-# 5136419 is in it, alongside variants written from ordinary English.
-LIFECYCLE_CORPUS = json.loads(
-    (Path(__file__).resolve().parent / "lifecycle_corpus.json").read_text(encoding="utf-8")
-)
 
 # The reason each reference is kept. A rewrite that strips the conflicting
 # lifecycle prose must not also strip the domain lesson, and the mapping's key
@@ -554,6 +336,12 @@ class ReferenceContractTests(unittest.TestCase):
     CMS truth, human goal changes, clock and scratch hygiene. None of them may
     redefine lifecycle completion, reviewer publication, credential recovery, or
     the fix cycle: those belong to ``MISSION.md`` and ``pr-prover``.
+
+    That rule is a contract on the prose, and these tests are not the whole of
+    its enforcement. What is deterministic here is the exact committed set: the
+    inventory, the reachability, the named lesson each file keeps, and the fixed
+    list of conflicting spellings already found and removed. Whether a newly
+    written sentence crosses the line is a judgment made by exact-head review.
     """
 
     def setUp(self) -> None:
@@ -568,7 +356,8 @@ class ReferenceContractTests(unittest.TestCase):
             with self.subTest(reference=name):
                 self.assertGreater(len(text.strip()), 400, "a reference lost its content")
 
-    def test_no_reference_redefines_the_lifecycle_or_publication_mechanics(self) -> None:
+    def test_no_reference_carries_a_known_conflicting_lifecycle_spelling(self) -> None:
+        """The pinned inventory only: each exact form must stay absent."""
         for name, text in self.documents.items():
             for pattern in CONFLICTING_LIFECYCLE:
                 with self.subTest(reference=name, pattern=pattern):
@@ -596,88 +385,6 @@ class ReferenceContractTests(unittest.TestCase):
                 self.assertTrue(
                     any(re.search(pattern, sample, re.IGNORECASE) for sample in samples),
                     f"{pattern!r} no longer catches any known conflicting phrasing",
-                )
-
-    def test_no_reference_instructs_publication_handoff_or_sequencing_in_prose(self) -> None:
-        """The half of FROZEN-P92-004 that survived deleting the command spellings."""
-        for name, text in self.documents.items():
-            with self.subTest(reference=name):
-                self.assertEqual(
-                    lifecycle_directives_in(text),
-                    [],
-                    f"{name} instructs lifecycle mechanics MISSION.md/pr-prover own",
-                )
-
-    def test_the_adversarial_corpus_is_independent_of_the_scan(self) -> None:
-        """The oracle must come from outside the implementation.
-
-        A guard proved against its own examples proves nothing, which is how a
-        finite spelling list passed forty focused tests while returning nothing
-        for ordinary synonyms. So the corpus carries every mutation the three
-        lanes reported at this PR's reviewed head, plus variants written from
-        ordinary English rather than from the vocabularies above.
-        """
-        sources = Counter(item["source"] for item in LIFECYCLE_CORPUS["directives"])
-        for lane in ("reviewer-a", "reviewer-b", "integration-auditor"):
-            with self.subTest(lane=lane):
-                self.assertGreaterEqual(
-                    sources[lane], 5, f"{lane}'s reported mutations are not all recorded"
-                )
-        self.assertGreaterEqual(
-            sources["independent"], 6, "the corpus only restates what was already reported"
-        )
-        self.assertGreaterEqual(len(LIFECYCLE_CORPUS["descriptive"]), 15)
-
-    def test_the_prose_scan_catches_every_corpus_directive(self) -> None:
-        """Each independently written instruction, appended to a clean reference.
-
-        Reproduction from the re-review: append a single ordinary sentence to a
-        clean indexed reference and the previous scan still reported OK. Each
-        mutation is appended to a real, currently-clean reference, so a green
-        baseline and a red mutant are proved against the same document.
-        """
-        for name, text in sorted(self.documents.items()):
-            self.assertEqual(lifecycle_directives_in(text), [], f"{name} is not a clean baseline")
-        baseline = self.documents["deterministic-validator-false-pass-probes.md"]
-        for item in LIFECYCLE_CORPUS["directives"]:
-            with self.subTest(source=item["source"], sentence=item["sentence"]):
-                self.assertTrue(
-                    lifecycle_directives_in(f"{baseline}\n{item['sentence']}\n"),
-                    f"an appended {item['sentence']!r} still passes the scan",
-                )
-
-    def test_no_directive_rule_is_dead_weight(self) -> None:
-        """Non-vacuity, without letting a rule vouch for itself.
-
-        Every rule has to be reached by at least one sentence the corpus wrote
-        independently. A rule nothing in the corpus triggers is either
-        unreachable or tuned to wording no reviewer would actually use.
-        """
-        fired = {
-            name
-            for item in LIFECYCLE_CORPUS["directives"]
-            for name, _ in lifecycle_directives_in(item["sentence"])
-        }
-        self.assertEqual(
-            [rule.name for rule in MANUAL_LIFECYCLE_DIRECTIVES if rule.name not in fired],
-            [],
-            "a directive rule is never exercised by the independent corpus",
-        )
-
-    def test_the_prose_scan_is_not_indiscriminate(self) -> None:
-        """Domain evidence prose using the same nouns still passes.
-
-        This half matters as much as the catching half: "PR", "comment",
-        "review", "builder", "Claude", "Codex", "correction", and "cycle cap"
-        are load-bearing words in these lessons, and a scan that rejected them
-        as nouns would delete the content it is protecting.
-        """
-        for item in LIFECYCLE_CORPUS["descriptive"]:
-            with self.subTest(sentence=item["sentence"]):
-                self.assertEqual(
-                    lifecycle_directives_in(item["sentence"]),
-                    [],
-                    "the scan rejected descriptive domain evidence",
                 )
 
     def lesson_gaps(self, documents: dict[str, str]) -> list[tuple[str, str]]:
