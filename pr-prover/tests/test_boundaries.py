@@ -11,7 +11,7 @@ from pathlib import Path
 from _support import BUILDER_LOGIN, HEAD_A, REVIEWER_LOGIN, REVIEWER_SIGNATURE, make_source_repo
 from pr_prover import cli, redaction
 from pr_prover.commands import CommandResult
-from pr_prover.config import RunConfig
+from pr_prover.config import REQUIRED_REVIEWER_ROLES, RunConfig
 from pr_prover.errors import (
     CommandContractError,
     ConfigError,
@@ -265,8 +265,13 @@ def thread_node(
     return node
 
 
-def thread_page(*nodes: dict) -> dict:
-    return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": list(nodes)}}}}}
+def thread_page(*nodes: dict, has_next: bool = False, end_cursor: str = "CURSOR") -> dict:
+    """One slurped GraphQL page, with the top-level completeness signal it must carry."""
+    page_info: dict = {"hasNextPage": has_next}
+    if has_next:
+        page_info["endCursor"] = end_cursor
+    connection = {"pageInfo": page_info, "nodes": list(nodes)}
+    return {"data": {"repository": {"pullRequest": {"reviewThreads": connection}}}}
 
 
 class PaginatedFeedbackSurfaceTests(unittest.TestCase):
@@ -416,7 +421,10 @@ class PaginatedFeedbackSurfaceTests(unittest.TestCase):
 
     def test_top_level_thread_pagination_is_preserved(self) -> None:
         seen: list[tuple[str, ...]] = []
-        pages = [thread_page(thread_node("T1")), thread_page(thread_node("T2"))]
+        pages = [
+            thread_page(thread_node("T1"), has_next=True),
+            thread_page(thread_node("T2")),
+        ]
         stdout = json.dumps(pages)
 
         class Recorder:
@@ -428,6 +436,121 @@ class PaginatedFeedbackSurfaceTests(unittest.TestCase):
 
         self.assertEqual([thread.identifier for thread in threads], ["T1", "T2"])
         self.assertEqual(seen[0][:5], ("gh", "api", "graphql", "--paginate", "--slurp"))
+
+
+class TopLevelThreadCompletenessTests(unittest.TestCase):
+    """REVIEW-A-2 / IA-2: an incomplete thread payload is not an empty PR.
+
+    The defect these pin down: a null ``reviewThreads`` connection, a connection
+    with no ``nodes`` member, and a final captured page still reporting
+    ``hasNextPage`` were each read as "this PR has no review threads". Every one
+    of those is a read that never established how many threads exist, and the
+    empty tuple they produced is indistinguishable downstream from a clean PR —
+    so an unresolved human thread outside the returned data could reach
+    ``merge-ready``. The nested reply-completeness guard cannot help here: it
+    never runs when the top-level nodes were lost.
+    """
+
+    def boundary(self, *pages: object) -> GhCliGitHub:
+        stdout = json.dumps(list(pages))
+
+        class OneShot:
+            def run(self, argv, *, cwd=None, env=None, timeout=None, progress=None):
+                return CommandResult(argv=tuple(argv), returncode=0, stdout=stdout, stderr="")
+
+        return GhCliGitHub(OneShot())
+
+    def connection(self, value: object) -> dict:
+        return {"data": {"repository": {"pullRequest": {"reviewThreads": value}}}}
+
+    def test_a_null_connection_is_not_an_empty_thread_surface(self) -> None:
+        """Frozen probe ``THREAD_INCOMPLETE null_connection ACCEPTED 0``."""
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(self.connection(None)).review_threads("example/repo", 7)
+
+        self.assertIn("no usable reviewThreads connection", caught.exception.message)
+
+    def test_a_connection_without_nodes_is_not_an_empty_thread_surface(self) -> None:
+        """Frozen probe ``THREAD_INCOMPLETE missing_nodes ACCEPTED 0``."""
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(
+                self.connection({"pageInfo": {"hasNextPage": False}})
+            ).review_threads("example/repo", 7)
+
+        self.assertIn("no usable nodes array", caught.exception.message)
+
+    def test_a_null_nodes_member_is_not_an_empty_thread_surface(self) -> None:
+        with self.assertRaises(GitHubError):
+            self.boundary(
+                self.connection({"pageInfo": {"hasNextPage": False}, "nodes": None})
+            ).review_threads("example/repo", 7)
+
+    def test_a_final_page_that_still_reports_another_page_fails_closed(self) -> None:
+        """Frozen probe ``THREAD_INCOMPLETE truncated_top_page ACCEPTED 0``."""
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(thread_page(has_next=True)).review_threads("example/repo", 7)
+
+        self.assertIn("still reports another page", caught.exception.message)
+
+    def test_a_page_promising_more_without_a_cursor_fails_closed(self) -> None:
+        page = self.connection({"pageInfo": {"hasNextPage": True}, "nodes": []})
+
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(page, thread_page()).review_threads("example/repo", 7)
+
+        self.assertIn("hands over no cursor", caught.exception.message)
+
+    def test_a_page_sequence_that_stops_reporting_continuation_fails_closed(self) -> None:
+        """``--slurp`` concatenates; it does not prove the pages are one read."""
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(thread_page(), thread_page()).review_threads("example/repo", 7)
+
+        self.assertIn("not one coherent read", caught.exception.message)
+
+    def test_a_missing_page_info_fails_closed(self) -> None:
+        page = self.connection({"nodes": []})
+
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(page).review_threads("example/repo", 7)
+
+        self.assertIn("did not report whether more threads follow", caught.exception.message)
+
+    def test_a_non_boolean_page_flag_fails_closed(self) -> None:
+        for value in ("false", 0, None, []):
+            with self.subTest(value=value):
+                page = self.connection({"pageInfo": {"hasNextPage": value}, "nodes": []})
+                with self.assertRaises(GitHubError):
+                    self.boundary(page).review_threads("example/repo", 7)
+
+    def test_graphql_errors_are_not_a_successful_read(self) -> None:
+        """Partial data with an errors array exits zero and looks like a payload."""
+        page = self.connection({"pageInfo": {"hasNextPage": False}, "nodes": []})
+        page["errors"] = [{"message": "Something went wrong while executing your query."}]
+
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary(page).review_threads("example/repo", 7)
+
+        self.assertIn("GraphQL errors", caught.exception.message)
+
+    def test_a_null_repository_or_pull_request_fails_closed(self) -> None:
+        for payload in (
+            {"data": {"repository": None}},
+            {"data": {"repository": {"pullRequest": None}}},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(GitHubError) as caught:
+                    self.boundary(payload).review_threads("example/repo", 7)
+                self.assertIn("reviewThreads connection", caught.exception.message)
+
+    def test_no_pages_at_all_fails_closed(self) -> None:
+        with self.assertRaises(GitHubError) as caught:
+            self.boundary().review_threads("example/repo", 7)
+
+        self.assertIn("no review-thread pages", caught.exception.message)
+
+    def test_a_complete_empty_surface_is_still_accepted(self) -> None:
+        """Fail-closed must not mean a PR with genuinely no threads cannot pass."""
+        self.assertEqual(self.boundary(thread_page()).review_threads("example/repo", 7), ())
 
 
 class CanonicalHeadBindingTests(unittest.TestCase):
@@ -733,7 +856,7 @@ class ConfigTests(unittest.TestCase):
             "state_file": "state.json",
             "lock_file": "run.lock",
             "gates": [{"name": "tests", "argv": ["make", "test"]}],
-            "reviewers": [reviewer("A"), reviewer("B")],
+            "reviewers": [reviewer("A"), reviewer("B"), reviewer("IA", role="integration-auditor")],
             "builder": {
                 "argv": ["builder", "{blockers_file}"],
                 "signature": "Fixed by: Claude Code",
@@ -769,6 +892,77 @@ class ConfigTests(unittest.TestCase):
     def test_duplicate_lane_names_fail_closed(self) -> None:
         with self.assertRaises(ConfigError):
             self.load(reviewers=[reviewer("A"), reviewer("A", role="reviewer-b")])
+
+    # -- REVIEWER-B-2 / IA-4: the acceptance lifecycle is configuration ------
+    #
+    # The defect these pin down: configuration required only two lanes with
+    # unique roles, and the loop ran whatever array order it was given. Both
+    # ``check-config`` and the public loop therefore accepted a run with no
+    # Integration Auditor at all, or with the auditor running before the
+    # Reviewer A/B artifacts it exists to reconcile.
+    def test_a_run_without_the_integration_auditor_fails_closed(self) -> None:
+        """Frozen probe ``TWO_REVIEWER_CONFIG accepted=True``."""
+        with self.assertRaises(ConfigError) as caught:
+            self.load(reviewers=[reviewer("A"), reviewer("B")])
+
+        self.assertEqual(
+            caught.exception.evidence["configured_roles"], ["reviewer-a", "reviewer-b"]
+        )
+        self.assertEqual(
+            caught.exception.evidence["required_roles"], list(REQUIRED_REVIEWER_ROLES)
+        )
+
+    def test_an_auditor_first_lifecycle_fails_closed(self) -> None:
+        """Frozen probe ``AUDITOR_FIRST_CONFIG accepted=True``."""
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    reviewer("IA", role="integration-auditor"),
+                    reviewer("A"),
+                    reviewer("B"),
+                ]
+            )
+
+        self.assertEqual(
+            caught.exception.evidence["configured_roles"],
+            ["integration-auditor", "reviewer-a", "reviewer-b"],
+        )
+
+    def test_reviewer_a_and_b_out_of_order_fails_closed(self) -> None:
+        with self.assertRaises(ConfigError):
+            self.load(
+                reviewers=[
+                    reviewer("B"),
+                    reviewer("A"),
+                    reviewer("IA", role="integration-auditor"),
+                ]
+            )
+
+    def test_a_duplicated_required_role_fails_closed(self) -> None:
+        with self.assertRaises(ConfigError):
+            self.load(
+                reviewers=[
+                    reviewer("A"),
+                    reviewer("A2", role="reviewer-a"),
+                    reviewer("IA", role="integration-auditor"),
+                ]
+            )
+
+    def test_a_fourth_lane_is_not_part_of_the_required_lifecycle(self) -> None:
+        with self.assertRaises(ConfigError):
+            self.load(
+                reviewers=[
+                    reviewer("A"),
+                    reviewer("B"),
+                    reviewer("IA", role="integration-auditor"),
+                    reviewer("C", role="reviewer-c"),
+                ]
+            )
+
+    def test_the_required_lifecycle_is_accepted(self) -> None:
+        self.assertEqual(
+            [lane.role for lane in self.load().reviewers], list(REQUIRED_REVIEWER_ROLES)
+        )
 
     def test_required_visual_qa_without_a_visual_gate_fails_closed(self) -> None:
         with self.assertRaises(ConfigError) as caught:
@@ -868,7 +1062,11 @@ class CliTests(unittest.TestCase):
                     "state_file": str(self.tmp / "state.json"),
                     "lock_file": str(self.tmp / "run.lock"),
                     "gates": [],
-                    "reviewers": [reviewer("A"), reviewer("B")],
+                    "reviewers": [
+                        reviewer("A"),
+                        reviewer("B"),
+                        reviewer("IA", role="integration-auditor"),
+                    ],
                     "builder": {
                 "argv": ["builder", "{blockers_file}"],
                 "signature": "Fixed by: Claude Code",

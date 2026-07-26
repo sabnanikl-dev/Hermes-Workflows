@@ -112,7 +112,7 @@ def head_binding(body: str, *, head: str) -> HeadBinding:
     if len(declared) > 1:
         return HeadBinding(ok=False, problem="duplicate", declared="", count=len(declared))
     value = declared[0]
-    if not _is_full_sha(value):
+    if not is_full_sha(value):
         return HeadBinding(ok=False, problem="malformed", declared=value, count=1)
     if value != head:
         return HeadBinding(ok=False, problem="mismatch", declared=value, count=1)
@@ -124,7 +124,23 @@ def binds_head(body: str, *, head: str) -> bool:
     return head_binding(body, head=head).ok
 
 
-def _is_full_sha(value: str) -> bool:
+def declares_a_head(body: str) -> bool:
+    """Does ``body`` carry exactly one well-formed canonical head declaration?
+
+    The head-agnostic half of :func:`head_binding`, for the one question that
+    cannot name a head in advance: *is this post shaped like a run-owned lane
+    artifact at all?* A lane's artifact is bound to the head it was written for,
+    which on a second cycle is an earlier head than the one being proved now, so
+    identifying it cannot require today's SHA — but it can require that the post
+    declares some exact head the canonical way, which ordinary human prose from
+    the same account does not.
+    """
+    declared = head_declarations(body)
+    return len(declared) == 1 and is_full_sha(declared[0])
+
+
+def is_full_sha(value: str) -> bool:
+    """Is this exactly a full 40-character lowercase hex SHA?"""
     return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
 
 
@@ -227,7 +243,7 @@ def read_prepared(
             f"reviewer {reviewer}'s prepared artifact does not carry its configured signature",
             evidence={**evidence, "expected_signature": signature},
         )
-    if not _carries_role(body, role):
+    if not carries_role(body, role):
         raise ReviewerRelayError(
             f"reviewer {reviewer}'s prepared artifact does not carry its role on its own line",
             evidence={**evidence, "expected_role_line": f"ROLE={role}"},
@@ -262,16 +278,22 @@ def artifact_matches(artifact: Any, *, author: str, signature: str, role: str, h
         return False
     if signature not in artifact.body:
         return False
-    if not _carries_role(artifact.body, role):
+    if not carries_role(artifact.body, role):
         return False
     if artifact.commit_id:
         return artifact.commit_id == head
     return binds_head(artifact.body, head=head)
 
 
-def _carries_role(body: str, role: str) -> bool:
+def carries_role(body: str, role: str) -> bool:
+    """Does ``body`` carry exactly ``ROLE=<role>`` on a line of its own?
+
+    Matched as a whole line: read as a substring, ``ROLE=Auditor`` would satisfy
+    ``ROLE=A``.
+    """
     line = f"ROLE={role}"
     return any(candidate.strip() == line for candidate in body.splitlines())
+
 
 
 __all__ = [
@@ -283,8 +305,11 @@ __all__ = [
     "artifact_matches",
     "artifact_path",
     "binds_head",
+    "carries_role",
     "credential_free",
+    "declares_a_head",
     "head_binding",
     "head_declarations",
+    "is_full_sha",
     "read_prepared",
 ]

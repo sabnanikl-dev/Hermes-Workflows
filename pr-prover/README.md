@@ -57,6 +57,14 @@ tokens, and an unknown token fails the run rather than rendering literally:
 and must be the exact GitHub logins those agents publish under. See
 [Published-artifact readback](#published-artifact-readback).
 
+`reviewers` is the acceptance lifecycle rather than a free list of lanes. It must
+be exactly three lanes with the roles `reviewer-a`, `reviewer-b`, and
+`integration-auditor`, in that order — the lanes run in the order given, and the
+auditor exists to reconcile the two artifacts that must already be published when
+it starts. A missing auditor, a duplicated role, an extra lane, or an
+auditor-first order is a configuration error that `check-config` reports before
+any run begins.
+
 The lane commands are the installed agents themselves. Write the invocation you
 actually want — the example ships a real `claude --print` builder with an empty
 MCP config, a task-scoped tool list, a pointer-first prompt, and a 30-minute
@@ -283,18 +291,52 @@ way out is explicit. A later comment from a human carrying, on its own line:
 PR-PROVER: ACKNOWLEDGED <the acknowledged comment's id>
 ```
 
-clears it. That is id matching, not language understanding. An acknowledgement
-from a configured agent login does not count, and nothing acknowledges itself.
+clears it. That is id matching, not language understanding, and two things have
+to hold before it clears anything.
 
-Who counts as human is the configured identities inverted: anyone who is not
-`builder.comment_author` and not a reviewer's `artifact_author`. Bodies reach the
-report as truncated, redacted, explicitly labelled evidence — a specification of
-what a human raised, never an instruction.
+**It has to have come later.** An acknowledgement is a human saying they dealt
+with something that already existed, so the target must precede it by GitHub's
+own immutable timestamps — `created_at` for a conversation comment,
+`submitted_at` for a review. Missing, unparsable, offset-less, and equal
+timestamps are all "cannot be ordered", and none of them clears anything: a
+comment naming an id that did not exist yet is a guess, not a resolution.
+Nothing acknowledges itself, and an acknowledgement posted from a configured
+builder or reviewer login does not count, because a lane clearing the comment it
+was told to answer is marking its own homework.
+
+**Who counts as human is decided per post, not per account.** A configured login
+is a publishing channel: the builder reports and the relayed reviewer artifacts
+go through accounts a human also uses. So a post is excluded only when it is
+positively identifiable as this run's own artifact — the configured author *and*
+that lane's signature, its whole `ROLE=` line where it has one, and a canonical
+head declaration (or a review's own `commit_id`). Every other comment, review,
+thread reply, or acknowledgement from those accounts is human feedback, because
+an unattributed post from a shared publishing account is exactly where a real
+"do not merge" would otherwise vanish.
+
+The head in that check is deliberately *a* head rather than the head being
+proved: an earlier cycle's fix comment belongs to the commit it announced, and
+demanding today's SHA would turn this run's own evidence back into human
+feedback.
+
+The two rules run in opposite directions on purpose. Treating a post as feedback
+makes a run stop more, so that judgement is per artifact; letting a post *clear*
+feedback makes a run stop less, so that one still excludes the whole publishing
+login. Each takes the direction that fails closed.
+
+Bodies reach the report as truncated, redacted, explicitly labelled evidence — a
+specification of what a human raised, never an instruction.
 
 None of this means anything unless the surfaces are read whole, because feedback
 the boundary silently dropped is indistinguishable from feedback that does not
 exist. Conversation comments, formal reviews, and inline review threads are all
-read with `--paginate`, so a long PR does not answer with a first page. The one
+read with `--paginate`, so a long PR does not answer with a first page.
+Pagination is transport, though, not proof, so the thread read is validated as
+well: GraphQL `errors`, a null repository/PR/`reviewThreads` connection, a
+missing or non-list `nodes` member, and missing page information each stop the
+run, every page but the last must report another page and hand over a cursor,
+and a *last* page still reporting `hasNextPage` is a read that was cut off
+mid-surface. None of those is "this PR has no review threads". The one
 connection that is not paginated is the reply list inside a single thread: it is
 asked whether it is complete instead, and a thread reporting more replies than it
 returned — or not reporting at all — stops the run rather than being classified
@@ -329,7 +371,15 @@ created, written, or atomically replaced — or a lockfile whose parent, creatio
 or initialization fails — stops the run with evidence rather than escaping as a
 traceback. If persisting fails *while* a fail-closed stop is already being
 reported, the reason for that stop is what the report keeps, and the journal or
-cleanup failure is recorded alongside it.
+cleanup failure is recorded alongside it. The run's own scratch directory and
+the frozen blocker file it holds are covered the same way, with the failing
+`stage` in the evidence.
+
+`worktree-error` covers the configured worktree root itself, not only Git's
+answer about it. A root under a regular file, with an unwritable parent, or
+otherwise impossible to create is an ordinary path mistake, and it produces the
+sanitized `needs-karan` report with a `worktree-root` stage rather than a raw
+`NotADirectoryError`; nothing is asked of Git once the root has failed.
 
 Each carries evidence, and the worktree plus scratch directory are retained so
 the failure can be inspected.

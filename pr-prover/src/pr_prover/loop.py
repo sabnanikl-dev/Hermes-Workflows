@@ -114,7 +114,7 @@ from .errors import (
     StaleHead,
     StateError,
 )
-from .feedback import FeedbackSurfaces, human_findings
+from .feedback import FeedbackSurfaces, LaneIdentity, human_findings
 from .findings import (
     Adjudicator,
     Classification,
@@ -438,7 +438,7 @@ class ProverLoop:
             reviews=self.github.reviews(self.config.repo, self.config.pr),
             threads=self.github.review_threads(self.config.repo, self.config.pr),
         )
-        findings = human_findings(surfaces, head=head, agents=self._agent_logins())
+        findings = human_findings(surfaces, head=head, agents=self._lane_identities())
         unresolved = len([thread for thread in surfaces.threads if not thread.is_resolved])
         self._event(
             f"human feedback reconciled on {head}: {len(surfaces.comments)} comment(s), "
@@ -447,13 +447,33 @@ class ProverLoop:
         )
         return findings
 
-    def _agent_logins(self) -> frozenset[str]:
-        """The configured trusted-agent logins; everyone else on the PR is a human."""
-        return frozenset(
-            {
-                self.config.builder.comment_author,
-                *(reviewer.artifact_author for reviewer in self.config.reviewers),
-            }
+    def _lane_identities(self) -> tuple[LaneIdentity, ...]:
+        """How this run's own published artifacts can be told from human feedback.
+
+        Deliberately not a set of logins. The builder comments under one account
+        and the reviewer artifacts are relayed under another, and either can also
+        be an account a human types into — on this repository they are. Excluding
+        a whole login would make a genuine "do not merge" from Karan, posted
+        through a shared publishing account, indistinguishable from lane output.
+
+        So what is handed to the feedback seam is what each lane's own artifact
+        looks like — author *and* signature, plus the role line and head
+        declaration the readback checks already demand — and everything else on
+        those accounts stays human feedback.
+        """
+        return (
+            LaneIdentity(
+                author=self.config.builder.comment_author,
+                signature=self.config.builder.signature,
+            ),
+            *(
+                LaneIdentity(
+                    author=reviewer.artifact_author,
+                    signature=reviewer.artifact_signature,
+                    role=reviewer.role,
+                )
+                for reviewer in self.config.reviewers
+            ),
         )
 
     def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
@@ -1052,13 +1072,37 @@ class ProverLoop:
         return values
 
     def _scratch_dir(self) -> Path:
+        """The run's own scratch directory, or a fail-closed stop.
+
+        A configured root that is unusable — under a regular file, unwritable,
+        gone — is an ordinary configuration mistake, and the public promise is
+        that those become a sanitized ``needs-karan`` result. Letting the raw
+        filesystem error out of here would skip the report, the stable reason,
+        and the journalled outcome for a failure the tool understands perfectly
+        well.
+        """
         if self._scratch is None:
             root = self._scratch_root
-            if root is not None:
-                root.mkdir(parents=True, exist_ok=True)
-            self._scratch = Path(
-                tempfile.mkdtemp(prefix=f"pr-prover-{self.config.pr}-", dir=str(root) if root else None)
-            )
+            try:
+                if root is not None:
+                    root.mkdir(parents=True, exist_ok=True)
+                self._scratch = Path(
+                    tempfile.mkdtemp(
+                        prefix=f"pr-prover-{self.config.pr}-",
+                        dir=str(root) if root else None,
+                    )
+                )
+            except OSError as exc:
+                raise StateError(
+                    "the run's scratch directory could not be created",
+                    evidence={
+                        "scratch_root": redact_evidence(
+                            str(root) if root is not None else "<system temp>", limit=500
+                        ),
+                        "stage": "scratch-root",
+                        "error": type(exc).__name__,
+                    },
+                ) from exc
         return self._scratch
 
     def _write_blockers(
@@ -1093,7 +1137,18 @@ class ProverLoop:
             },
         }
         path = self._scratch_dir() / f"blockers-attempt{state.attempt}-{mode}.json"
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        try:
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise StateError(
+                "the frozen blocker set could not be written for the builder",
+                evidence={
+                    "blockers_file": redact_evidence(str(path), limit=500),
+                    "stage": "blockers-file",
+                    "attempt": state.attempt,
+                    "error": type(exc).__name__,
+                },
+            ) from exc
         return path
 
     def _retain(self, worktree: Path, *, why: str) -> None:

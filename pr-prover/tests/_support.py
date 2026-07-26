@@ -68,7 +68,14 @@ def reviewer_artifact(role: str, head: str, *, signature: str = REVIEWER_SIGNATU
 # -- fakes ----------------------------------------------------------------
 @dataclass
 class FakeRemote:
-    """The remote branch head, its history, and the published PR artifacts."""
+    """The remote branch head, its history, and the published PR artifacts.
+
+    Publishing anything stamps it with the next moment on a shared clock, the
+    way GitHub stamps ``created_at`` and ``submitted_at``. Posting order and
+    timestamp order therefore agree by default, and a test that needs them to
+    disagree — a pre-dated acknowledgement, two posts in the same second, an
+    artifact with no time at all — says so explicitly with ``created_at``.
+    """
 
     head: str = HEAD_A
     branch: str = BRANCH
@@ -83,10 +90,18 @@ class FakeRemote:
     _next_comment_id: int = 1
     _next_review_id: int = 1
     _next_thread_id: int = 1
+    _clock: int = 0
 
     def __post_init__(self) -> None:
         if not self.history:
             self.history = [self.head]
+
+    def now(self) -> str:
+        """The next moment on this PR's clock, as GitHub would render it."""
+        self._clock += 1
+        minutes, seconds = divmod(self._clock, 60)
+        hours, minutes = divmod(minutes, 60)
+        return f"2026-07-26T{hours:02d}:{minutes:02d}:{seconds:02d}Z"
 
     def push(self, head: str, *, comment: str | None = None, author: str = BUILDER_LOGIN) -> None:
         self.head = head
@@ -94,10 +109,15 @@ class FakeRemote:
         if comment is not None:
             self.comment(comment, author=author)
 
-    def comment(self, body: str, *, author: str = BUILDER_LOGIN) -> Comment:
+    def comment(
+        self, body: str, *, author: str = BUILDER_LOGIN, created_at: str | None = None
+    ) -> Comment:
         """Append a comment with a fresh, never-reused GitHub-style node id."""
         posted = Comment(
-            identifier=f"IC_comment{self._next_comment_id}", author=author, body=body
+            identifier=f"IC_comment{self._next_comment_id}",
+            author=author,
+            body=body,
+            created_at=self.now() if created_at is None else created_at,
         )
         self._next_comment_id += 1
         self.comments.append(posted)
@@ -110,6 +130,7 @@ class FakeRemote:
         author: str = REVIEWER_LOGIN,
         commit_id: str = "",
         state: str = "",
+        created_at: str | None = None,
     ) -> Comment:
         """Append a submitted review, which carries the commit it was made against."""
         posted = Comment(
@@ -119,6 +140,7 @@ class FakeRemote:
             kind="review",
             commit_id=commit_id,
             state=state,
+            created_at=self.now() if created_at is None else created_at,
         )
         self._next_review_id += 1
         self.reviews.append(posted)
@@ -410,6 +432,15 @@ def make_config(
                 "role": "reviewer-b",
                 "argv": [
                     "lane-reviewer-B", "--role", "{role}", "--head", "{head}", "--pr", "{pr}"
+                ],
+                "artifact_author": reviewer_author,
+                "artifact_signature": REVIEWER_SIGNATURE,
+            },
+            {
+                "name": "IA",
+                "role": "integration-auditor",
+                "argv": [
+                    "lane-reviewer-IA", "--role", "{role}", "--head", "{head}", "--pr", "{pr}"
                 ],
                 "artifact_author": reviewer_author,
                 "artifact_signature": REVIEWER_SIGNATURE,

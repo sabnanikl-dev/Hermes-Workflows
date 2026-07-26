@@ -169,7 +169,11 @@ class ReviewerRelayLifecycleTests(unittest.TestCase):
 
     def build(self, *, relay: bool = True) -> ProverLoop:
         reviewers = []
-        for name, role in (("A", "reviewer-a"), ("B", "reviewer-b")):
+        for name, role in (
+            ("A", "reviewer-a"),
+            ("B", "reviewer-b"),
+            ("IA", "integration-auditor"),
+        ):
             lane: dict[str, object] = {
                 "name": name,
                 "role": role,
@@ -236,8 +240,8 @@ class ReviewerRelayLifecycleTests(unittest.TestCase):
         result = self.build().run()
 
         self.assertEqual(result.outcome, MERGE_READY, result.evidence)
-        self.assertEqual(self.github.published, 2)
-        for reviewer in ("A", "B"):
+        self.assertEqual(self.github.published, 3)
+        for reviewer in ("A", "B", "IA"):
             with self.subTest(reviewer=reviewer):
                 self.assertTrue(
                     any(
@@ -257,7 +261,7 @@ class ReviewerRelayLifecycleTests(unittest.TestCase):
     def test_the_reviewer_process_never_holds_a_github_credential(self) -> None:
         self.build().run()
 
-        for reviewer in ("A", "B"):
+        for reviewer in ("A", "B", "IA"):
             with self.subTest(reviewer=reviewer):
                 self.assertEqual(self.probe(reviewer)["credentials"], [])
                 # Dropped by name, not by rebuilding the session around it.
@@ -271,7 +275,7 @@ class ReviewerRelayLifecycleTests(unittest.TestCase):
         relay_calls = [
             call for call in self.runner.calls if str(self.relay_script) in call.argv
         ]
-        self.assertEqual(len(relay_calls), 2)
+        self.assertEqual(len(relay_calls), 3)
         relay_envs = [env for env in self.runner.envs if env is None]
         self.assertTrue(relay_envs, "the relay inherits the session untouched")
 

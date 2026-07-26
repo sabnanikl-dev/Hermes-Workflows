@@ -12,16 +12,40 @@ from __future__ import annotations
 
 import json
 
-from _support import HEAD_A, HEAD_B, BUILDER_LOGIN, REVIEWER_LOGIN
+from _support import (
+    HEAD_A,
+    HEAD_B,
+    BUILDER_LOGIN,
+    REVIEWER_LOGIN,
+    REVIEWER_SIGNATURE,
+    SIGNATURE,
+    fix_comment,
+    reviewer_artifact,
+)
 from pr_prover.commands import CommandResult
 from pr_prover.errors import GitHubError
-from pr_prover.feedback import ACKNOWLEDGEMENT, FeedbackSurfaces, human_findings
+from pr_prover.feedback import (
+    ACKNOWLEDGEMENT,
+    FeedbackSurfaces,
+    LaneIdentity,
+    human_findings,
+)
 from pr_prover.github import Comment, GhCliGitHub, ReviewThread
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN
 from test_loop import BLOCKER, LoopHarness
 
 HUMAN = "human-reviewer"
 BLOCKING_PROSE = "do not merge; the migration drops data"
+# The lanes as this run's configuration describes them: an artifact carries the
+# author *and* the signature, and a reviewer's also its whole role line.
+LANES = (
+    LaneIdentity(author=BUILDER_LOGIN, signature=SIGNATURE),
+    LaneIdentity(author=REVIEWER_LOGIN, signature=REVIEWER_SIGNATURE, role="reviewer-a"),
+    LaneIdentity(author=REVIEWER_LOGIN, signature=REVIEWER_SIGNATURE, role="reviewer-b"),
+    LaneIdentity(
+        author=REVIEWER_LOGIN, signature=REVIEWER_SIGNATURE, role="integration-auditor"
+    ),
+)
 
 
 class UnresolvedHumanFeedbackTests(LoopHarness):
@@ -168,17 +192,26 @@ class ResolvedHumanFeedbackTests(LoopHarness):
         self.assertEqual(result.outcome, MERGE_READY)
 
     def test_an_agent_cannot_acknowledge_the_feedback_aimed_at_it(self) -> None:
-        """Only a human clears human feedback; a lane would be marking its own homework."""
-        loop = self.build()
-        raised = self.remote.comment(BLOCKING_PROSE, author=HUMAN)
-        self.remote.comment(
-            f"{ACKNOWLEDGEMENT} {raised.identifier}\n", author=BUILDER_LOGIN
-        )
-        self.review_round(HEAD_A)
+        """Only a human clears human feedback; a lane would be marking its own homework.
 
-        result = loop.run()
+        Acknowledgement authority is the one judgement still made by login. The
+        asymmetry is on purpose: reading a post as feedback by account makes a
+        run stop *less*, while refusing an account the power to clear feedback
+        makes it stop *more*, so each rule takes its own fail-closed direction.
+        """
+        for author in (BUILDER_LOGIN, REVIEWER_LOGIN):
+            with self.subTest(author=author):
+                self.setUp()
+                loop = self.build()
+                raised = self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+                self.remote.comment(
+                    f"{ACKNOWLEDGEMENT} {raised.identifier}\n", author=author
+                )
+                self.review_round(HEAD_A)
 
-        self.assertEqual(result.outcome, NEEDS_KARAN)
+                result = loop.run()
+
+                self.assertEqual(result.outcome, NEEDS_KARAN)
 
     def test_a_comment_cannot_acknowledge_itself(self) -> None:
         loop = self.build()
@@ -195,15 +228,273 @@ class ResolvedHumanFeedbackTests(LoopHarness):
         self.assertEqual(result.outcome, NEEDS_KARAN)
 
     def test_the_configured_agents_own_artifacts_are_not_human_feedback(self) -> None:
-        """The builder's and reviewers' own posts are the loop's own evidence trail."""
+        """The builder's and reviewers' own artifacts are the loop's evidence trail."""
         loop = self.build()
-        self.remote.comment("Fixed the blockers.", author=BUILDER_LOGIN)
-        self.remote.review("Reviewed.", author=REVIEWER_LOGIN, state="COMMENTED")
+        self.remote.comment(fix_comment(HEAD_A), author=BUILDER_LOGIN)
+        self.remote.review(
+            reviewer_artifact("reviewer-a", HEAD_A), author=REVIEWER_LOGIN, state="COMMENTED"
+        )
         self.review_round(HEAD_A)
 
         result = loop.run()
 
         self.assertEqual(result.outcome, MERGE_READY)
+
+    def test_an_earlier_cycles_fix_comment_is_still_this_runs_own_evidence(self) -> None:
+        """A lane artifact belongs to the head it was written for, not to today's."""
+        loop = self.build()
+        self.remote.comment(fix_comment(HEAD_B), author=BUILDER_LOGIN)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+
+
+class AcknowledgementChronologyTests(LoopHarness):
+    """REVIEW-A-1 / IA-1: an acknowledgement cannot clear feedback that came later.
+
+    The defect these pin down: acknowledgement targets were collected into one
+    global set with no time attached, so a comment posted *first* naming an id
+    that did not exist yet suppressed the feedback that arrived under that id.
+    A guessed or precomputed identifier was enough to turn an unresolved human
+    "do not merge" into ``merge-ready``.
+    """
+
+    def test_an_acknowledgement_posted_before_its_target_clears_nothing(self) -> None:
+        """The frozen probe, driven through the whole public loop."""
+        loop = self.build()
+        self.remote.comment(f"{ACKNOWLEDGEMENT} IC_comment2\n", author="karan")
+        raised = self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(raised.identifier, "IC_comment2", "the pre-ack named this id")
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertIn(
+            f"human-comment-{raised.identifier.lower().replace('_', '-')}",
+            [item.finding.id for item in result.classification.needs_karan],
+        )
+
+    def test_a_pre_acknowledgement_does_not_exempt_itself_either(self) -> None:
+        """Naming an id it cannot postdate is not bookkeeping; it is a comment."""
+        loop = self.build()
+        self.remote.comment(f"pre-cleared\n\n{ACKNOWLEDGEMENT} IC_comment2\n", author="karan")
+        self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(
+            sorted(item.finding.id for item in result.classification.needs_karan),
+            ["human-comment-ic-comment1", "human-comment-ic-comment2"],
+        )
+
+    def test_the_same_timestamp_is_not_proof_of_order(self) -> None:
+        loop = self.build()
+        raised = self.remote.comment(
+            BLOCKING_PROSE, author=HUMAN, created_at="2026-07-26T04:00:00Z"
+        )
+        self.remote.comment(
+            f"{ACKNOWLEDGEMENT} {raised.identifier}\n",
+            author="karan",
+            created_at="2026-07-26T04:00:00Z",
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+
+    def test_an_acknowledgement_with_no_timestamp_clears_nothing(self) -> None:
+        loop = self.build()
+        raised = self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        self.remote.comment(
+            f"{ACKNOWLEDGEMENT} {raised.identifier}\n", author="karan", created_at=""
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+
+    def test_a_target_with_no_timestamp_cannot_be_cleared(self) -> None:
+        loop = self.build()
+        raised = self.remote.comment(BLOCKING_PROSE, author=HUMAN, created_at="")
+        self.remote.comment(f"{ACKNOWLEDGEMENT} {raised.identifier}\n", author="karan")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+
+    def test_a_timestamp_with_no_offset_is_not_usable_ordering(self) -> None:
+        """A local-looking time from an unknown zone cannot be compared."""
+        loop = self.build()
+        raised = self.remote.comment(
+            BLOCKING_PROSE, author=HUMAN, created_at="2026-07-26T04:00:00"
+        )
+        self.remote.comment(
+            f"{ACKNOWLEDGEMENT} {raised.identifier}\n",
+            author="karan",
+            created_at="2026-07-26T05:00:00",
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+
+    def test_a_later_acknowledgement_still_clears_its_target(self) -> None:
+        """Fail-closed chronology must not break the way out that does hold up."""
+        loop = self.build()
+        raised = self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        self.remote.comment(f"{ACKNOWLEDGEMENT} {raised.identifier}\n", author="karan")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+
+    def test_a_review_note_is_ordered_by_when_it_was_submitted(self) -> None:
+        loop = self.build()
+        raised = self.remote.review("a thought", author=HUMAN, state="COMMENTED")
+        self.remote.comment(f"{ACKNOWLEDGEMENT} {raised.identifier}\n", author="karan")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+
+    def test_an_acknowledgement_of_something_not_on_the_pr_clears_nothing(self) -> None:
+        loop = self.build()
+        self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        self.remote.comment(f"{ACKNOWLEDGEMENT} IC_never_posted\n", author="karan")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+
+
+class SharedPublishingIdentityTests(LoopHarness):
+    """REVIEWER-B-1 / IA-3: a shared login does not erase a human's feedback.
+
+    The defect these pin down: every comment, review, and thread author from a
+    configured builder or reviewer login was excluded wholesale, without asking
+    whether the individual post carried that lane's signature, role line, or
+    head declaration. On this repository the builder reports and the relayed
+    reviewer artifacts are published through accounts a human also uses, so a
+    genuine "do not merge" typed into either account disappeared and the run
+    reported ``merge-ready``.
+    """
+
+    def test_a_human_comment_from_the_builder_login_still_blocks(self) -> None:
+        """Frozen probe ``IDENTITY_COLLISION author=sabnanikl-dev surface=comment``."""
+        loop = self.build()
+        self.remote.comment("Karan: do not merge this PR", author=BUILDER_LOGIN)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:comment"],
+        )
+
+    def test_a_change_request_from_the_reviewer_login_still_blocks(self) -> None:
+        """Frozen probe ``IDENTITY_COLLISION author=karanagent1 surface=review``."""
+        loop = self.build()
+        self.remote.review(
+            "Karan: do not merge this PR", author=REVIEWER_LOGIN, state="CHANGES_REQUESTED"
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:review"],
+        )
+
+    def test_a_comment_review_from_the_reviewer_login_still_blocks(self) -> None:
+        loop = self.build()
+        self.remote.review("one more thing", author=REVIEWER_LOGIN, state="COMMENTED")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:review-note"],
+        )
+
+    def test_an_inline_thread_from_a_publishing_login_still_blocks(self) -> None:
+        loop = self.build()
+        self.remote.thread("this is wrong", author=REVIEWER_LOGIN)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(
+            [item.finding.source for item in result.classification.needs_karan],
+            ["human-feedback:review-thread"],
+        )
+
+    def test_a_signed_artifact_from_the_same_login_is_not_human_feedback(self) -> None:
+        """The distinction is the artifact, so both halves must hold at once."""
+        loop = self.build()
+        self.remote.review(
+            reviewer_artifact("reviewer-b", HEAD_A),
+            author=REVIEWER_LOGIN,
+            state="CHANGES_REQUESTED",
+            commit_id=HEAD_A,
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+
+    def test_the_signature_alone_does_not_make_a_post_a_lane_artifact(self) -> None:
+        """A signature is public the moment a real artifact is posted."""
+        loop = self.build()
+        self.remote.comment(
+            f"do not merge\n\n---\n{SIGNATURE}\n", author=BUILDER_LOGIN
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+
+    def test_a_reviewer_body_carrying_another_lanes_role_is_not_that_lane(self) -> None:
+        loop = self.build()
+        self.remote.comment(
+            reviewer_artifact("reviewer-z", HEAD_A), author=REVIEWER_LOGIN
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+
+    def test_identical_feedback_from_an_unconfigured_login_behaves_the_same(self) -> None:
+        """The control arm of the frozen probe matrix."""
+        loop = self.build()
+        self.remote.comment("Karan: do not merge this PR", author="karan-human")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
 
 
 class UntrustedHumanTextTests(LoopHarness):
@@ -308,10 +599,22 @@ class OmittedFeedbackTests(LoopHarness):
         pages = json.dumps(
             [
                 [
-                    {"id": index, "user": {"login": BUILDER_LOGIN}, "body": "pushed a fix"}
+                    {
+                        "id": index,
+                        "user": {"login": BUILDER_LOGIN},
+                        "body": fix_comment(HEAD_A),
+                        "created_at": "2026-07-26T04:00:00Z",
+                    }
                     for index in range(100)
                 ],
-                [{"id": 100, "user": {"login": HUMAN}, "body": BLOCKING_PROSE}],
+                [
+                    {
+                        "id": 100,
+                        "user": {"login": HUMAN},
+                        "body": BLOCKING_PROSE,
+                        "created_at": "2026-07-26T04:30:00Z",
+                    }
+                ],
             ]
         )
 
@@ -319,7 +622,7 @@ class OmittedFeedbackTests(LoopHarness):
         findings = human_findings(
             FeedbackSurfaces(comments=comments),
             head=HEAD_A,
-            agents=frozenset({BUILDER_LOGIN, REVIEWER_LOGIN}),
+            agents=LANES,
         )
 
         self.assertEqual([item.source for item in findings], ["human-feedback:comment"])
@@ -327,13 +630,25 @@ class OmittedFeedbackTests(LoopHarness):
         self.assertEqual(findings[0].id, "human-comment-100")
 
     def test_an_all_agent_thread_slice_cannot_be_read_as_no_human_feedback(self) -> None:
-        """Why the boundary must raise: the truncated slice classifies as clean."""
+        """Why the boundary must raise: the truncated slice classifies as clean.
+
+        The slice has to be all *lane artifacts*, not merely all lane logins —
+        an unsigned reply from a publishing account is human feedback now — but
+        the point stands: a partial thread whose returned replies all belong to
+        this run produces nothing, so completeness cannot be decided here.
+        """
         truncated = (
             ReviewThread(
                 identifier="T1",
                 is_resolved=False,
                 is_outdated=False,
-                comments=(Comment(identifier="T1-c0", author=REVIEWER_LOGIN, body="nit"),),
+                comments=(
+                    Comment(
+                        identifier="T1-c0",
+                        author=REVIEWER_LOGIN,
+                        body=reviewer_artifact("reviewer-a", HEAD_A),
+                    ),
+                ),
             ),
         )
 
@@ -341,7 +656,7 @@ class OmittedFeedbackTests(LoopHarness):
             human_findings(
                 FeedbackSurfaces(threads=truncated),
                 head=HEAD_A,
-                agents=frozenset({BUILDER_LOGIN, REVIEWER_LOGIN}),
+                agents=LANES,
             ),
             (),
             "an all-agent slice is silently clean, so completeness must be decided earlier",
@@ -393,7 +708,7 @@ class FeedbackUnitTests(LoopHarness):
                 ),
             ),
             head=HEAD_A,
-            agents=frozenset({BUILDER_LOGIN, REVIEWER_LOGIN}),
+            agents=LANES,
         )
 
         self.assertEqual(len(findings), 2)
@@ -402,7 +717,7 @@ class FeedbackUnitTests(LoopHarness):
 
     def test_an_empty_pr_produces_nothing(self) -> None:
         self.assertEqual(
-            human_findings(self.surfaces(), head=HEAD_A, agents=frozenset()), ()
+            human_findings(self.surfaces(), head=HEAD_A, agents=()), ()
         )
 
     def test_a_whitespace_only_comment_is_not_feedback(self) -> None:
@@ -411,7 +726,7 @@ class FeedbackUnitTests(LoopHarness):
                 comments=(Comment(identifier="IC_1", author=HUMAN, body="   \n"),)
             ),
             head=HEAD_A,
-            agents=frozenset(),
+            agents=(),
         )
 
         self.assertEqual(findings, ())
@@ -422,7 +737,7 @@ class FeedbackUnitTests(LoopHarness):
                 comments=(Comment(identifier="IC_kwDO", author=HUMAN, body=BLOCKING_PROSE),)
             ),
             head=HEAD_A,
-            agents=frozenset(),
+            agents=(),
         )
 
         self.assertEqual(findings[0].id, "human-comment-ic-kwdo")

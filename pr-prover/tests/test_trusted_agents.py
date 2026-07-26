@@ -106,8 +106,10 @@ class TrustedLaneHarness(unittest.TestCase):
         )
 
     def review_round(self, head: str, findings=()) -> None:
+        """One full ordered round: Reviewer A, Reviewer B, then the auditor."""
         self.script.add("lane-reviewer-A", reviewer_output(head, findings))
         self.script.add("lane-reviewer-B", reviewer_output(head))
+        self.script.add("lane-reviewer-IA", reviewer_output(head))
 
     def fix_round(self, new_head: str, *, addressed=("null-deref",), comment: bool = True) -> None:
         self.script.add(
@@ -169,6 +171,13 @@ class LaneEnvironmentConfigTests(unittest.TestCase):
                     {
                         "name": "B",
                         "role": "reviewer-b",
+                        "argv": ["codex", "{role}", "{head}"],
+                        "artifact_author": REVIEWER_LOGIN,
+                        "artifact_signature": REVIEWER_SIGNATURE,
+                    },
+                    {
+                        "name": "IA",
+                        "role": "integration-auditor",
                         "argv": ["codex", "{role}", "{head}"],
                         "artifact_author": REVIEWER_LOGIN,
                         "artifact_signature": REVIEWER_SIGNATURE,
@@ -254,6 +263,7 @@ class _MinimalLoop:
         )
         self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
         self.script.add("lane-reviewer-B", reviewer_output(HEAD_A))
+        self.script.add("lane-reviewer-IA", reviewer_output(HEAD_A))
         loop.run()
 
 
@@ -423,7 +433,7 @@ class LaneObservationReportTests(TrustedLaneHarness):
         payload = as_dict(loop.run())
 
         lanes = {lane["lane"]: lane for lane in payload["lanes"]}
-        self.assertEqual(set(lanes), {"reviewer A", "reviewer B"})
+        self.assertEqual(set(lanes), {"reviewer A", "reviewer B", "reviewer IA"})
         for lane in lanes.values():
             self.assertEqual(lane["state"], "exited")
             self.assertEqual(lane["returncode"], 0)
@@ -621,7 +631,9 @@ class ReviewerArtifactReadbackTests(TrustedLaneHarness):
         result = loop.run()
 
         self.assertEqual(result.outcome, MERGE_READY)
-        self.assertEqual([review.commit_id for review in self.remote.reviews], [HEAD_A, HEAD_A])
+        self.assertEqual(
+            [review.commit_id for review in self.remote.reviews], [HEAD_A, HEAD_A, HEAD_A]
+        )
 
     def test_a_review_submitted_against_another_commit_does_not_satisfy_readback(self) -> None:
         loop = self.build()
@@ -716,8 +728,8 @@ class ReviewerArtifactReadbackTests(TrustedLaneHarness):
         self.assertEqual(result.outcome, MERGE_READY)
         self.assertEqual(result.head, HEAD_B)
         published = [comment for comment in self.remote.comments if comment.author == REVIEWER_LOGIN]
-        self.assertEqual(len(published), 4)
-        self.assertEqual(sum(1 for item in published if HEAD_B in item.body), 2)
+        self.assertEqual(len(published), 6)
+        self.assertEqual(sum(1 for item in published if HEAD_B in item.body), 3)
 
 
 # -- builder claims, reconciled against GitHub -----------------------------

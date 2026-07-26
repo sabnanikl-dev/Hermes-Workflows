@@ -117,5 +117,67 @@ class WorktreeProviderTests(unittest.TestCase):
         self.assertEqual(self.provider.created, ())
 
 
+class WorktreeRootFailureTests(unittest.TestCase):
+    """REVIEWER-B-3 / IA-5: a bad configured root is a result, not a traceback.
+
+    The defect these pin down: ``create()`` called ``Path.mkdir()`` directly,
+    and the loop's ``run()`` translates prover errors rather than raw
+    ``OSError`` subclasses. A worktree root configured under a regular file —
+    an ordinary path mistake — therefore escaped as a ``NotADirectoryError``
+    traceback instead of the sanitized ``needs-karan`` report, skipping the
+    stable ``worktree-error`` reason, the retained evidence, and the journalled
+    outcome the public contract promises.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-root-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name).resolve()
+        self.clone = make_source_repo(self.tmp)
+        self.runner = FakeRunner(FakeRemote())
+        self.source = SourceRepo(runner=self.runner, path=self.clone)
+
+    def provider_under_a_regular_file(self) -> WorktreeProvider:
+        blocker = self.tmp / "not-a-directory"
+        blocker.write_text("this is a file\n", encoding="utf-8")
+        return WorktreeProvider(self.source, blocker / "worktrees")
+
+    def test_a_root_beneath_a_regular_file_is_a_prover_error(self) -> None:
+        """The frozen probe ``WORKTREE_ROOT raised=builtins.NotADirectoryError``."""
+        provider = self.provider_under_a_regular_file()
+
+        with self.assertRaises(WorktreeError) as caught:
+            provider.create("inspect", HEAD_A)
+
+        self.assertEqual(caught.exception.reason, "worktree-error")
+        self.assertEqual(caught.exception.evidence["stage"], "worktree-root")
+        self.assertEqual(caught.exception.evidence["error"], "NotADirectoryError")
+        self.assertEqual(caught.exception.evidence["label"], "inspect")
+
+    def test_nothing_is_asked_of_git_once_the_root_failed(self) -> None:
+        provider = self.provider_under_a_regular_file()
+
+        with self.assertRaises(WorktreeError):
+            provider.create("inspect", HEAD_A)
+
+        self.assertEqual(
+            [call.argv[3] for call in self.runner.calls if call.argv[0] == "git"], []
+        )
+        self.assertEqual(provider.created, ())
+
+    def test_an_unwritable_root_parent_is_a_prover_error(self) -> None:
+        parent = self.tmp / "locked"
+        parent.mkdir()
+        parent.chmod(0o500)
+        self.addCleanup(parent.chmod, 0o700)
+        provider = WorktreeProvider(self.source, parent / "worktrees")
+
+        with self.assertRaises(WorktreeError) as caught:
+            provider.create("inspect", HEAD_A)
+
+        self.assertEqual(caught.exception.reason, "worktree-error")
+        self.assertEqual(caught.exception.evidence["stage"], "worktree-root")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

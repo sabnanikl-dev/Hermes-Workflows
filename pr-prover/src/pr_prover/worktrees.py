@@ -190,7 +190,24 @@ class WorktreeProvider:
                 "worktree path already exists; every attempt needs a fresh worktree",
                 evidence={"path": str(path)},
             )
-        self.root.mkdir(parents=True, exist_ok=True)
+        # A configured root that cannot hold a directory — a path under a
+        # regular file, an unwritable parent, a name that is too long — is an
+        # ordinary configuration mistake, and the loop's public contract is that
+        # those become a sanitized fail-closed result. Raw ``OSError`` from here
+        # would escape the prover-error boundary the caller catches and surface
+        # as a traceback instead of a ``worktree-error`` report.
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorktreeError(
+                "the configured worktree root could not be created",
+                evidence={
+                    "worktree_root": redact_evidence(str(self.root), limit=500),
+                    "label": label,
+                    "stage": "worktree-root",
+                    "error": type(exc).__name__,
+                },
+            ) from exc
         self.source.add_worktree(path, oid)
         self._created.append(path)
         return path

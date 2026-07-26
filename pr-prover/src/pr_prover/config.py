@@ -14,6 +14,13 @@ builder templates also get ``{attempt}``, ``{mode}`` (``initial`` or
 ``corrective``), and ``{blockers_file}``. Both file paths live under the OS temp
 directory, never inside a repo.
 
+The ``reviewers`` array is the acceptance lifecycle, not a free list of lanes:
+it must be exactly ``reviewer-a``, ``reviewer-b``, and ``integration-auditor``,
+in that order. The loop runs the lanes in the order given, and the auditor's job
+is to reconcile the artifacts the other two publish, so a missing, duplicated,
+or reordered required role is a configuration error rather than a run that
+quietly proves less than it claims.
+
 A reviewer may publish its own artifact, or — the shipped default — declare a
 ``relay``: the reviewer writes its finished artifact to ``{artifact_file}`` with
 no GitHub credential in its environment, and the separately configured relay
@@ -58,6 +65,16 @@ from .reviewers import CREDENTIAL_ENV
 
 SCHEMA_VERSION = 1
 GATE_KINDS = ("baseline", "visual")
+# The acceptance lifecycle, as configuration rather than operator convention.
+#
+# The mission fixes one ordered review sequence for a merge-readiness run:
+# Reviewer A, then Reviewer B, then the Integration Auditor — whose whole job is
+# to reconcile the two artifacts that must already exist when it runs. The loop
+# executes reviewer lanes in the order the config lists them, so "the auditor
+# ran last" is only true if the schema says it must be; a config with two lanes,
+# a duplicated role, or the auditor first would otherwise pass ``check-config``
+# and produce a run that never integrated anything.
+REQUIRED_REVIEWER_ROLES = ("reviewer-a", "reviewer-b", "integration-auditor")
 # A trusted builder reads the live PR, edits, runs verification, commits,
 # pushes, and comments. Twenty minutes is the floor of a realistic budget for
 # that; anything shorter tends to be killed mid-verification and misread as a
@@ -340,15 +357,22 @@ class RunConfig:
         reviewers = tuple(
             _reviewer(item, index) for index, item in enumerate(_sequence(raw, "reviewers", required=True))
         )
-        if len(reviewers) < 2:
-            raise ConfigError(
-                "config must define two independent reviewer lanes",
-                evidence={"reviewers": len(reviewers)},
-            )
         _reject_duplicates([reviewer.name for reviewer in reviewers], what="reviewer")
         # Two lanes sharing a role could each satisfy the other's artifact
-        # readback, which is exactly the independence the two lanes exist for.
+        # readback, which is exactly the independence the lanes exist for; and
+        # the required sequence is the acceptance lifecycle itself, so a missing
+        # auditor or a reordered one is rejected here rather than discovered
+        # afterwards in a run that already reported.
         _reject_duplicates([reviewer.role for reviewer in reviewers], what="reviewer role")
+        roles = tuple(reviewer.role for reviewer in reviewers)
+        if roles != REQUIRED_REVIEWER_ROLES:
+            raise ConfigError(
+                "config reviewers must be exactly "
+                + ", ".join(REQUIRED_REVIEWER_ROLES)
+                + ", in that order: the Integration Auditor reconciles the Reviewer A "
+                "and Reviewer B artifacts, so it cannot be missing, duplicated, or run first",
+                evidence={"required_roles": list(REQUIRED_REVIEWER_ROLES), "configured_roles": list(roles)},
+            )
 
         if visual_required and not any(gate.kind == "visual" for gate in gates):
             raise ConfigError(
@@ -588,6 +612,7 @@ __all__ = [
     "GATE_KINDS",
     "REALISTIC_BUILDER_BUDGET",
     "REALISTIC_REVIEWER_BUDGET",
+    "REQUIRED_REVIEWER_ROLES",
     "SCHEMA_VERSION",
     "BuilderConfig",
     "GateConfig",

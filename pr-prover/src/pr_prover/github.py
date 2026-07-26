@@ -97,6 +97,14 @@ class Comment:
     ``commit_id`` is set for submitted reviews, where GitHub itself records the
     commit reviewed. When it is present it is a stronger head binding than
     anything in the body, so the loop prefers it.
+
+    ``created_at`` is GitHub's own timestamp for the artifact — ``created_at``
+    for a conversation comment, ``submitted_at`` for a review. It is the only
+    ordering evidence here that the author does not write, which is what makes
+    it usable for the one question that needs an order: did this acknowledgement
+    exist before the feedback it claims to clear? It is carried verbatim and
+    judged in :mod:`pr_prover.feedback`; an absent or unparsable value is
+    unknown ordering, never "first".
     """
 
     identifier: str
@@ -106,6 +114,7 @@ class Comment:
     kind: str = "comment"
     commit_id: str = ""
     state: str = ""
+    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,11 +241,7 @@ class GhCliGitHub:
             ],
             what="pull request review threads",
         )
-        threads: list[ReviewThread] = []
-        for page in payload:
-            for node in _thread_nodes(page):
-                threads.append(_thread_from(node))
-        return tuple(threads)
+        return _threads_from_pages(payload)
 
     def _json(self, argv: Sequence[str], *, what: str) -> dict[str, Any]:
         payload = self._payload(argv, what=what)
@@ -362,6 +367,7 @@ def _issue_comment_from(payload: object) -> Comment:
         author=login,
         body=body or "",
         url=str(payload.get("html_url") or ""),
+        created_at=_timestamp(payload, "created_at", what="comment", author=login),
     )
 
 
@@ -401,31 +407,133 @@ def _review_from(payload: object) -> Comment:
         kind="review",
         commit_id=(commit_id or "").lower(),
         state=(state or "").upper(),
+        # A review's immutable ordering evidence is when it was submitted. A
+        # review still being drafted has no such moment, and it is carried as
+        # the empty string rather than invented.
+        created_at=_timestamp(payload, "submitted_at", what="review", author=login),
     )
 
 
-def _thread_nodes(page: object) -> list[Any]:
-    """The ``reviewThreads`` nodes of one GraphQL page, or nothing for an empty PR."""
+def _timestamp(payload: dict[str, Any], key: str, *, what: str, author: str) -> str:
+    """GitHub's own timestamp for an artifact, carried verbatim.
+
+    Absent or null is data — a review that was never submitted has no submission
+    time — and reaches the chronology check as "unknown", which fails closed
+    there. A present value of the wrong type is a payload this parser does not
+    understand, and guessing past that is how ordering evidence stops meaning
+    anything.
+    """
+    value = payload.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise GitHubError(
+            f"{what} payload has an unusable {key}",
+            evidence={"author": author, "field": key},
+        )
+    return value
+
+
+def _threads_from_pages(payload: list[Any]) -> tuple[ReviewThread, ...]:
+    """Every review thread on the PR, or a stop if the read was not complete.
+
+    ``--paginate --slurp`` is transport: it follows cursors and concatenates
+    what it received. It does not promise that what it received was a whole
+    answer, and this is the surface where that distinction decides an outcome —
+    "no unresolved threads" and "the threads never arrived" produce the same
+    empty tuple downstream, and the first of those clears a PR for merge.
+
+    So the page sequence is checked here rather than assumed: there is at least
+    one page, every page carries the connection and a usable node list, each
+    non-final page says another page follows and hands over a cursor to reach
+    it, and the final page says nothing follows. A run whose last captured page
+    still reports ``hasNextPage`` was cut off mid-surface, whatever the exit
+    status said.
+    """
+    if not payload:
+        raise GitHubError(
+            "gh returned no review-thread pages at all, so the thread surface is unknown"
+        )
+    last = len(payload) - 1
+    threads: list[ReviewThread] = []
+    for index, page in enumerate(payload):
+        nodes, has_next = _thread_page(page, index=index)
+        if index < last and not has_next:
+            raise GitHubError(
+                "a review-thread page reported no continuation but more pages followed, "
+                "so the captured sequence is not one coherent read",
+                evidence={"page": index, "pages": len(payload)},
+            )
+        if index == last and has_next:
+            raise GitHubError(
+                "the last captured review-thread page still reports another page, so "
+                "unresolved human feedback beyond it cannot be ruled out",
+                evidence={"page": index, "pages": len(payload)},
+            )
+        threads.extend(_thread_from(node) for node in nodes)
+    return tuple(threads)
+
+
+def _thread_page(page: object, *, index: int) -> tuple[list[Any], bool]:
+    """One GraphQL page's ``reviewThreads`` nodes, and whether another follows.
+
+    Every shape that is not an intact connection stops the read. A null
+    connection, an absent ``nodes`` member, and a partial-data response with
+    ``errors`` are each a page that says nothing about how many threads exist —
+    reading any of them as "this PR has no threads" is the exact substitution
+    this function exists to prevent.
+    """
+    where: dict[str, Any] = {"page": index}
     if not isinstance(page, dict):
-        raise GitHubError("review-thread payload is not an object")
+        raise GitHubError("review-thread payload is not an object", evidence=where)
+    errors = page.get("errors")
+    if errors:
+        raise GitHubError(
+            "the review-thread query returned GraphQL errors, so its data is partial",
+            evidence={**where, "errors": redact_evidence(json.dumps(errors, default=str), limit=1000)},
+        )
     cursor: Any = page.get("data", page)
     for key in ("repository", "pullRequest", "reviewThreads"):
         if not isinstance(cursor, dict):
             raise GitHubError(
                 "review-thread payload is missing the reviewThreads connection",
-                evidence={"missing_at": key},
+                evidence={**where, "missing_at": key},
             )
         cursor = cursor.get(key)
-    if cursor is None:
-        return []
     if not isinstance(cursor, dict):
-        raise GitHubError("review-thread payload has an unusable reviewThreads connection")
+        raise GitHubError(
+            "review-thread payload has no usable reviewThreads connection, which is "
+            "not the same answer as a PR with no threads",
+            evidence=where,
+        )
     nodes = cursor.get("nodes")
-    if nodes is None:
-        return []
     if not isinstance(nodes, list):
-        raise GitHubError("review-thread payload has an unusable nodes array")
-    return nodes
+        raise GitHubError(
+            "review-thread payload has no usable nodes array, so how many threads "
+            "exist is unknown rather than zero",
+            evidence=where,
+        )
+    page_info = cursor.get("pageInfo")
+    if not isinstance(page_info, dict):
+        raise GitHubError(
+            "review-thread payload did not report whether more threads follow",
+            evidence=where,
+        )
+    has_next = page_info.get("hasNextPage")
+    if not isinstance(has_next, bool):
+        raise GitHubError(
+            "review-thread payload did not report whether more threads follow",
+            evidence=where,
+        )
+    if has_next:
+        end_cursor = page_info.get("endCursor")
+        if not isinstance(end_cursor, str) or not end_cursor:
+            raise GitHubError(
+                "a review-thread page reports another page but hands over no cursor "
+                "to reach it, so the rest of the surface is unreachable",
+                evidence=where,
+            )
+    return nodes, has_next
 
 
 def _thread_from(node: object) -> ReviewThread:
