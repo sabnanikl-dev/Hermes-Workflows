@@ -1093,6 +1093,12 @@ class MixedAcknowledgementTests(LoopHarness):
     exempted everything else in the same body. A human writing "do not merge"
     above an acknowledgement cleared the old comment and erased the new stop in
     the same move, and the run could report ``merge-ready`` over it.
+
+    Its second half: exempting the ordinary prose was fixed by removing the
+    acknowledgement lines, but *every* line carrying the prefix was removed —
+    including ones that cleared nothing. So the same stop still disappeared when
+    it was written on a line that only looked like bookkeeping, and the
+    exemption has to be earned one line at a time.
     """
 
     def classify(self, *comments: Comment) -> tuple[str, ...]:
@@ -1176,6 +1182,85 @@ class MixedAcknowledgementTests(LoopHarness):
         )
 
         self.assertEqual(self.classify(first, second, mixed), ("human-comment-ic-ack",))
+
+    # -- the same rule, one acknowledgement line at a time ----------------
+    def test_an_ineffective_ack_line_beside_a_valid_one_is_still_feedback(self) -> None:
+        """The reported blocker: one good line took a malformed one out with it.
+
+        ``_residual_prose`` removed every line carrying the prefix once *any*
+        acknowledgement in the post held up, so a second line that cleared
+        nothing lost its text too — and the text it lost here says do not merge.
+        """
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{ACKNOWLEDGEMENT} {old.identifier}\n"
+            f"{ACKNOWLEDGEMENT} missing-target DO NOT MERGE\n"
+        )
+
+        self.assertEqual(self.classify(old, mixed), ("human-comment-ic-ack",))
+
+    def test_the_surviving_ack_line_is_quoted_as_the_unresolved_evidence(self) -> None:
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{ACKNOWLEDGEMENT} {old.identifier}\n"
+            f"{ACKNOWLEDGEMENT} missing-target DO NOT MERGE\n"
+        )
+
+        finding = human_findings(
+            FeedbackSurfaces(comments=(old, mixed)),
+            head=HEAD_A,
+            artifacts=NOTHING_PROVED,
+        )[0]
+
+        self.assertIn("DO NOT MERGE", finding.detail)
+        self.assertNotIn(
+            f"{ACKNOWLEDGEMENT} {old.identifier}",
+            finding.detail,
+            "the one line that really did bookkeeping is still spent",
+        )
+
+    def test_a_self_naming_ack_line_beside_a_valid_one_is_still_feedback(self) -> None:
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{ACKNOWLEDGEMENT} {old.identifier}\n{ACKNOWLEDGEMENT} IC_ack\n"
+        )
+
+        self.assertEqual(self.classify(old, mixed), ("human-comment-ic-ack",))
+
+    def test_a_premature_ack_line_beside_a_valid_one_is_still_feedback(self) -> None:
+        old = self.raised()
+        later = Comment(
+            identifier="IC_later",
+            author=HUMAN,
+            body="a second nit",
+            created_at="2026-07-26T00:00:09Z",
+        )
+        mixed = self.acknowledging(
+            f"{ACKNOWLEDGEMENT} {old.identifier}\n{ACKNOWLEDGEMENT} IC_later\n"
+        )
+
+        self.assertEqual(
+            self.classify(old, later, mixed),
+            ("human-comment-ic-later", "human-comment-ic-ack"),
+        )
+
+    def test_a_targetless_ack_line_beside_a_valid_one_is_still_feedback(self) -> None:
+        """A prefix with nothing after it names no id, so it clears nothing."""
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{ACKNOWLEDGEMENT} {old.identifier}\n{ACKNOWLEDGEMENT}\n"
+        )
+
+        self.assertEqual(self.classify(old, mixed), ("human-comment-ic-ack",))
+
+    def test_a_repeated_ack_line_does_no_bookkeeping_of_its_own(self) -> None:
+        """The second naming of one id is spare text, not a second clearance."""
+        old = self.raised()
+        mixed = self.acknowledging(
+            f"{ACKNOWLEDGEMENT} {old.identifier}\n{ACKNOWLEDGEMENT} {old.identifier}\n"
+        )
+
+        self.assertEqual(self.classify(old, mixed), ("human-comment-ic-ack",))
 
     # -- controls that must not move --------------------------------------
     def test_an_acknowledgement_only_post_is_still_not_feedback(self) -> None:

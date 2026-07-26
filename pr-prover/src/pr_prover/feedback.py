@@ -101,7 +101,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from .findings import Finding
@@ -228,10 +228,13 @@ class _Acknowledgements:
 
     # Ids proven acknowledged by a later human post.
     cleared: frozenset[str] = frozenset()
-    # Ids of the posts that did that clearing, which are bookkeeping rather than
-    # new feedback. A post whose acknowledgement did not hold up is not in here,
-    # so it stays ordinary feedback instead of exempting itself by naming an id.
-    clearing: frozenset[str] = frozenset()
+    # Per post that did that clearing, the body line numbers whose own
+    # acknowledgement was proven — the bookkeeping that post actually spent, and
+    # nothing else. A post whose acknowledgements all failed is absent, so it
+    # stays ordinary feedback instead of exempting itself by naming an id; and a
+    # line that failed is absent from a post whose other line held, so one valid
+    # acknowledgement cannot carry an ineffective one out of the body with it.
+    clearing: dict[str, frozenset[int]] = field(default_factory=dict)
 
 
 def human_findings(
@@ -333,8 +336,9 @@ def _prose_findings(
     for item, kind in _prose_items(surfaces, artifacts=artifacts):
         if item.identifier in acknowledged.cleared:
             continue
-        acknowledging = item.identifier in acknowledged.clearing
-        remainder = _residual_prose(item.body) if acknowledging else ""
+        spent = acknowledged.clearing.get(item.identifier)
+        acknowledging = spent is not None
+        remainder = _residual_prose(item.body, spent) if spent is not None else ""
         if acknowledging and not remainder:
             # A comment that really did clear earlier feedback, and said nothing
             # else, is bookkeeping rather than new feedback to clear in turn —
@@ -428,15 +432,22 @@ def _acknowledgements(
     known = {item.identifier: item for item in (*surfaces.comments, *surfaces.reviews)}
     publishing = artifacts.publishers
     cleared: set[str] = set()
-    clearing: set[str] = set()
+    clearing: dict[str, frozenset[int]] = {}
     for item in (*surfaces.comments, *surfaces.reviews):
         if item.author in publishing:
             continue
         acknowledged_at = _published_at(item)
         if acknowledged_at is None:
             continue
-        for identifier in _acknowledgement_targets(item.body):
-            if identifier == item.identifier:
+        # Judged per line, because the exemption is granted per line: a body
+        # holding one good acknowledgement and one that clears nothing keeps the
+        # second as prose.
+        spent: set[int] = set()
+        named: set[str] = set()
+        for line, identifier in _acknowledgement_targets(item.body):
+            if identifier == item.identifier or identifier in named:
+                # Naming itself resolves nothing, and a second line naming what
+                # an earlier line already cleared does no bookkeeping of its own.
                 continue
             target = known.get(identifier)
             if target is None:
@@ -447,8 +458,11 @@ def _acknowledgements(
             if raised_at is None or not raised_at < acknowledged_at:
                 continue
             cleared.add(identifier)
-            clearing.add(item.identifier)
-    return _Acknowledgements(cleared=frozenset(cleared), clearing=frozenset(clearing))
+            named.add(identifier)
+            spent.add(line)
+        if spent:
+            clearing[item.identifier] = frozenset(spent)
+    return _Acknowledgements(cleared=frozenset(cleared), clearing=clearing)
 
 
 def _published_at(item: Comment) -> datetime | None:
@@ -474,35 +488,44 @@ def _published_at(item: Comment) -> datetime | None:
     return moment
 
 
-def _acknowledgement_targets(body: str) -> tuple[str, ...]:
-    """The ids this body names on standalone acknowledgement lines."""
-    targets: list[str] = []
-    for line in body.splitlines():
-        stripped = line.strip()
+def _acknowledgement_targets(body: str) -> tuple[tuple[int, str], ...]:
+    """The ids this body names, each with the line number that named it.
+
+    The line number is what lets the exemption be granted per line rather than
+    per post: a caller can then take out exactly the lines that did bookkeeping
+    and leave the ones that did not.
+    """
+    targets: list[tuple[int, str]] = []
+    for line, text in enumerate(body.splitlines()):
+        stripped = text.strip()
         if not stripped.startswith(ACKNOWLEDGEMENT):
             continue
         target = stripped[len(ACKNOWLEDGEMENT) :].strip()
         if target:
-            targets.append(target)
+            targets.append((line, target))
     return tuple(targets)
 
 
-def _residual_prose(body: str) -> str:
-    """What a post still says once its acknowledgement lines are taken out.
+def _residual_prose(body: str, spent: frozenset[int]) -> str:
+    """What a post still says once its *proven* acknowledgements are taken out.
 
     An acknowledgement is one line of bookkeeping, not a licence for the rest of
     the body. A post can hold both — "do not merge, and by the way I dealt with
     that other thing" — and it is the commonest shape a human actually writes,
     because acknowledging is the moment they are already looking at the PR. So
-    what earns the bookkeeping exemption is an empty remainder, established the
-    same way :func:`_acknowledgement_targets` finds the lines in the first place,
-    rather than the mere presence of one valid acknowledgement somewhere in the
-    text.
+    what earns the bookkeeping exemption is an empty remainder rather than the
+    mere presence of one valid acknowledgement somewhere in the text.
+
+    Which lines are spent is decided in :func:`_acknowledgements`, one line at a
+    time, and only those are removed. Recognising the prefix again here instead
+    would hand the exemption to every line that merely looks like one: a body
+    reading ``PR-PROVER: ACKNOWLEDGED <real id>`` above ``PR-PROVER:
+    ACKNOWLEDGED missing-target DO NOT MERGE`` clears the first id, clears
+    nothing with the second, and the stop written on that second line would
+    vanish with it.
     """
     return "\n".join(
-        line
-        for line in body.splitlines()
-        if not line.strip().startswith(ACKNOWLEDGEMENT)
+        text for line, text in enumerate(body.splitlines()) if line not in spent
     ).strip()
 
 
