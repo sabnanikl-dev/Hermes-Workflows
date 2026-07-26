@@ -217,6 +217,8 @@ Before reporting completion:
 - Treat canonical YAML validation as a deterministic repo hygiene layer, not just JSON Schema validation. Check parse success, required fields, namespaced stable IDs, duplicate ontology object IDs, practical references, evidence/source references, and obvious secret patterns.
 - Evidence source IDs should be local to their file's `source_registry` / `evidence_sources`. It is normal and useful for multiple modules to reuse a source ID such as `femme-local-seo-sot`; do not reject those as global duplicates. Reserve global duplicate checks for ontology object IDs such as clients, modules, entities, relationships, rules, projections, claims, approval gates, and state machines.
 - If Python YAML libraries are unavailable, Ruby stdlib YAML can be used as a dependency-light parser from Python subprocesses. Prefer broadly compatible calls such as `YAML.load_file(ARGV[0])`; avoid newer Psych keyword arguments unless verified on the host.
+- When smoke-testing the packaged CLI with `pip install .`, setuptools may leave `scripts/client_ontologies.egg-info/` in the source checkout because `scripts/` is the package root. Remove that generated directory after the test and verify `git status --short` is clean; never commit it.
+- JSON Schema can enforce that a regex payload is a string but cannot prove the pattern compiles. For executable ontology checks such as `regex_policy`, add a deterministic semantic validation pass that calls the runtime regex compiler, reject compilation errors before runtime, and cover the failure with a registered negative fixture plus an engine backstop test.
 
 ## Refresh an Existing Issue Roadmap
 
@@ -230,6 +232,9 @@ When asked to refresh a roadmap or working order for the canonical ontology repo
 6. Refresh the existing PR title and body as well as the roadmap file, then verify local `HEAD`, the raw remote branch ref, and the PR head commit all match.
 7. Treat CI as fresh only when the workflow/check-run is attached to the new head SHA; old green checks on the same PR are not verification of the refresh.
 8. Keep roadmap phase and exit gates compatible with the linked issues' evidence contract. Do not require an “evidence-backed” or `verified` resource when the issue deliberately requires an honest `draft`/`unknown` authoring proof because no source snapshot exists. Prefer gates such as “validator-compliant and modeled honestly against available evidence,” while still requiring citations wherever the source supports the fact.
+9. Audit the distinction between **model representation**, **actual client coverage**, and **runtime queryability**. If an issue adds schema/SQLite resources but no supported service/CLI operation, either refine that issue or create a focused read-only runtime contract; do not let “exported” stand in for “usable by consumers.”
+10. Do not call an adapter or feature “the next PR” unless a live issue actually owns it. A packaged fail-closed placeholder (for example, an MCP entry point) is not an implementation plan.
+11. Treat extraction libraries and pilots as bounded lanes inside a broader intake architecture, not as the architecture itself. Preserve normalized-source, classification/privacy, reconciliation/conflict-staging, human-review, and no-auto-promotion boundaries in the roadmap.
 9. Do not merge merely because the refreshed PR is clean and mergeable unless the user separately authorizes the merge.
 
 See `references/github-roadmap-refresh.md` for the reconstruction, sequencing, coverage-check, and PR-verification pattern.
@@ -248,6 +253,24 @@ When strategic-engineering and ontology-development notebooks are used to critiq
 8. If approved to mutate GitHub, create new issues first to obtain real IDs, then link those IDs from dated refinement sections appended to existing issue bodies. Re-read and assert every mutation.
 
 See `references/notebooklm-harness-enhancement-review.md` for the grounding packet, adjudication rules, common accepted/rejected recommendations, and safe mutation order.
+
+## Consumer Breadth and Roadmap Audit
+
+When the ontology or CLI is being evaluated as a usable client operating system, audit three layers separately:
+
+1. **Model representation:** can the schema express the concept?
+2. **Client coverage:** is the relevant business/technical knowledge actually modeled with evidence and honest status?
+3. **Runtime queryability:** can a consumer retrieve and traverse it through the supported service/CLI?
+
+Do not treat validation, SQLite export, or a copy-check command as proof of all three. If relationships, systems, approvals, actions, or state machines are canonical/exported but absent from the runtime surface, classify that as a consumer gap and add explicit service/CLI acceptance criteria to the owning issue.
+
+Use deterministic, projection-scoped competency questions to define useful coverage, including multi-hop relationship questions. Prefer entity/relationship/system/state query primitives before semantic retrieval; activate GraphRAG/vector work only after full-load or filtered SQLite fails a measured competency requirement.
+
+For source intake, require conflict-aware candidate staging and human reconciliation before proposed canonical patches. Do not add a generic canonical conflict status or contradiction detector until repeated real cases prove that unresolved conflict is durable ontology data rather than temporary intake state.
+
+When cross-checking a roadmap with NotebookLM, provide a verified repo digest and adjudicate its recommendations against live schema/issues. Correct duplicate or already-delivered recommendations and ask for a replacement; source-grounded principles can still be valid when NotebookLM's repo-state conclusion is stale.
+
+See `references/runtime-coverage-and-notebooklm-alignment.md` for the detailed audit, competency, intake-conflict, NotebookLM correction-loop, and roadmap-coverage pattern.
 
 ## Pitfalls
 

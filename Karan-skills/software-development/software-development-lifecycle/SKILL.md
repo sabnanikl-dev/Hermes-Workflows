@@ -42,6 +42,8 @@ Do not guess. Reproduce the issue, observe logs/state, form hypotheses, test one
 ### Review
 Use security and correctness gates before style comments. If adding GitHub review comments, target real diff lines.
 
+For behavior-preserving exporter/serializer/database refactors with a narrow additive change, use `references/additive-export-refactor-parity.md`: generate artifacts from exact base and PR heads, compare every legacy schema plus normalized complete rows, then assert the additive surface separately. Equal row counts alone are not preservation proof.
+
 ### Repo contract/spec PRs with no live scaffold
 When an issue asks for a schema/API/query contract but the live scaffold does not exist yet (for example a future CMS schema in an otherwise static repo), avoid stopping at prose. Make the contract executable inside the repo:
 1. Add a human-readable contract under the repo's existing contract/API docs path (for example `docs/api/*-contract.md`) with field lists, lifecycle states, query contract, forbidden fields/non-goals, and explicit live-change boundaries.

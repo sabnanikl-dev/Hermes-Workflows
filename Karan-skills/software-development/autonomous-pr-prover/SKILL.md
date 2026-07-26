@@ -61,6 +61,7 @@ Two fix cycles, maximum; a partial builder fix gets one corrective rerun inside 
 - A human changed a page's purpose, copy, or conversion goal → `references/human-copy-goal-contract-cascade.md`.
 - Optional injected clocks, or reviewer scratch files contaminating the diff → `references/injected-clock-and-reviewer-scratch-hygiene.md`.
 - Partial evidence runs with independently complete rows → `references/partial-run-independent-row-contract.md`.
+- The PR adds or changes a read-only checker, validator, or evidence verifier that could report clean over nothing → `references/deterministic-validator-false-pass-probes.md`.
 
 ## Merge authority
 

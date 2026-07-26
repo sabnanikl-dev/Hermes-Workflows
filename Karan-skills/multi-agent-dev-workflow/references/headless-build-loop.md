@@ -64,9 +64,10 @@ The harness template is repo-agnostic. Populate `docs/spec.md` with project-spec
 ### Build Session
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5' --print \
   --no-session-persistence \
-  --dangerously-skip-permissions \
+  --permission-mode dontAsk \
+  --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
   --system-prompt-file <repo-root-process-file> \
   "Read docs/spec.md for project context.
    Read issue #N (fetch via GitHub API).
@@ -94,9 +95,10 @@ codex --yolo exec "Review PR #N.
 ### Fix Session (if needed)
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5' --print \
   --no-session-persistence \
-  --dangerously-skip-permissions \
+  --permission-mode dontAsk \
+  --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
   --system-prompt-file <repo-root-process-file> \
   "Checkout branch feat/issue-N.
    Read docs/spec.md for context.

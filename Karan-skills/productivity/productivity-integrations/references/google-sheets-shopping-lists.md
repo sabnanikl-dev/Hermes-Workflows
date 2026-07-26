@@ -23,11 +23,15 @@ Use `=HYPERLINK("URL", "Label")` for link cells so the sheet remains legible.
 2. Identify rows by stable **Item** labels, not row numbers; row numbers change after removals.
 3. On a user revision, remove superseded items and replace conflicting rows in place. Optional choices should be named `Optional ... pivot` and placed beside the default item.
 4. Clear/rewrite the bounded table only if needed to preserve coherent phase ordering; then reset the filter range.
+   - If dependent annotations, formulas, or audit columns live to the right of the rewritten range, rebuild or clear those columns in the same mutation. Deleting/renaming rows in `A:L` while leaving `M:Q` untouched silently shifts compatibility notes onto the wrong items.
+   - Rebuild dependent columns by stable item/record key, never by the prior row order.
 5. Read back and assert:
    - expected row count;
    - required new/replaced item labels exist;
    - intended removed labels are absent;
-   - source-note topics exist.
+   - source-note topics exist;
+   - several known item → annotation/formula pairs still align after any row deletion, insertion, or rename;
+   - filter ranges cover the full final table width and row count.
 6. If the file is created under an agent OAuth owner, share only with the explicitly known owner/collaborator and verify Drive permission readback.
 
 ## Hardware compatibility checklist

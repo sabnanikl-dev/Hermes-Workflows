@@ -56,7 +56,8 @@ claude --safe-mode --model sonnet --print 'Reply exactly CLAUDE_READY'
 
 cd /path/to/repo
 env -u GH_TOKEN claude --safe-mode --model sonnet --print \
-  --dangerously-skip-permissions \
+  --permission-mode dontAsk \
+  --allowedTools 'Read,Glob,Grep,Bash(git *)' \
   --system-prompt-file AGENTS.md \
   'Smoke test only. Do not edit files. Run git status --short --branch, then reply DONE: CLAUDE_BUILDER_READY'
 ```

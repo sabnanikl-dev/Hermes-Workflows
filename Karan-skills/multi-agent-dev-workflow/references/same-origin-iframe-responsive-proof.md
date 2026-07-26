@@ -17,6 +17,37 @@ Use this for static frontend PRs when exact-width browser evidence is required b
 7. After every follow-up commit, refresh the live PR head and rerun the proof with the new head embedded in the harness title/output. Old-head screenshots and metrics are stale even when the follow-up is docs-only.
 8. Delete the scratch harness, stop the local server, and verify `git status` is clean before launching reviewers.
 
+## React/Vite mount and scrolling pitfall
+
+For client-rendered pages, an iframe's `load` event can fire before React has mounted the target component. A one-shot `frame.onload => target.scrollIntoView()` may therefore do nothing even though the element appears moments later.
+
+Use a bounded target wait, then scroll the frame's actual scrolling element explicitly:
+
+```js
+async function revealInFrame(frame, selector, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let target;
+  while (Date.now() < deadline) {
+    target = frame.contentDocument?.querySelector(selector);
+    if (target) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!target) throw new Error(`Target did not mount: ${selector}`);
+
+  const doc = frame.contentDocument;
+  const scroller = doc.scrollingElement;
+  scroller.scrollTop = target.getBoundingClientRect().top + scroller.scrollTop - 200;
+  return {
+    scrollTop: scroller.scrollTop,
+    targetY: target.getBoundingClientRect().y,
+  };
+}
+```
+
+Prefer `frame.contentDocument.scrollingElement.scrollTop` as the verification source. Some browser-automation contexts can report a stale or misleading `window.scrollY` while `documentElement.scrollTop` and the rendered screenshot show the real position. Verify both the frame-local target rectangle and the captured pixels before trusting the proof.
+
+For form changes, pair the screenshot with frame-local behavioral assertions that do not submit externally: required-state (`validity.valueMissing`), requested input attributes, absence of restrictive `pattern`, representative accepted formats, and `new frame.contentWindow.FormData(form).get(fieldName)`. This proves serialization shape without triggering the live endpoint.
+
 ## Minimal metrics expression
 
 ```js

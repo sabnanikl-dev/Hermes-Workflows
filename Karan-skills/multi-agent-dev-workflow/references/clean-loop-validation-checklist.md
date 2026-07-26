@@ -35,7 +35,7 @@ Expected: builder account.
 Run Claude with reviewer token removed from the environment:
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print --dangerously-skip-permissions --system-prompt-file AGENTS.md "..."
+env -u GH_TOKEN claude --model 'claude-opus-5' --print --permission-mode dontAsk --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' --system-prompt-file AGENTS.md -- "..."
 ```
 
 Before CodexReviewer mutation:

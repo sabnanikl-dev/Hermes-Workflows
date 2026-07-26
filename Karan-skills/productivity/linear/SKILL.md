@@ -375,8 +375,10 @@ Combine filters with `or: [...]` for OR logic (default is AND within a filter ob
 
 - Always use `terminal` tool with `curl` for API calls — do NOT use `web_extract` or `browser`
 - Always check the `errors` array in GraphQL responses — HTTP 200 can still contain errors
+- `IssueFilter` does **not** expose an `identifier` field. A query such as `issues(filter: { identifier: { in: [...] } })` returns HTTP 400. For exact batch readback, use aliased single-issue fields in one query (`a: issue(id: "ENG-1")`, `b: issue(id: "ENG-2")`) or fetch each identifier individually.
+- For blocking dependencies, `issueRelationCreate(type: blocks, issueId: BLOCKER_ID, relatedIssueId: BLOCKED_ID)` means the first issue blocks the related issue. Verify both `relations` on the blocker and `inverseRelations` on the blocked issue after mutation.
 - If `stateId` is omitted when creating issues, Linear defaults to the first backlog state
-- The `description` field supports Markdown
+- The issue `description` field supports Markdown. `ProjectCreateInput.description` is much stricter: Linear currently rejects project descriptions longer than 255 characters. Keep the project summary within that limit and put the full mission/spec in a linked parent issue or project document.
 - Use `python3 -m json.tool` or `jq` to format JSON responses for readability
 - Linear label groups can be mutually exclusive: applying two child labels from the same group in `labelIds` can fail with `labelIds not exclusive child labels` (for example `website` + `content`, or `analytics` + `ops` in the current workspace). For batch creation, assume earlier mutations may have succeeded before a later item failed: re-read the parent and rerun the duplicate search before retrying, then create only the missing issues with one label from each exclusive group plus non-conflicting labels. Verify every created issue's parent, project, state, and final label list.
 
@@ -395,3 +397,5 @@ For issue-body closeout where acceptance/verification checkboxes are the contrac
 When post-processing helper JSON locally, prefer writing to a temporary file and reading that file from Python instead of piping helper output directly into `python3 -c`; some execution environments flag `producer | python` as a high-risk “pipe to interpreter” pattern even when the producer is a trusted local helper.
 
 For re-verification after an artifact changes, keep the scope exact: scan only the updated artifact(s), re-confirm unchanged artifacts by SHA if needed, and say clearly which evidence is static/package verification versus live/end-to-end proof. This avoids overclaiming when a downstream issue owns credentialed dry-runs or production-resource checks.
+
+For non-coding artifact review loops, preserve the live issue's exact acceptance threshold and any explicit `Continue / Narrow / Stop` contract. Do not upgrade advisory findings into blockers by operator preference. Freeze the first review's blocker ledger, allow at most two repair/re-review cycles by default, and stop for a human decision or split follow-up at the cap. A passing keyword/heading validator is structural evidence only; it does not prove semantic acceptance.

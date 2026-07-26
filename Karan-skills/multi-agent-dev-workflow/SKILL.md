@@ -1,7 +1,7 @@
 ---
 name: multi-agent-dev-workflow
-description: "Multi-agent GitHub development workflow — headless CLI orchestration with cross-review, issue-based tracking, human-in-the-loop approval."
-version: 2.0.1
+description: "Multi-agent GitHub development workflow — Claude builder, gpt-5.6-sol medium Reviewer A/B plus Hermes Integration Auditor, exact-head fix loops, and human merge approval."
+version: 2.2.11
 author: Hermes Agent
 ---
 
@@ -21,11 +21,14 @@ Mode split:
 - Use `autonomous-pr-prover` for the narrower **existing-PR review/fix/re-review loop**: a PR already exists and the goal is to run independent reviewers, send unresolved blockers back to Claude Code, and verify merge-readiness without re-scoping the issue.
 
 Support reference:
-- `references/hermes-originated-blockers-pr-bus.md` — when Hermes independently finds a blocker that builder or reviewer lanes missed: post it as a signed PR-bus blocker, keep the Claude fix prompt pointer-first, refresh current-head evidence, and rerun both A/B reviewers without broadening the PR into older unrelated cleanup.
+- `references/hermes-originated-blockers-pr-bus.md` — when default Hermes independently finds a blocker that the builder or three reviewer lanes missed: post it as a signed PR-bus blocker, keep the Claude fix prompt pointer-first, refresh current-head evidence, and rerun Reviewer A, Reviewer B, and the Integration Auditor without broadening the PR into older unrelated cleanup.
 - `references/multi-agent-loop-leaning-2026-07-01.md` — Strategic Engineering NotebookLM critique of the current multi-agent workflow + PR prover split: lean root skills by offloading bulky historical pitfalls to references, add done-contract/rubric/budget experiments cautiously, and preserve PR bus, reviewer identity, current-head verification, and Karan approval gates.
 - `references/godmode-dashboard-first-byoa.md` — use when designing or scaffolding QuadWork/tmux-style dashboard-first, bring-your-own-agent coding workflows where the harness is the source of truth and the PR review/fix loop runs automatically until merge-ready.
 - `references/hermes-claude-codex-github-orchestration.md` — concise notes for the Hermes orchestrator + Claude Code builder + CodexReviewer reviewer pattern: hybrid manual/roll-call/webhook infrastructure, GitHub PR as coordination bus, separate reviewer identity, pointer-first blocker fix handoffs, and `.agentic/commands/` templates.
 - `references/orchestration-loop-auth-pitfalls.md` — session-derived auth/validation pitfalls for loop tests: Claude Code `--bare` skips OAuth/keychain, expired OAuth can make `auth status` lie while calls 401, CodexReviewer `GH_TOKEN` checks, and the rule that Hermes fallback handoffs invalidate a clean dogfood-loop pass.
+- `references/reviewer-credential-and-environment-isolation.md` — hardened reviewer boundary: no GitHub token enters reviewer models; default Hermes prepares an exact-head packet, launches sanitized wrappers, then performs a disclosed identity-verified artifact relay.
+- `references/reviewer-completion-idempotency-and-relay-ledger.md` — idempotent reviewer completion/relay state machine: exact-line artifact extraction despite prompt echo or duplicate output, delayed `notify`/poll/wait deduplication, GitHub pre-relay existence checks, readback verification, and A-first exception-cycle sequencing.
+- `scripts/verify-reviewer-hardening.py` — deterministic static verifier for reviewer profile config, role-native skill isolation, launcher permissions/environment policy, deny-rule floor, and credential-free child-process invariants; pair it with the runtime negative tests in the credential-isolation reference.
 - `references/long-running-workflow-status-watchdog.md` — durable worker + recovery-supervisor + script-only watchdog pattern for multi-hour issue-to-PR runs; includes the critical `5m` one-shot vs `every 5m` recurring cron distinction, first-tick verification, live-source status fields, completion terminology, and cleanup.
 - `references/claude-code-setup-token-auth.md` — concrete Claude Code `setup-token` flow: diagnosing expired OAuth tokens, handling PTY-wrapped OAuth URLs for Telegram, and verifying with real `claude --print` calls rather than `auth status` alone.
 - `references/claude-code-oauth-refresh.md` — preferred Claude Code auth repair path when `auth status` lies but model calls 401: normal `claude auth login --claudeai --email ...`, Telegram-safe URL/code handoff, and real smoke-test verification.
@@ -47,6 +50,7 @@ Support reference:
 - `references/external-source-staging-and-silent-builder-monitoring.md` — pattern for staging owner-supplied files from outside a repo into an ignored worktree-local input, preventing raw-source commits and user-path CI dependencies, monitoring buffered large-issue builders without premature fallback, and preserving a separate reviewer identity through per-process `gh` account tokens.
 - `references/fallback-builder-disclosure-and-doc-stewardship.md` — pattern for issue-to-PR runs where Claude Code/builder-profile lanes hang after partial drafts: disclose direct Hermes fallback provenance, salvage drafts only with explicit attribution, update stale “future work” docs when the PR lands that architecture, and rerun reviewers on the current head.
 - `references/approval-gated-pr-evidence-and-screenshots.md` — pattern for PRs where repo-side work is merge-ready but the issue must stay open until an approval-gated live step: remove closing keywords from PR body and commit messages, verify `closingIssuesReferences` is empty, and provide honest repo-side screenshot proof when live UI evidence would require a deploy/dev-host/account mutation.
+- `references/pr-closing-linkage-pre-review-gate.md` — pre-A/B gate for repo-complete PRs: verify live `closingIssuesReferences`, route missing linkage through a signed PR-bus metadata blocker and pointer-first Claude repair, prove the head stayed unchanged, then start technical review. Includes cycle-accounting and end-of-body string-check pitfalls.
 - `references/frontend-pr-visual-proof.md` — user-corrected proof pattern for frontend PRs: when Karan asks for screenshot proof, render the affected page/component at the exact PR head and show the changed UI/content, not merely GitHub PR status/checks.
 - `references/static-site-responsive-visual-qa-browser-harness.md` — quick operator visual-QA pattern for static sites: create an uncommitted iframe harness with explicit viewport widths, verify DOM geometry/no overflow via browser console, screenshot/inspect the affected component, then delete the scratch file before final status/reviewer handoff.
 - `references/same-origin-iframe-responsive-proof.md` — exact-width fallback when the worktree lacks Playwright/Puppeteer: serve the exact PR head, use same-origin 375/768/1440 iframes for frame-local overflow/DOM metrics and interaction checks, distinguish harness clipping from page overflow, then clean scratch artifacts before review.
@@ -55,18 +59,28 @@ Support reference:
 - `references/long-running-resumable-external-qa-orchestration.md` — use when a browser/API evidence rollout can outlive the builder session: separate producer/driver/builder control planes, monitor checkpoint progress instead of stdout, recover pending work with bounded no-progress supervision, classify browser-context crashes as infrastructure rather than destination evidence, hand completed evidence to a fresh builder session, and provide temporary script-only status cron updates when requested.
 - `references/evidence-ledger-recovery-and-pr-report-reconciliation.md` — use when terminal evidence exists outside the normal batch ledger or late fixes leave PR metadata stale: reconcile base-to-head evidence against preflight/crash/clean phases, preserve unknown provenance fields as null, reject unknown explicit IDs before skipped-success logging, synchronize PR-body/current-state reports, and handle metadata-only blockers at the cycle limit without opening a third code cycle.
 - `references/policy-migration-contract-sweep.md` — use when a PR changes an authority/gate policy: sweep human prose, machine-readable metadata, generator passthroughs, validator semantics, runtime/file headers, generated artifacts, and PR metadata; preserve history only when explicitly superseded, then prove deterministic regeneration and current-head A/B review.
+- `references/versioned-line-span-hash-review-pitfalls.md` — use when reviewing deterministic evidence/citation hashing: prevent terminal-newline one-past-end false passes, separate source-level from citation-level health, distinguish portable from environment-local verification, test CLI usage-error exits, and budget exceptional review cycles through final A/B verification.
+- `references/json-schema-regex-portability-review.md` — use when a PR changes JSON Schema `pattern` values under a non-ECMAScript custom evaluator: test the same case matrix in the repo validator and Node/ECMAScript, reject engine-specific tokens such as Python `\\Z`, preserve absolute-end semantics, synchronize final PR metadata, and rerun the affected exact-head reviewer lane.
+- `references/deterministic-contract-mutation-and-relay-readback.md` — use when CI claims an installed CLI/placeholder is deterministic or fail-closed: pair real installed execution with nondeterministic, deterministic-wrong, stream, and exit-code mutants; require repeated exact output where appropriate; and treat non-zero transport wrappers as ambiguous until every possibly-posted GitHub artifact is read back.
 - `references/conditional-cta-followup-browser-qa.md` — use when a human notices evidence-gated item-level buttons are absent after frontend review: distinguish intentional fail-closed state from a visual bug, run one-item GET-and-observe QA in a detached exact-head scratch worktree, enable only after the complete required matrix passes, and leave an already-approved PR untouched when the condition fails.
 - `references/static-carousel-fast-mount-pr-qa.md` — static/progressive-enhancement carousel PR pattern: remove full-feed preload gates, add fake-Image/timer fast-mount regression coverage, prove static fallback vs JS carousel replacement with DOM/browser evidence, and disclose when local `http.server` QA exercises committed static fallback rather than Vercel API routes.
 - `references/human-design-review-after-agent-approval.md` — session-derived PR loop pattern: when Karan leaves a design/visual/copy PR comment after A+B approvals, treat it as new source-of-truth input, send it through builder fix + exact-head visual QA + current-head A/B re-review; includes entry-point copy corrections (preserve positive proposition, remove the full banned semantic family, reconcile present-tense docs/PR metadata without rewriting destination/history) and the CSS `aspect-ratio` + `min-height` mobile overflow pitfall.
 - `references/static-faq-jsonld-visible-parity-qa.md` — static FAQ/GEO PR checklist: visible FAQ as source of truth, optional FAQPage JSON-LD parity, approval-gated issue-linking, targeted DOM/schema checks, browser fallback when cross-page JS fetch is blocked, and full review-surface readback when `latestReviews` hides one A/B lane.
 - `references/static-catalog-action-gate-and-dialog-history.md` — static catalog PR pattern for separating non-browser candidate contracts from browser catalog/action state, proving producer/validator schema parity, preserving unrelated query/hash state, and testing rapid dialog close/reopen timer races.
+- `references/runtime-consumer-surface-review-pitfalls.md` — review checklist for YAML/SQLite read-only runtime surfaces: authenticate the complete duplicated artifact envelope (full normalized/embedded content, projection includes, client-to-module workstream closure, ownership, and manifest membership), test installed consumers from a foreign working directory, prevent ambient-cwd provenance, structure argparse errors, reject unknown or unenforceable scopes, and route competency checks through public operations.
+- `references/ontology-competency-relationship-path-review.md` — review gate for ontology competency DSLs that add projection-scoped relationship queries and bounded paths: maturity-dimension separation, endpoint/traversal isolation, full registry-envelope validation, type-strict SQLite/JSON answer comparison, optional/drift/skip reporting semantics, exact competency-to-coverage proof closure, status/confidence safety, coverage matrices, and executable count/metadata reconciliation.
 - `references/review-loop-tool-budget-and-evidence-pitfalls.md` — session-derived closeout rules for PR review/fix loops near tool-call limits: do not launch a fix loop you cannot verify, wait for reviewer processes to exit before trusting review state, ensure screenshots actually show the changed component, and use synthetic fixture geometry QA for data-gated UI.
+- `references/issue-contract-tool-budget-and-readonly-review.md` — use when a fix loop risks weakening live issue acceptance criteria, reviewers need fail-closed DSL probes in a read-only sandbox, or repeated short process waits threaten the parent tool budget. Covers issue-over-PR precedence, relational guard/query and complete registry-envelope validation, actual parse-boundary isolation instrumentation, library path-containment contracts, PR-body/current-head synchronization, in-memory reviewer probes, milestone polling, and final-cycle escalation.
+- `references/coverage-proof-closure-and-artifact-transport.md` — use for ontology/coverage-contract PRs and credential-free reviewer relays: require each `covered` cell to close over canonical evidence plus exact competency retrieval, distinguish test-owned from public runtime queryability, derive nested JSON case counts correctly, and extract reviewer artifacts only from exact delimiter lines before verified transport.
+- `references/bounded-exception-cycle-and-envelope-closeout.md` — use after the normal fix budget is exhausted: record a finite human-approved exception ledger; run a producer/consumer closure matrix before spending the exception; audit downstream comparison, sorting, diagnostics, and serialization whenever accepted input types broaden; stage exceptional review as **A → relay → B → relay → review-state supplement → Integration Auditor** when the Auditor certifies reviewer state; treat any reproducible P0/P1 as blocking despite split votes; handle provider no-verdicts, scratch metadata, machine-derived counts, and exact-head merge-readiness certification.
+
+**Current-workflow override for legacy references:** several support references predate the Integration Auditor and hardened credential relay. Preserve their specialized test/recovery mechanics, but (a) any code/docs/fixtures/generated/CI head change requires Reviewer A, Reviewer B, **and** the Hermes Integration Auditor to produce fresh current-head outcomes unless Karan explicitly authorizes a reduced path, and (b) any legacy instruction to inject `GH_TOKEN` into Codex/Hermes reviewer children or require direct reviewer posting is superseded. Reviewer children receive no GitHub token; default Hermes performs the disclosed relay after exact-head verification.
 
 ## When to Use
 
-Karan says "work on issue #42". Hermes orchestrates Claude Code (builder) and Codex (reviewer) via headless CLI or a dashboard/workbench, reports back with a go/no-go summary, and preserves Karan's final approval/merge authority.
+Karan says "work on issue #42". Default Hermes orchestrates Claude Code as builder, Codex Reviewer A/B, and the isolated Hermes Integration Auditor profile via headless CLI or a dashboard/workbench, reports a verified go/no-go summary, and preserves Karan's final approval/merge authority.
 
-This skill is best for **Hermes-orchestrated repo-centric GitHub workflows** where Hermes directly runs Claude Code as builder and Codex as cross-reviewer from chat/terminal.
+This skill is best for **Hermes-orchestrated repo-centric GitHub workflows** where default Hermes directly runs Claude Code plus the hardened `codex-reviewer` A/B and `reviewer` Integration Auditor launchers from isolated worktrees.
 
 If the PR is already open and Karan wants only review → fix → re-review until merge-ready, load `autonomous-pr-prover` instead of carrying the full issue-to-PR flow.
 
@@ -87,14 +101,15 @@ When the work is **consulting-operations or client-delivery oriented** — intak
 | Agent | Role | Primary Mode |
 |-------|------|-------------|
 | **Karan** | Vision + taste. Chooses/specs/delegates work, approves final output, and may merge to main himself. | Telegram or dashboard |
-| **Hermes** | Head/operator. Reads issues, starts/supervises runs, synthesizes results, keeps Karan in the loop, and escalates risky/ambiguous decisions. | Hermes + dashboard pane |
+| **Default Hermes** | Head/operator and final integrator. Reads issues, starts/supervises runs, verifies live state, adjudicates findings, keeps Karan informed, and escalates risky/ambiguous decisions. | Hermes + dashboard pane |
 | **Claude Code** | Lead builder. Implements from the issue + project harness, opens PRs, fixes blockers, and comments on PRs. | CLI subprocess / live pane |
-| **Codex A** | Technical evaluator for correctness, tests, security, and regressions. | CLI subprocess / live pane |
-| **Codex B** | Technical evaluator for architecture, maintainability, spec drift, and harness compliance. | CLI subprocess / live pane |
+| **Codex Reviewer A** | Evaluator for correctness, tests, security, regressions, and edge cases. | `gpt-5.6-sol`, medium reasoning, fresh CLI process |
+| **Codex Reviewer B** | Evaluator for architecture, maintainability, docs/spec drift, harness compliance, and scope. | `gpt-5.6-sol`, medium reasoning, fresh CLI process |
+| **Hermes Integration Auditor** | Isolated `reviewer` profile for AC/claim coverage, cross-surface contract parity, CI/review reconciliation, PR metadata, generated artifacts, engine assumptions, and exact-head visual evidence. | `gpt-5.6-sol`, medium reasoning, hardened `reviewer` wrapper |
 
-Key principle: Generation and evaluation are separate. Claude Code builds. Codex critiques. Hermes synthesizes. Karan decides.
+Key principle: Generation and evaluation are separate. Claude Code builds. Reviewer A/B critique focused surfaces. The Hermes Integration Auditor checks seams. Default Hermes verifies and synthesizes. Karan decides.
 
-For dashboard-first v1, each agent should be visible and directly addressable in a tmux-like pane. Karan should be able to chat/control Hermes, Claude Code, and each Codex reviewer while a run is active.
+For dashboard-first v1, each lane should be visible and directly addressable in a tmux-like pane. Karan should be able to chat/control default Hermes, Claude Code, Reviewer A, Reviewer B, and the Integration Auditor while a run is active.
 
 ## Core Rules
 
@@ -103,36 +118,44 @@ For dashboard-first v1, each agent should be visible and directly addressable in
 3. All work tracked via GitHub Issues (the task board), with Linear as parent/client tracker when applicable
 4. Human gives go/no-go. Hermes may prepare/verify merge state, but Karan retains final merge authority unless he explicitly approves Hermes to merge.
 5. **Self-review first** — the executing agent must review its own diff before opening the PR for cross-review.
-6. **Automatic review/fix loop after PR open** — once Claude opens a PR, both Codex reviewers should automatically begin. If blockers exist, Claude Code (the builder/fix lane) fixes, comments, pushes, and triggers re-review until merge-ready or a stop condition fires. Hermes may patch directly only with explicit human approval or a clearly documented emergency workaround; otherwise direct Hermes fixes weaken dogfood evidence by bypassing the builder lane. If the user says Claude Code must be the builder after Hermes patched directly, discard/delete the Hermes-built branch/worktree when explicitly authorized and restart from a fresh Claude-owned branch; do not try to salvage the Hermes diff as clean workflow evidence.
-7. **Visual QA before human review** — Hermes uses browser tools to screenshot/inspect the preview server and verify key pages before reporting to Karan when frontend/UI is affected. Screenshot proof must show the affected rendered page/section/component and changed content at the exact PR head, not just GitHub PR status/checks; see `references/frontend-pr-visual-proof.md`. For GodMode/Electron UI changes, a Vite renderer preview is acceptable for visual/layout/disabled-state sanity, but it does **not** replace `npm run smoke` when preload/main/IPC/PTTY wiring is touched; see `references/electron-renderer-preview-visual-qa.md`.
-8. **One cycle = review + fix**. Max 2 cycles total (initial build + 2 review/fix rounds). Escalate to Karan if not resolved.
-9. **Harness over prompt bloat** — the opened project harness, issue, PR, and comments are source of truth. Hermes should use short role commands and improve repo docs/harness when repeated context is needed.
+6. **Automatic three-lane review/fix loop after PR open** — once Claude opens a PR, launch Codex Reviewer A, Codex Reviewer B, and the isolated Hermes Integration Auditor profile against the same live `headRefOid`. Every reviewer lane is pinned to `gpt-5.6-sol` with `medium` reasoning. If any confirmed blocker exists, Claude Code (the builder/fix lane) fixes, comments, pushes, and triggers current-head re-review by all affected lanes; code/docs/fixtures/generated/CI changes normally invalidate all three. Default Hermes may patch directly only with explicit human approval or a clearly documented emergency workaround; otherwise direct Hermes fixes weaken dogfood evidence by bypassing the builder lane. If the user says Claude Code must be the builder after Hermes patched directly, discard/delete the Hermes-built branch/worktree when explicitly authorized and restart from a fresh Claude-owned branch; do not try to salvage the Hermes diff as clean workflow evidence.
+7. **Independent Integration Auditor** — default Hermes must not substitute its own in-context review for the isolated `reviewer` profile. The auditor uses `integration-audit-review`, receives no GitHub credential, performs no external mutation, and returns a prepared signed artifact body to default Hermes for exact-head verification, disclosed transport-only relay, and adjudication. Default Hermes remains the final integrator; the auditor is not Reviewer C merge authority.
+8. **Visual QA before human review** — for frontend/UI work, launch the Integration Auditor with task-scoped `browser` and `vision` toolsets. It must screenshot/inspect the affected rendered surface at the exact PR head before default Hermes reports to Karan. Screenshot proof must show the changed page/section/component, not GitHub status. For GodMode/Electron UI changes, a Vite renderer preview is acceptable for visual/layout/disabled-state sanity, but it does **not** replace `npm run smoke` when preload/main/IPC/PTTY wiring is touched; see `references/electron-renderer-preview-visual-qa.md`.
+9. **One cycle = review + fix**. Max 2 cycles total (initial build + 2 review/fix rounds). Escalate to Karan if not resolved.
+10. **Harness over prompt bloat** — the opened project harness, issue, PR, and comments are source of truth. Default Hermes should use short role commands and improve repo docs/harness when repeated context is needed.
 
 ## The Single Command Flow
 
 ```
 Karan (Telegram): "lets work on issue #42"
 ↓
-Hermes: fetches issue, checks acceptance criteria, drafts if missing
+Default Hermes fetches issue, checks acceptance criteria, drafts if missing
 ↓
-Hermes runs Claude Code CLI (terminal pty=true) → builds → opens PR
+Default Hermes runs Claude Code → builds → self-reviews → opens PR
 ↓
-Hermes reviews code (reads diff via terminal/file tools)
+Default Hermes verifies the pushed head and baseline gates
 ↓
-Hermes runs Codex CLI (terminal pty=true) → technical review
+In parallel on the same exact head:
+  Codex Reviewer A → correctness/security/tests
+  Codex Reviewer B → architecture/docs/harness
+  Hermes reviewer profile → integration audit + visual evidence when applicable
 ↓
-[if issues found]
-  Hermes runs Claude Code CLI → fixes → pushes
+Default Hermes verifies artifacts and adjudicates blockers
+↓
+[if confirmed blockers exist]
+  Default Hermes runs Claude Code fix lane → fixes → comments → pushes
   ↓
-  Hermes + Codex re-review
+  Default Hermes verifies the remote push and reruns current-head gates
+  ↓
+  Reviewer A + Reviewer B + Integration Auditor re-review the new head
   ↓
   [loop until clean, max 2 cycles]
 ↓
-Hermes sends Karan ONE message (via Telegram):
-  "Issue #42 — Contact form. Codex found 2 things, both fixed.
-   Build passes. No visual regressions. Recommendation: go."
+Default Hermes sends Karan ONE message:
+  "Issue #42 — Contact form. Three review lanes found 2 blockers; both fixed.
+   Build and exact-head visual QA pass. Recommendation: go."
 ↓
-Karan: "go" → Hermes merges
+Karan: "go" → Default Hermes merges and verifies live state
 ```
 
 Karan never opens: GitHub, Antigravity, terminal, or a code diff.
@@ -211,7 +234,7 @@ Hermes/GodMode owns the run state machine and local ledger; GitHub Issues/PRs/re
 ### Foreground (default)
 
 ```bash
-terminal(command="claude --model 'claude-opus-4-8[1m]' --print ...", timeout=300)
+terminal(command="claude --model 'claude-opus-5' --print ...", timeout=300)
 ```
 
 Hermes waits. When the process exits, Hermes reads stdout. Good for quick tasks.
@@ -219,7 +242,7 @@ Hermes waits. When the process exits, Hermes reads stdout. Good for quick tasks.
 ### Background + notify
 
 ```bash
-terminal(command="claude --model 'claude-opus-4-8[1m]' --print ...", background=true, notify_on_complete=true)
+terminal(command="claude --model 'claude-opus-5' --print ...", background=true, notify_on_complete=true)
 ```
 
 Hermes gets notified when the process finishes. Good for builds that take 5–15 minutes.
@@ -227,7 +250,7 @@ Hermes gets notified when the process finishes. Good for builds that take 5–15
 ### Background + polling (long builds)
 
 ```bash
-session = terminal(command="claude --model 'claude-opus-4-8[1m]' --print ...", background=true)
+session = terminal(command="claude --model 'claude-opus-5' --print ...", background=true)
 # Poll every 2 minutes, send Karan "still building..." updates
 ```
 
@@ -253,22 +276,22 @@ DONE: STATUS=pass|fail BLOCKING=<count>
 
 ### 5.1 Claude Code Build Session
 
-#### Claude builder model pin: Opus 4.8
+#### Claude builder model pin: Opus 5
 
 For `multi-agent-dev-workflow` runs, every Claude Code builder and fix lane MUST be launched with the explicit model flag:
 
 ```bash
---model 'claude-opus-4-8[1m]'
+--model 'claude-opus-5'
 ```
 
-Do not rely on Claude Code's default model or the generic `opus` alias for these runs. Quote the model value because `[1m]` is shell-glob syntax. If the exact Opus 4.8 model is unavailable, stop and report the model/auth blocker before falling back to another builder lane; do not silently use Sonnet/default Claude for the Claude builder.
+Do not rely on Claude Code's default model or the generic `opus` alias for these runs. Quote the model value because `[1m]` is shell-glob syntax. If the exact Opus 5 model is unavailable, stop and report the model/auth blocker before falling back to another builder lane; do not silently use Sonnet/default Claude for the Claude builder.
 
 #### Builder CLI readiness and fallback ladder
 
 Before launching a build or fix lane, smoke-test the intended builder instead of assuming the CLI is on the Hermes process `PATH`:
 
 1. Check `command -v claude` and `claude --version`.
-2. If `claude` is missing, check common install locations, especially `~/.local/bin/claude`. In Hermes desktop/TUI sessions the terminal `PATH` may omit `~/.local/bin` even when Claude Code is installed. If a valid Claude Code binary exists there, repair the current Hermes execution path by either exporting `PATH="$HOME/.local/bin:$PATH"` for the builder command or creating a stable symlink into an already-present Hermes path entry, e.g. `ln -sf "$HOME/.local/bin/claude" "$HOME/.hermes/node/bin/claude"`. Then verify with `command -v claude`, `claude --version`, and a real pinned-model smoke: `env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print 'Smoke test only. Reply exactly: CLAUDE_OK'`.
+2. If `claude` is missing, check common install locations, especially `~/.local/bin/claude`. In Hermes desktop/TUI sessions the terminal `PATH` may omit `~/.local/bin` even when Claude Code is installed. If a valid Claude Code binary exists there, repair the current Hermes execution path by either exporting `PATH="$HOME/.local/bin:$PATH"` for the builder command or creating a stable symlink into an already-present Hermes path entry, e.g. `ln -sf "$HOME/.local/bin/claude" "$HOME/.hermes/node/bin/claude"`. Then verify with `command -v claude`, `claude --version`, and a real pinned-model smoke: `env -u GH_TOKEN claude --model 'claude-opus-5' --print 'Smoke test only. Reply exactly: CLAUDE_OK'`.
 3. If Claude Code is present but auth/model calls fail, follow the Claude auth references in this skill (`claude-code-oauth-refresh.md`, `claude-code-setup-token-auth.md`) and verify with a real `claude --print` call; do not trust `auth status` alone.
 4. If Claude Code remains unavailable, do **not** let default Hermes silently become the builder. First try the role-native Hermes builder profile as the degraded substitute builder lane: `hermes -p builder chat -q 'Builder profile smoke test only. Reply exactly: BUILDER_OK' --toolsets '' --quiet`. If that passes, launch `hermes -p builder chat -q "$(cat /tmp/builder-prompt.md)" --quiet` from the isolated repo/worktree with the same issue/harness prompt, completion marker, verification requirements, and PR-bus rules. Sign the PR/comment as `Built by: Hermes builder profile via Hermes orchestration`, and report it as a **degraded builder-profile fallback**, not a clean Claude Code pass.
 5. Only if both Claude Code and the builder Hermes profile are unavailable should default Hermes implement directly, and only with explicit human approval or a documented emergency workaround. That direct fallback must be disclosed in the PR body and final report.
@@ -278,19 +301,20 @@ Before launching a build or fix lane, smoke-test the intended builder instead of
 If Karan explicitly says to use `multi-agent-dev-workflow` after Hermes has already inspected the issue or made a small local draft, do **not** simply continue as a Hermes-built PR. Pivot into the workflow and preserve agent-role integrity:
 
 1. Load this skill immediately and switch the task plan to builder/reviewer lanes.
-2. Smoke-test Claude Code with a tiny pinned-model call (`claude --model 'claude-opus-4-8[1m]' --print ...`) before launching the build lane.
+2. Smoke-test Claude Code with a tiny pinned-model call (`claude --model 'claude-opus-5' --print ...`) before launching the build lane.
 3. Prompt Claude Code as the **builder owner** and disclose that a Hermes draft diff may exist; instruct Claude to inspect it as input only, adjust/revert as needed, run verification, and commit the final builder-owned result.
 4. Hermes may still create/push the PR after the builder commit, but the PR body must honestly state the builder lane and verification evidence.
-5. Run both Codex Reviewer A and B against the opened PR/current head before saying mergeable.
+5. Run Codex Reviewer A, Codex Reviewer B, and the Hermes Integration Auditor against the opened PR/current head before saying mergeable.
 6. If the builder lane cannot run and Hermes must finish directly, disclose that as a degraded/fallback run rather than a clean multi-agent workflow pass.
 
 ```bash
 # Hermes runs this via terminal(command="...", pty=true)
 # Keep OAuth/keychain auth, but disable user/project MCP for Hermes-managed builder runs.
 printf '{"mcpServers":{}}' > /tmp/claude-empty-mcp.json
-env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5' --print \
   --no-session-persistence \
-  --dangerously-skip-permissions \
+  --permission-mode dontAsk \
+  --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
   --strict-mcp-config \
   --mcp-config /tmp/claude-empty-mcp.json \
   --system-prompt-file AGENTS.md \
@@ -310,43 +334,80 @@ env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print \
    DONE: PR=<number> BRANCH=<branch> STATUS=success|failure"
 ```
 
-Fresh session every time. No `--continue`. Context is loaded from files, not from previous session state. Do **not** use `--bare` for Claude Code builder/fix runs unless you intentionally provide `ANTHROPIC_API_KEY` or an `apiKeyHelper`; Claude Code v2.1.x `--bare` skips OAuth/keychain reads and can falsely fail with `Not logged in` even when interactive/non-bare Claude Code is logged in. When using a separate reviewer `GH_TOKEN` in the same Hermes terminal session, invoke the builder with `env -u GH_TOKEN claude ...` unless you intentionally provide a builder-specific token; the terminal environment can persist exported `GH_TOKEN` across calls, causing Claude to open PRs as the reviewer account and invalidating the identity-split loop test. Prefer prompt files or carefully single-quoted prompts for long CLI prompts so shell backticks in instructions do not execute before the agent receives them. **Claude `--mcp-config` is variadic:** if a smoke/build command includes `--mcp-config <file>` and then an inline prompt, place `--` before the prompt; otherwise Claude may interpret the prompt text as another MCP config path and fail before the smoke/build starts.
+Fresh session every time. No `--continue`. Context is loaded from files, not from previous session state. Do **not** use `--bare` for Claude Code builder/fix runs unless you intentionally provide `ANTHROPIC_API_KEY` or an `apiKeyHelper`; Claude Code v2.1.x `--bare` skips OAuth/keychain reads and can falsely fail with `Not logged in` even when interactive/non-bare Claude Code is logged in. Reviewer credentials are resolved only after reviewer children exit, so they must never be exported into the parent terminal session or inherited by Claude. Prefer prompt files or carefully single-quoted prompts for long CLI prompts so shell backticks in instructions do not execute before the agent receives them. **Claude `--mcp-config` and `--allowedTools` are variadic:** if a smoke/build command includes either flag and then an inline prompt, place `--` before the prompt; otherwise Claude may interpret the prompt text as another flag value and fail before the smoke/build starts.
 
-## Codex Review Sessions (Reviewer A + Reviewer B)
+**Permission boundary:** For non-interactive builders, use `--permission-mode dontAsk` plus a task-scoped `--allowedTools` list so unlisted actions fail closed without prompting. The Node/static-site command above is the default; add only exact repo-native command families required by documented verification (for example `Bash(pnpm *)` or `Bash(pytest *)`). Never use Claude’s blanket `--dangerously-skip-permissions` flag merely to avoid prompts: it grants unnecessary authority and can trigger Hermes’ own security approval layer.
 
-When the user invokes `multi-agent-dev-workflow` for issue-to-PR work, run **both** Codex reviewer lanes before reporting merge-readiness unless the user explicitly authorizes a faster single-review path. A single generic `Codex via Hermes orchestration` review is **not** sufficient for an A/B loop.
+## Review Sessions (Reviewer A + Reviewer B + Hermes Integration Auditor)
 
-Required split:
+When the user invokes `multi-agent-dev-workflow`, run all three reviewer lanes before reporting merge-readiness unless Karan explicitly authorizes a reduced path.
 
-| Reviewer | Focus | Required signature |
-|---|---|---|
-| Codex Reviewer A | Correctness, tests, security, edge cases, regression risk | `Reviewed by: Codex Reviewer A via Hermes orchestration` |
-| Codex Reviewer B | Architecture, maintainability, docs/spec drift, harness compliance, scope control | `Reviewed by: Codex Reviewer B via Hermes orchestration` |
+### Reviewer runtime and packet gate
 
-Each reviewer must inspect the live PR and current head commit independently. Both must either submit a formal GitHub PR review or, if same-account/API limitations prevent another formal review, post a clearly signed PR conversation comment. Hermes must verify both surfaces against the current `headRefOid` before saying the PR is mergeable.
+Every reviewer process MUST use `gpt-5.6-sol` with `medium` reasoning. Do not rely on user/global defaults and do not silently substitute another model.
+
+| Reviewer | Focus | Runtime | Prepared artifact |
+|---|---|---|---|
+| Codex Reviewer A | Correctness, tests, security, edge cases, regression risk | `gpt-5.6-sol`, medium | Formal review body |
+| Codex Reviewer B | Architecture, maintainability, docs/spec drift, harness compliance, scope | `gpt-5.6-sol`, medium | Signed PR conversation-comment body |
+| Hermes Integration Auditor | AC/claim coverage, code/schema/spec/docs/CI parity, review-state reconciliation, generated artifacts, cross-engine assumptions, PR metadata, exact-head visual evidence | hardened `reviewer` wrapper, `gpt-5.6-sol`, medium | Signed PR conversation-comment body |
+
+Default Hermes first prepares an immutable, credential-free review packet containing the repository/PR identity, packet timestamp, exact `headRefOid`, issue/PR contract, reviews/comments/threads/checks, baseline output, and visual-evidence manifest when applicable. All three lanes inspect that packet and the same disposable exact-head worktree. Reviewer children receive no GitHub token and perform no external write.
+
+An authorized multi-agent/reviewer loop already covers refreshing its dedicated disposable detached review worktree to the current exact head and launching the read-only reviewer lanes. Do not ask Karan for a separate approval to run Reviewer A/B/the Integration Auditor or to perform that disposable worktree refresh. Avoid inline shell heredocs in prep commands because terminal smart approval may misclassify them as a fresh script-execution risk; prefer existing scripts, `python -c`, or `write_file` followed by a separate bounded invocation. Preserve explicit approval gates for merges, deploys, destructive changes outside the disposable worktree, authority expansion, and external mutations not covered by the authorized workflow.
+
+### Codex Reviewer A/B launch
+
+Run once for A and once for B:
 
 ```bash
-# Hermes runs this twice via terminal(command="...", pty=true or foreground): once for Reviewer A, once for Reviewer B.
-codex exec --dangerously-bypass-approvals-and-sandbox "Review PR [#] as Codex Reviewer <A|B>.
-   Focus area: <A correctness/tests/security/regressions OR B architecture/docs/harness/scope>.
-   Check live PR metadata, current head commit, diff, issue AC, review objects/comments, and relevant tests.
-   Do NOT review design/taste — that's Hermes + Karan's job.
-   Output only BLOCKING issues with file:line references.
-   Submit a GitHub review or signed PR comment whose body says whether the PR is mergeable from your lane.
-   The body must end with this exact signature:
-   '---\nReviewed by: Codex Reviewer <A|B> via Hermes orchestration\nPR: #[#] | Issue: #[#]'
-   At the very end of your output, print exactly:
-   DONE: REVIEWER=<A|B> STATUS=pass|fail BLOCKING=<count> MERGEABLE=yes|no"
+codex-reviewer \
+  --role <A|B> \
+  --workdir /absolute/path/to/disposable-review-worktree \
+  --prompt-file /tmp/review-<a|b>.md \
+  --read-only
 ```
 
-- **Codex CLI Flags (Verified):**
-- **Primary for PR reviewers that must submit GitHub reviews:** run Codex with normal shell access instead of the macOS sandbox, e.g. `codex exec --dangerously-bypass-approvals-and-sandbox ...` (or the current unsandboxed equivalent for the installed CLI). This is allowed for reviewer roles because they need reliable `gh pr review`/REST/GraphQL submission and the sandbox has caused false `GH_TOKEN`/`api.github.com` failures.
-- **Use `--sandbox workspace-write` only** for review runs that do not need authenticated GitHub mutations or when deliberately testing sandbox behavior.
-- **Custom reviewer prompts with base diffs:** Codex CLI v0.130.0 rejects `codex exec review --base <branch> <custom prompt>` (`--base` cannot be combined with a prompt). For role-specific A/B reviewer prompts, use regular `codex exec --cd <repo> --dangerously-bypass-approvals-and-sandbox "..."` and instruct Codex to inspect `git diff origin/main...HEAD` / live PR state itself. Use `codex exec review --base` only when the default review prompt is sufficient.
-- **Deprecated/legacy:** Codex CLI v0.130.0 warns that `--full-auto` is deprecated; older installs may still accept it but prefer the explicit sandbox/unsandboxed modes above.
-- **Avoid:** `--yolo` unless explicitly approved for a throwaway/sandboxed worktree; it bypasses all approvals and is less explicit than the modern unsandboxed flag.
+Use `--workspace-write` only when default Hermes explicitly decides an isolated disposable worktree needs test-generated files. The launcher still supplies no remote credential, rejects model/config/dangerous-sandbox overrides, and pins ephemeral `gpt-5.6-sol`/medium.
 
-Fresh session. Codex has no knowledge of the build process or Claude Code's reasoning.
+Each prompt names the packet path, exact expected full head SHA, role focus, read-only/no-credential boundary, intended artifact type, signature, and marker:
+
+```text
+DONE: REVIEWER=<A|B> STATUS=pass|fail BLOCKING=<count> HEAD=<sha> ARTIFACT=relay-required
+```
+
+### Hermes Integration Auditor launch
+
+Load `integration-audit-review`, verify `hermes profile show reviewer`, then launch the hardened wrapper from the same worktree:
+
+```bash
+reviewer \
+  --workdir /absolute/path/to/disposable-review-worktree \
+  --prompt-file /tmp/integration-audit-prompt.md
+```
+
+For UI-affecting PRs add `--ui`, which grants only the task-scoped browser/vision tools in addition to the pinned base toolsets.
+
+The prompt names the repo, PR, issue, packet path, base, expected full head SHA, worktree, artifact policy, and `integration-audit-review` output contract. The profile prepares one signed artifact body and returns `ARTIFACT=relay-required`; it never posts to GitHub.
+
+### Reviewer identity and transport split
+
+After each child exits, default Hermes:
+
+1. verifies the completion marker and prepared body against the expected head;
+2. re-queries the live PR and rejects the artifact if `headRefOid` changed;
+3. resolves and identity-checks the dedicated reviewer token outside all reviewer models;
+4. submits Reviewer A's formal state and Reviewer B/Auditor's signed conversation comments under the verified reviewer identity;
+5. marks the posts as transport-only relays, reads each artifact back, and verifies its role signature/head.
+
+When all lanes share `karanagent1`, Reviewer A owns formal `CHANGES_REQUESTED` / `APPROVED` state; Reviewer B and the Integration Auditor use separately signed conversation comments. After a new head, all three produce and default Hermes relays fresh current-head outcomes; stale artifacts do not count.
+
+- Reviewer prompts, packets, and child environments contain no `GH_TOKEN`, Linear key, messaging token, deployment credential, or unrelated parent-shell secret.
+- Use `codex-reviewer` and `reviewer`; direct `codex exec --dangerously-bypass-approvals-and-sandbox` and direct `hermes -p reviewer` are not accepted workflow launch paths.
+- Fresh sessions only. Reviewer lanes receive no builder reasoning/context beyond the exact-head worktree and sanitized packet.
+- If a wrapper, packet, worktree, model, or reasoning gate fails, stop the lane. Never broaden credentials or bypass the hardened launcher.
+
+See `references/reviewer-credential-and-environment-isolation.md` for packet contents, launcher guarantees, relay procedure, and verification checks.
 
 ### 5.3 Claude Code Fix Session (if needed)
 
@@ -355,8 +416,11 @@ Fresh session. Codex has no knowledge of the build process or Claude Code's reas
 Hermes may include only identifiers and task boundaries (PR number, branch, issue number, cycle limit, verification requirements). Do not courier blocker prose unless the builder cannot access GitHub; if that fallback is necessary, label it explicitly as fallback data and treat the run as degraded.
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print --dangerously-skip-permissions \
+env -u GH_TOKEN claude --model 'claude-opus-5' --print \
+  --permission-mode dontAsk \
+  --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
   --system-prompt-file AGENTS.md \
+  -- \
   "Checkout branch feat/issue-[#].
    Read docs/spec.md for context.
    Read the latest GitHub PR state for PR #[#]: review objects, review threads, inline comments, and conversation comments.
@@ -373,9 +437,11 @@ env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print --dangerously-skip-
 
 ### 5.4 Loop Termination
 
-- **One cycle = review + fix.** Max 2 cycles total (initial build + 2 review rounds = up to 3 reviews).
+- **One cycle = review + fix.** Max 2 cycles total (initial build + 2 review rounds = up to 3 review passes).
+- **Three-lane merge-ready gate.** The current `headRefOid` needs zero-blocker artifacts from Reviewer A, Reviewer B, and the Hermes Integration Auditor, each produced on `gpt-5.6-sol` with medium reasoning. Default Hermes must verify artifact identity, model/reasoning signature, live checks/threads, and material findings before recommending merge.
+- **Head changes invalidate review.** Code, docs, fixtures, generated artifacts, schema, or CI changes normally require all three lanes to re-review the new exact head. A PR-body-only correction on an unchanged code head may use a metadata-focused auditor pass plus the reviewer lane whose finding concerned the metadata.
 - If issues persist after 2 fix attempts, escalate to Karan: "This issue is hitting complexity we didn't anticipate. Needs your input."
-- **Cycle-limit exceptions are explicit and scope-bound.** A general completion instruction such as “get this merge-ready” does **not** by itself authorize exceeding the two-cycle cap. At the cap, show Karan the remaining blocker class and ask for an explicit exceptional-cycle decision. If Karan authorizes one, record the exact blocker class, allowed surfaces, and maximum additional cycle count in the builder prompt. Do not treat that approval as permanent permission to keep looping. A re-review blocker in a new class or broader surface requires a new explicit decision; a same-class correction may continue only within the stated additional-cycle allowance. Never merge merely because an exception was granted.
+- **Cycle-limit exceptions are explicit and scope-bound.** A general completion instruction such as “get this merge-ready” does **not** by itself authorize exceeding the two-cycle cap. At the cap, show Karan the remaining blocker class and ask for an explicit exceptional-cycle decision. If Karan authorizes one, record whether the grant covers only enumerated reproductions or one class-wide closure attempt, plus allowed surfaces and maximum additional cycle count. Do not treat that approval as permanent permission to keep looping. Before the builder starts, run the closure matrix in `references/bounded-exception-cycle-and-envelope-closeout.md` across every duplicated/compiled field the runtime consumes; fixing only the named examples invites serial bypass discovery. If the fix broadens an accepted input domain (for example, strings → arbitrary JSON scalars), census every downstream consumer—including comparison, sorting, failure formatting, and JSON/human rendering—and exercise both success and diagnostic paths with heterogeneous controls before review. After the fix, independently verify the named probes, then run Reviewer A alone as the adversarial convergence gate. Launch Reviewer B and the Integration Auditor only after A returns zero blockers, unless they are needed to adjudicate A's finding. **This A-first sequencing is mandatory for exceptional and surgical cycles even when parallel launch would be faster; a generic “approved” does not waive it. Do not announce or launch the final triad until A has actually exited with a zero-blocker exact-head artifact.** A reproducible P0/P1 from one lane blocks merge even when the other lanes pass. A blocker beyond the ledger's class/surfaces/attempt count requires a new explicit decision. Never merge merely because an exception was granted.
 - **Do one closure census before spending an exception cycle.** For policy/authority migrations, follow `references/policy-migration-contract-sweep.md` and classify every current semantic/naming hit—including headings, schema keys, owner fields, JSON notes, generator passthroughs, validator messages, generated headers, and historical labels—before launching the exceptional builder or reviewers. Read long source packets from top to bottom: a correct policy section later in the file does not neutralize an earlier present-tense instruction. Do not burn one exception cycle per grep hit. Before the final handoff, complete the reference's exact-head merge-readiness certificate rather than inferring readiness from reviewer output.
 - **Before each re-review after a state transition, run a stale-state sweep.** Search the whole branch for the superseded status token, failure reason, capture method, and future-tense handoff wording. Include specs, source packets, build plans, and friction logs. Preserve explicitly labeled history, but synchronize every present-tense result/handoff statement. For browser-evidence work, follow `references/browser-qa-evidence-producer-validator-parity.md`.
 - **When the PR changes an authority or gate policy, expand the sweep beyond prose.** Inspect machine-readable instruction fields, candidate/allowlist consumption contracts, generator constants and metadata passthroughs, validator assertions, negative fixtures, runtime/file headers, HTML comments, generated artifacts, and PR metadata. Fix generator sources before generated output, add regression guards for instruction-bearing fields, and distinguish explicitly superseded history from current contracts. See `references/policy-migration-contract-sweep.md`.
@@ -408,27 +474,27 @@ Rule of thumb: `delegate_task` for reasoning-heavy read-only work. `terminal(pty
 When Claude Code is the builder and Codex/CodexReviewer leaves PR feedback, **Hermes must not paste reviewer findings into builder fix prompts by default.** The PR is the artifact bus and the source of truth.
 
 Required pattern:
-1. Reviewer agents submit their blocking findings to GitHub as PR reviews, review-thread comments, inline comments, or clearly signed PR conversation comments.
-2. Hermes verifies those GitHub surfaces exist before starting the fix cycle.
+1. Reviewer agents prepare exact signed blocking/pass artifacts and return `ARTIFACT=relay-required`; default Hermes verifies the reviewed head and relays them to GitHub under the dedicated reviewer identity.
+2. Default Hermes reads those GitHub surfaces back before starting the fix cycle.
 3. The builder/fix prompt contains only the PR number, branch, issue number, and instruction to read the latest PR reviews/comments/threads and fix unresolved blocking findings only.
 4. Builder comments back on the PR with exactly which live PR blockers were fixed and the verification run.
-5. Hermes verifies the new commit, reruns reviewers, and reads GitHub surfaces again.
+5. Default Hermes verifies the new commit, reruns all three reviewer lanes, and reads GitHub surfaces again.
 
-Hermes may normalize blocker text for synthesis/audit and may include a compact fallback blocker capsule **only** if the builder cannot access GitHub directly or the reviewer could not post to GitHub. Label that as fallback data, point back to the PR as authoritative, and report the run as degraded/fallback rather than a clean PR-bus loop. If a reviewer finds a real blocker but fails before posting it, follow `references/reviewer-network-failure-blocker-capsule.md`: preserve the exact actionable blocker as a fallback capsule, send it to the builder only with disclosure, require a signed fix comment, verify the follow-up push, and rerun both reviewers on the new current head before saying merge-ready.
+Hermes may normalize blocker text for synthesis/audit and may include a compact fallback blocker capsule **only** if the builder cannot access GitHub directly or the relay cannot be completed. Label that as fallback data, point back to the PR as authoritative, and report the run as degraded/fallback rather than a clean PR-bus loop. If a reviewer finds a real blocker, preserve the exact actionable blocker, relay it before the fix cycle when possible, require a signed fix comment, verify the follow-up push, and rerun all three reviewer lanes on the new current head before saying merge-ready.
 
-### Separate reviewer GitHub identity
-When practical, run CodexReviewer from a distinct GitHub account/token from the builder account. This enables real PR reviews/approvals or request-changes states and avoids same-account self-review limitations. CodexReviewer should usually have read + PR review/comment permissions and no content write/merge/deploy authority.
+### Separate reviewer GitHub identity and transport
+The dedicated reviewer identity remains separate from the builder/operator identity, but its credential is held by default Hermes only. Reviewer model processes receive no GitHub token.
 
-When using a macOS Keychain-stored reviewer PAT, fetch it only at process launch and inject it as per-process `GH_TOKEN` rather than exporting it globally. Smoke-test both identity and target-repo access before the reviewer run: `GH_TOKEN=*** gh api user --jq .login` and `GH_TOKEN=*** gh repo view <owner>/<repo> --json nameWithOwner,isPrivate`. If the dedicated Keychain PAT returns `401 Bad credentials` but the intended reviewer account is already authenticated in `gh`, use `TOKEN="$(gh auth token --user <reviewer-login>)"` and inject that token per process; verify `gh api user`, private-repo access, and the target PR head before launching reviewers, and never print or globally export the token. A token can identify as the intended reviewer but still lack access to a private repo; in that case `REQUEST_CHANGES`/`APPROVE` will either 404 or fall back to the PR author's account, causing GitHub's same-author review rejection. Inside Codex CLI sandbox, `gh auth status` may incorrectly report `GH_TOKEN` invalid even when `gh api user` and PR reads work; trust concrete `gh api`/`gh pr view` smoke tests over `gh auth status` for that path. For loop-validation tests, the reviewer agent itself must submit the GitHub review; if Hermes submits the review body after Codex cannot, mark the run as a failed/fallback test rather than a clean loop pass. If Codex's `gh pr review` path repeatedly fails with a transient `api.github.com` transport error while `gh api` reads work, Codex may submit the review itself through `gh api -X POST repos/<owner>/<repo>/pulls/<pr>/reviews --input review.json` (`event: APPROVE` or `REQUEST_CHANGES`) and then verify the review via the reviews API. This is acceptable because the reviewer agent, not Hermes, performed the mutation.
+After a reviewer returns `ARTIFACT=relay-required`, default Hermes rechecks the live head, resolves the reviewer token without printing it, verifies `gh api user` and target-repository permissions, submits the intended formal review/comment, then reads the artifact back. A reviewer credential may have broader rights on other repositories even when the target repo reports `push: false`; this is why clean child environments alone are insufficient.
 
-Fallback review-submission pattern: when Codex has completed a re-review and produced an explicit pass/fail decision/body but cannot submit the GitHub review because of sandbox auth/network quirks, do not claim the approval/request landed. First save the exact prepared review body, then submit it from Hermes with a tiny wrapper that reads the reviewer PAT from Keychain, injects it only as that subprocess's `GH_TOKEN`, smoke-tests `gh api user --jq .login`, runs `gh pr review ... --body-file`, and immediately verifies `latestReviews`, `reviewDecision`, check status, and review threads. Report this as a disclosed fallback submission, not a clean reviewer-agent submission.
+The relay is the hardened default, not a degraded exception. Preserve role provenance in the signed body and disclose `Transported by: Default Hermes; review content produced by <lane>`. Never switch the global GitHub identity, never expose the token to reviewer prompts/children, and never relay from the PR-author account.
 
 ### Hermes-owned repo-local orchestration templates
 For repo-local templates used by Hermes to dogfood the loop, prefer an explicit namespace such as `.agentic/hermes-orchestration/` instead of a generic `.agentic/commands/` folder. The folder README should state that these are Hermes operational templates, not product runtime commands or feature requirements, unless a scoped GitHub Issue explicitly asks for product support.
 
 ## PR Comment Signatures
 
-Every agent action on a PR must be signed. Since Claude Code, Codex, and Hermes all act as `sabnanikl-dev` on GitHub, signatures create a readable audit trail.
+Every agent action on a PR must be signed. Claude normally acts as the builder/operator identity. All three reviewer lanes prepare separately signed artifacts; default Hermes transports those bodies under the separately verified reviewer identity after the child exits. Signatures and the transport disclosure preserve role provenance even when several lanes share one GitHub account.
 
 ### Signature Format
 
@@ -445,48 +511,55 @@ PR: #<N> | Issue: #<N>
 |--------|----------|---------|
 | **Claude Code opens a PR** | Bottom of PR description | `Built by: Claude Code via Hermes orchestration` |
 | **Claude Code pushes fixes** | New comment on PR | `Fixed by: Claude Code via Hermes orchestration` |
-| **Codex reviews** | Review comment on PR | `Reviewed by: Codex via Hermes orchestration` |
-| **Hermes merges** | Merge comment on PR | `Merged by: Hermes on behalf of Karan` |
+| **Codex Reviewer A** | Formal review when possible | `Reviewed by: Codex Reviewer A via Hermes orchestration` + `Model: gpt-5.6-sol | Reasoning: medium` |
+| **Codex Reviewer B** | Signed PR conversation comment | `Reviewed by: Codex Reviewer B via Hermes orchestration` + runtime line |
+| **Hermes Integration Auditor** | Signed PR conversation comment | `Reviewed by: Hermes Integration Auditor profile` + runtime line |
+| **Default Hermes merges** | Merge/closeout comment when requested | `Merged by: Hermes on behalf of Karan` |
 
 ### Rules
 
 - Signatures go at the **bottom** of PR descriptions or comments
 - Use the exact format above — consistent, machine-parseable
-- If an agent cannot post a comment directly (e.g., Codex CLI has no GitHub API access), include the comment text + signature in its output, and Hermes will post it via `gh pr comment`
-- Hermes should verify signatures exist when reviewing PRs
+- Every reviewer returns the exact prepared artifact and `ARTIFACT=relay-required`. Default Hermes must perform a disclosed transport-only relay using a process-scoped `GH_TOKEN` after the reviewer child exits; never expose that token to a reviewer model, relay from the PR-author/owner identity, or describe the relay as direct reviewer posting.
+- Default Hermes verifies signatures, runtime lines, artifact identity, and current-head SHA before counting a review.
 
-### Hermes Posting Comments
+### Default Hermes Transport-Only Relay
 
-If an agent's CLI cannot post GitHub comments directly, Hermes posts on its behalf:
+After the reviewer child exits and the live head is rechecked, default Hermes posts the prepared body under the verified reviewer identity:
 
 ```bash
-# Post review comment from Codex output
-gh pr comment <N> --body "$(cat codex-review-output.md)"
+# Transport-only relay of a prepared reviewer artifact under the verified reviewer identity.
+GH_TOKEN="$REVIEWER_TOKEN" gh pr comment <N> --repo <owner>/<repo> --body-file /tmp/prepared-review-artifact.md
 
-# Post fix summary from Claude Code output
-gh pr comment <N> --body "$(cat claude-fix-output.md)"
+# Builder fix summary remains the builder lane's responsibility; relay only as a disclosed fallback.
+gh pr comment <N> --repo <owner>/<repo> --body-file /tmp/claude-fix-output.md
 ```
 
 ---
 
 ## Review Standards
 
-### What Codex Checks (technical)
-- Type correctness (TypeScript strict mode)
-- Logic bugs and edge cases
-- Anti-patterns (any casts, magic numbers, tight coupling)
-- Security (unsafe inputs, leaked keys, XSS vectors)
-- Unused imports / dead code
+### What Codex Reviewer A checks
+- Type/logic correctness, edge cases, tests, security, regressions, unsafe inputs, leaked keys, and dead/debug code
 
-### What Hermes Checks (synthesis + visual)
-- Does the PR actually solve the issue?
-- Are acceptance criteria met?
-- Visual QA — browser screenshots of affected pages
-- No console.log or debug code left in
-- Code style consistency
-- Cross-review synthesis — reconciling Codex findings with Hermes's own review
+### What Codex Reviewer B checks
+- Architecture, maintainability, scope discipline, documentation/spec drift, repository harness compliance, and long-term operational risk
 
-### What Karan Checks (taste + vision)
+### What the Hermes Integration Auditor checks
+- Acceptance criteria and PR claims against executable evidence
+- Code/schema/spec/docs/fixtures/CI/generated-artifact parity
+- Live current-head review state, unresolved threads, checks, metadata, and closing linkage
+- Cross-engine/runtime assumptions and deterministic negative probes where false passes are plausible
+- Exact-head visual/browser evidence for affected rendered surfaces
+- Integration seams A/B may miss; it does not implement fixes or perform final synthesis
+
+### What default Hermes checks
+- Material reviewer findings and live GitHub evidence are genuine and current
+- Conflicting findings are adjudicated as blocker, follow-up, false positive, or needs Karan
+- Builder fixes, remote pushes, current-head re-reviews, PR hygiene, merge state, issue closure, and branch cleanup are verified
+- Final go/no-go synthesis accurately represents all three reviewer lanes
+
+### What Karan checks (taste + vision)
 - Does it feel right?
 - Does it match the brand?
 - Is the UX what we intended?
@@ -520,6 +593,7 @@ Agents accumulate suboptimal patterns over time ("AI slop"). Prevent this with:
 - No arbitrary Tailwind values `[]` — extend config instead
 - Components follow existing naming conventions
 - No placeholder implementations — full implementations only
+- No literal agent/tool wrapper residue in committed text (`</content>`, `</invoke>`, `antml:`, `<function_calls>`, or similar transcript markup). For documentation-heavy PRs, run a deterministic residue scan across the changed docs before commit and again after every builder fix.
 - Parse, don't validate — type safety at boundaries
 - **Search before implementing** — use `rg` / `grep` to check if similar code already exists
 
@@ -562,10 +636,11 @@ For GitHub-first coding workflows, treat the PR itself as the shared coordinatio
 | Merge conflict on PR | **Auto-resolve trivial conflicts** (lockfiles, generated code). **For semantic conflicts**, escalate to Karan with a summary of what each branch changed and a recommended action. |
 | Visual regression detected | Block merge, ask Claude Code to fix |
 | Agent hangs or crashes | Kill process, restart fresh session |
-| Claude Code CLI missing from `PATH` | Check common install locations (`~/.local/bin/claude` first), repair the Hermes execution path or per-command `PATH`, then verify `claude --version` and a real pinned Opus 4.8 smoke (`claude --model 'claude-opus-4-8[1m]' --print ...`) before falling back. |
+| Claude Code CLI missing from `PATH` | Check common install locations (`~/.local/bin/claude` first), repair the Hermes execution path or per-command `PATH`, then verify `claude --version` and a real pinned Opus 5 smoke (`claude --model 'claude-opus-5' --print ...`) before falling back. |
 | Claude Code installed but auth/model call fails | Follow the Claude auth refresh/setup references and verify with real `claude --print`; do not trust `auth status` alone. |
 | Claude Code remains unavailable | Use the `builder` Hermes profile as the degraded builder lane if its smoke test passes; otherwise stop and ask/escale before default Hermes implements directly. |
-| Codex CLI unavailable | First verify the binary path, not just `command -v`: Homebrew cask symlinks can go stale (`/opt/homebrew/bin/codex` exists but target under `/opt/homebrew/Caskroom/codex/<version>/` is missing). If the symlink is broken, repair with `brew reinstall --cask codex`, then smoke-test `codex --version` and a tiny `codex exec --dangerously-bypass-approvals-and-sandbox 'Smoke test only. Reply exactly: CODEX_OK'`. **Also require an actual shell-tool smoke** (for example, prompt Codex to run `pwd` and return it): a model-only smoke can pass while the CLI cannot spawn its command host. If the error names a missing `codex-code-mode-host` after reinstall, fetch the matching-architecture host tarball from the official `openai/codex` GitHub release matching `codex --version`, inspect the archive, install its executable beside `codex` (e.g. `/opt/homebrew/bin/codex-code-mode-host`), and repeat the shell-tool smoke before launching reviewers. If repair/auth still fails, report to Karan and suggest manual fallback or retry after install/auth repair. |
+| Codex CLI unavailable | First verify the binary path, not just `command -v`: Homebrew cask symlinks can go stale. Repair the installed CLI if needed, then smoke-test through the hardened `codex-reviewer` launcher with a credential-free prompt file and read-only sandbox. The startup banner must show `model: gpt-5.6-sol` and `reasoning effort: medium`. If the wrapper/auth/model pin still fails, stop and report the lane unavailable; do not run direct unsandboxed Codex or substitute another model silently. |
+| Hermes reviewer profile unavailable | Verify `hermes profile show reviewer`, the four-skill allowlist, `.no-bundled-skills`, `model.default: gpt-5.6-sol`, `agent.reasoning_effort: medium`, `terminal.home_mode: profile`, and the hardened `reviewer` launcher; then run a real wrapper model/skill smoke. If it still fails, stop and report the Integration Auditor lane unavailable unless Karan explicitly authorizes a reduced review set. |
 | Terminal backend timeout | Retry once with increased timeout, then escalate |
 
 ## Merge Conflict Resolution Policy
@@ -742,9 +817,11 @@ Example: Hermes discovers that Codex `--yolo` flag was deprecated in favor of `-
 
 - **Do not make a live issue-to-PR loop look stopped at background checkpoints** — Once the user starts the multi-agent workflow, a builder/reviewer/fix process finishing must automatically advance the next deterministic stage (verify → review → fix → re-review → closeout) without waiting for another user message. Progress updates are welcome, but do not send them as terminal-looking “final” closeouts while work remains. Keep the orchestration turn/session visibly open when practical, actively consume completion notifications, and poll/wait with bounded intervals when the user expects live progress. If the chat/runtime cannot remain active long enough, use a durable orchestration mechanism and state that explicitly; never rely on the user to nudge the loop back into motion. Before any interim update, name the active process/stage and the exact automatic next transition.
 - **Silent external-agent runs are not automatically hung** — Claude Code `--print` can run for 10+ minutes with no stdout while still editing files, running CodeGraph MCP, installing deps, or executing verification. Before killing/restarting a quiet builder, inspect the worktree (`git status --short --branch`, `git diff --stat`) and process tree/CPU to confirm whether progress is happening. If files or verification artifacts are moving, let it continue. If the only active child is a long-lived CodeGraph MCP server (for example `npm exec @colbymchenry/codegraph ... serve --mcp`) and the worktree is otherwise idle, terminate that child process first rather than killing the builder; this can let the builder continue and finish. If the same builder relaunches CodeGraph MCP and remains idle despite an explicit bounded-CodeGraph/no-MCP instruction, stop the builder attempt, disclose the run as degraded/not a clean Claude-builder dogfood pass, and either restart with the approved builder-profile fallback or implement directly only when necessary with later independent review. Do not assume `claude --mcp-config '{"mcpServers":{}}'` or an empty MCP config file will suppress repo/user/plugin-spawned CodeGraph in every Claude Code install; user-scoped MCP servers can still load unless `--strict-mcp-config` is set. For JMD/static-site builder runs where CodeGraph has stalled, prefer `--strict-mcp-config --mcp-config /tmp/jmd-empty-mcp.json` with `{ "mcpServers": {} }`, then verify by checking child processes and worktree progress. For CodeGraph evidence after an MCP hang, prefer bounded CLI commands (`codegraph init`, `sync`, `query/impact`) with explicit timeouts and record limitations honestly. See `references/codegraph-mcp-hang-and-budget-checkpoints.md`.
-- **Do not misclassify buffered/silent builder output as a hang** — Full issue-to-PR builds such as JMD Sanity/static-site endpoint work can exceed a 600s foreground terminal timeout, and `claude --print` / `hermes -p builder --quiet` may buffer useful output until the run exits. A foreground timeout (`exit 124`) or 2–3 minutes of no stdout is not root-cause evidence. For large builds, start the Claude Code builder in background with `notify_on_complete=true` and a 20–30 minute budget, poll worktree/process state every few minutes, and only kill after proving no file/test/process progress. If Claude Code is the intended builder, do not fall back to the Hermes builder profile merely because output is quiet; first verify: process still alive vs exited, child process tree, CPU activity, `git status --short`, `git diff --stat`, new files/artifacts, and test/build subprocess activity. Karan has specifically corrected this failure mode: premature Claude termination weakens the multi-agent workflow and should be treated as an operator mistake unless the evidence shows a true stall. If `--safe-mode` is used without `--dangerously-skip-permissions`, Claude may stop on `gh`/shell approval prompts in non-interactive `--print`; for trusted isolated builder worktrees use `--dangerously-skip-permissions` plus `--strict-mcp-config`, or run in a PTY where approvals can be answered.
+- **Do not misclassify buffered/silent builder output as a hang** — Full issue-to-PR builds such as JMD Sanity/static-site endpoint work can exceed a 600s foreground terminal timeout, and `claude --print` / `hermes -p builder --quiet` may buffer useful output until the run exits. A foreground timeout (`exit 124`) or 2–3 minutes of no stdout is not root-cause evidence. For large builds, start the Claude Code builder in background with `notify_on_complete=true` and a 20–30 minute budget, poll worktree/process state every few minutes, and only kill after proving no file/test/process progress. If Claude Code is the intended builder, do not fall back to the Hermes builder profile merely because output is quiet; first verify: process still alive vs exited, child process tree, CPU activity, `git status --short`, `git diff --stat`, new files/artifacts, and test/build subprocess activity. Karan has specifically corrected this failure mode: premature Claude termination weakens the multi-agent workflow and should be treated as an operator mistake unless the evidence shows a true stall. For non-interactive `--safe-mode` builder runs, use `--permission-mode dontAsk` with a task-scoped `--allowedTools` list so missing authority fails closed instead of prompting. Do not solve approval friction with Claude’s blanket permission-bypass flag; if an exact required command family is absent, add only that family or use a PTY for genuinely interactive approval.
 - **Refresh native Node deps before treating native-backed test failures as code blockers** — In Electron/Node repos with native modules (`better-sqlite3`, `node-pty`, etc.), local test failures can come from stale ABI/native builds after Node changes rather than PR code. If failures point at backend selection/load behavior or native modules and seem unrelated to the diff, run `npm ci --silent` once, then rerun the exact verification before posting/accepting the blocker. If it still fails after dependency refresh, treat it as real. See `references/pr75-review-loop-lessons.md`.
-- **Do not start another fix/re-review cycle unless you can verify it** — In long review/fix loops, especially near the chat/tool-call ceiling, stop at a verified checkpoint before spawning another builder or reviewer. A launched fix/re-review that finishes after the operator loses tool access leaves the PR in an unknown state. Before each new cycle, confirm you still have enough budget to: observe the builder/reviewer completion markers, inspect the resulting diff, verify local `HEAD` vs PR `headRefOid`/commit list, rerun required tests/build, read GitHub review objects/comments, launch and observe required re-reviewers, and synthesize the go/no-go. Treat a fix cycle as incomplete until re-review has been launched and read back; having a verified fix commit plus prepared reviewer prompts is only a checkpoint, not a clean loop closeout. If not enough budget remains for the complete fix→verify→re-review→synthesis sequence, report the exact verified checkpoint and next commands instead of launching the cycle. If a hard tool-call ceiling or user stop arrives mid-cycle, do **not** claim the fix landed; state the last verified PR head/review state and mark any running builder result as unknown until inspected. See `references/review-loop-tool-budget-and-evidence-pitfalls.md`.
+- **Do not start another fix/re-review cycle unless you can verify it** — In long review/fix loops, especially near the chat/tool-call ceiling, stop at a verified checkpoint before spawning another builder or reviewer. A launched fix/re-review that finishes after the operator loses tool access leaves the PR in an unknown state. Before each new cycle, confirm you still have enough budget to: observe the builder/reviewer completion markers, inspect the resulting diff, verify local `HEAD` vs PR `headRefOid`/commit list, rerun required tests/build, read GitHub review objects/comments, launch and observe required re-reviewers, relay signed artifacts, re-read every relay, reconcile CI/threads, and synthesize the go/no-go. **Apply this check again immediately before launching the final A/B/Integration-Auditor triad.** Reserve enough iterations for at least: one completion/readback round, one live-head/CI/review-surface census, artifact relay + readback, and final synthesis. If that reserve is not clearly available, do not launch the triad; save the exact head, immutable packet/worktree paths, verified test state, prior review URLs, and pending launcher commands as a resumable checkpoint. Treat a fix cycle as incomplete until re-review has been launched, observed, relayed, and read back; having a verified fix commit plus prepared or running reviewer prompts is only a checkpoint, not a clean loop closeout. If not enough budget remains for the complete fix→verify→re-review→relay→synthesis sequence, report the exact verified checkpoint and next commands instead of launching the cycle. If a hard tool-call ceiling or user stop arrives mid-cycle, do **not** claim the reviewers passed or the PR is merge-ready; state the last verified PR head/review state and mark running reviewer results as unknown until inspected. See `references/review-loop-tool-budget-and-evidence-pitfalls.md`.
+- **Do not poll bounded workers every minute just because `process.wait` is clamped** — repeated short waits can exhaust the parent tool-iteration budget while a healthy builder/reviewer is still reasoning. Use `notify_on_complete=true`, inspect only at meaningful multi-minute milestones, and batch process/worktree/PR state in one parallel check. For a run likely to outlive the interactive budget, start the durable watchdog/recovery pattern before launching the worker. See `references/issue-contract-tool-budget-and-readonly-review.md`.
+- **Do not launder an unmet issue acceptance criterion through PR metadata or docs** — the live issue outranks the PR checklist, builder summary, and implementation description. Accurate documentation of weaker behavior is not completion. Implement the issue contract or ask the human to amend the issue on the authoritative issue surface; require reviewers to evaluate the unchanged issue after every fix. For registry/guard DSLs, validate cross-field compatibility (selected outputs, guard operands, filter value shapes) **and the complete top-level envelope**: required human-readable metadata, real booleans for gating fields, and unknown-key rejection with only documented extensions. A misspelled safety key such as `gaurds` must fail closed rather than silently deleting guards. Derive advertised probe/test counts from actual machine output instead of builder prose or manual arithmetic. See `references/issue-contract-tool-budget-and-readonly-review.md`.
 - **For current-head PR verification, worktree isolation changes what “observed PR head” means** — Do not rely only on the active PR derived from the primary checkout branch. In GodMode worktree-isolated runs, the bound run branch lives in the run worktree, so a GitHub refresh must reconcile the bound PR by PR number/branch using a PR list or direct PR fetch that includes `headRefOid`. Otherwise `VerificationPane` can keep showing old green evidence after a follow-up push. Require tests for repo-wide pull-list head selection and observed-head drift without manual reverify. See `references/stale-pr-head-worktree-refresh.md`.
 - **Correct stale verification evidence after independent reruns** — Builder/reviewer summaries can contain stale pass counts or copied verification text (for example, `npm test` counts changing after new tests land). After Hermes reruns verification, compare the PR body/comments against the real output. If PR metadata claims the wrong command result, edit the PR body and/or add a signed correction comment before reporting go/no-go; do not leave known-false verification evidence in the PR even when the code itself is good.
 - **Do not overclaim preview/API smoke when deployment URLs return HTML** — Vercel PR preview URLs from comments can be branch/root preview links, feedback/auth shells, or otherwise not the exact API route under test. If an endpoint smoke like `/api/testimonials` returns HTML instead of JSON, report the preview smoke as blocked/inconclusive, keep repo validators/checks as the verified evidence, and leave the live/post-merge smoke as a gated follow-up. Do not convert a non-JSON preview response into either “endpoint failed” or “endpoint passed” without inspecting the actual deploy routing/source.
@@ -756,6 +833,7 @@ Example: Hermes discovers that Codex `--yolo` flag was deprecated in favor of `-
 - **Decide issue closure from the acceptance criteria — not merely from a no-live-change boundary** — Before opening the PR, classify its linked issue as either **repo-complete on merge** or **explicitly approval-gated after merge**. Use `Closes #N`/`Fixes #N` for the default repo-complete case: a PR that fully satisfies an issue’s repo-side acceptance criteria must close the issue even if it deliberately performs no deploy, DNS, account, or public mutation. Use `Refs #N` only when the issue itself has a separately stated, still-unmet human-approved live/deploy/account/content acceptance criterion; remove closing keywords from both PR body and every commit message, verify `closingIssuesReferences` is empty, and scan `git log origin/main..HEAD --format='%s%n%b'` before merge.
 - **Mandatory post-merge issue closeout** — After verifying a merged PR through REST, re-read the linked issue, PR `closingIssuesReferences`, and acceptance criteria. If the merged PR completed the issue, add a concise verified closeout comment and explicitly close the issue as `completed` when GitHub did not auto-close it. Re-read the issue afterward and verify `state: CLOSED`, `stateReason: COMPLETED`, and the closeout-comment URL before reporting completion. Do not leave an issue open merely because the implementation correctly avoided live/account mutations; those boundaries often belong to later issues.
 - **When asked to “work on” an already-open issue, check for existing merged repo-side PRs before spawning builders** — Some issues intentionally remain open after a merged PR because the final AC is an approval-gated live smoke/content mutation/deploy. Before launching Claude/Codex for a new branch, inspect PRs mentioning the issue plus the issue timeline. If a repo-side PR is already merged with `Refs #N` and no closing refs, do not duplicate the work: verify the merge, rerun the relevant local validators/tests from current `origin/main`, inspect prior A/B reviews, smoke any non-mutating live endpoint/rendered UI evidence that is safe, then report the issue as “repo-side complete; still open only for gated live/manual AC” with a close-or-keep-open recommendation.
+- **Do not confuse a feature PR with a later domain cutover** — For a client site intentionally staged on Vercel before DNS cutover, the legacy public domain remaining on WordPress/cPanel/another host is expected context, not a blocker for a normal multi-agent development issue. Unless the issue explicitly owns cutover, DNS, or primary-domain production verification, validate the merged Vercel deployment/stable non-production alias (or the issue-named environment), complete normal PR/issue closeout, and do not test the old public domain as though it should already contain the feature. Mention the pre-cutover state only when materially useful; do not reopen, retain, or overcomplicate the feature issue because cutover has not happened.
 - **Do NOT create code without an Issue** — every PR must trace back to a task
 - **Hermes should never self-approve** — always wait for Claude Code review
 - **Do NOT include multiple unrelated changes in one PR** — one task, one PR

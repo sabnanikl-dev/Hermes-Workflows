@@ -17,7 +17,8 @@ even when normal Claude Code is logged in and works.
 Use non-bare builder/fix commands for OAuth/keychain-backed local Claude Code:
 
 ```bash
-claude --model 'claude-opus-4-8[1m]' --print --dangerously-skip-permissions \
+claude --model 'claude-opus-5' --print --permission-mode dontAsk \
+  --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
   --system-prompt-file AGENTS.md \
   "..."
 ```
@@ -68,8 +69,8 @@ Only escalate to `claude setup-token` if normal login does not repair real calls
 Smoke test before a loop run:
 
 ```bash
-claude --model 'claude-opus-4-8[1m]' --print 'Reply exactly CLAUDE_READY'
-claude --model 'claude-opus-4-8[1m]' --print --dangerously-skip-permissions --system-prompt-file AGENTS.md \
+claude --model 'claude-opus-5' --print 'Reply exactly CLAUDE_READY'
+claude --model 'claude-opus-5' --print --permission-mode dontAsk --allowedTools 'Read,Glob,Grep,Bash(git *)' --system-prompt-file AGENTS.md -- \
   'Smoke test only. Do not edit files. Run git status --short --branch, then reply DONE: CLAUDE_BUILDER_READY'
 ```
 
