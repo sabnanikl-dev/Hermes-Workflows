@@ -63,6 +63,8 @@ Use this when turning a plan, build-out, event, or purchase roadmap into a Googl
 
 See `references/google-sheets-shopping-lists.md` for a reusable row model and compatibility/pivot checklist.
 
+When one phased hardware roadmap has **two divergent north stars**, model a shared infrastructure spine plus explicit architecture-specific lanes, keep compute fabric separate from storage/control networking, and preserve storage portability through standard removable media and protocol-level access. See `references/dual-north-star-hardware-roadmaps.md` for the North Stars tab schema, topology/cabling checks, HDD/SATA SSD/NVMe placement rules, staged cluster purchasing, evidence hierarchy, and stable-key verification procedure.
+
 ### Scheduled deal watches and quiet alerts
 For recurring product-price monitoring, use a script-only (`no_agent: true`) cron wrapper that emits stdout only for a verified qualifying deal; empty stdout stays silent. For Telegram-specific alerts, resolve the configured Telegram home destination and set an explicit `telegram:<chat_id>` delivery target rather than fan-out. See `references/quiet-price-watch-cron.md` for the reusable prompt, parsing, verification, and delivery pattern.
 

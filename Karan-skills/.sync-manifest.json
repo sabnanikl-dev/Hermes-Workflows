@@ -7,13 +7,31 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 61,
+  "skill_count": 77,
   "skills": [
     {
       "name": "adversarial-product-prd-tournament",
       "path": "product-strategy/adversarial-product-prd-tournament",
       "files": 1,
       "sha256": "01be93d0cf572f57d6de2cf2037cd4711daff1b8270964e92f8901d104c59f57"
+    },
+    {
+      "name": "adversarial-technical-artifact-review",
+      "path": "software-development/adversarial-technical-artifact-review",
+      "files": 7,
+      "sha256": "27e81c1aa15f4cdf31bbe7462a51efd516fe96fd9c725f17e220c14956096fea"
+    },
+    {
+      "name": "agent-execution-resilience",
+      "path": "devops/agent-execution-resilience",
+      "files": 6,
+      "sha256": "35cfd67b2c9814cbede3fd401d9acb07d82d02e8e007afabcbc6545a3be7d4f5"
+    },
+    {
+      "name": "agent-workflow-contract-proofing",
+      "path": "software-development/agent-workflow-contract-proofing",
+      "files": 3,
+      "sha256": "52632e14c02b830ac15308c6c314a83329206308ce7cda7ffdebfbac42fb94e5"
     },
     {
       "name": "agent-workflow-orchestration",
@@ -28,6 +46,12 @@
       "sha256": "68e20fea1ae5c7925043f4d181b85c7718fa4d2c7b129de7b20fce5b2d02ebe9"
     },
     {
+      "name": "artifact-output-governance",
+      "path": "productivity/artifact-output-governance",
+      "files": 6,
+      "sha256": "25ceb3ec880ec6b21cc84de55039498132e5f91d68d23a4fe28f7027ffd8e2da"
+    },
+    {
       "name": "autonomous-coding-agents",
       "path": "autonomous-ai-agents/autonomous-coding-agents",
       "files": 9,
@@ -36,8 +60,8 @@
     {
       "name": "autonomous-pr-prover",
       "path": "software-development/autonomous-pr-prover",
-      "files": 15,
-      "sha256": "3061a49297242c0f3b92fef0019212a53319d6ff8e50fd28bcb8937157010c61"
+      "files": 16,
+      "sha256": "ebc5c9a1b19136186864f10865d55ec0f5ce170fda954894535896cacf905ac2"
     },
     {
       "name": "brand-website-from-inspiration",
@@ -54,8 +78,8 @@
     {
       "name": "client-ontology-architecture",
       "path": "software-development/client-ontology-architecture",
-      "files": 9,
-      "sha256": "af26bfa556d179a9c11f0bd5044bcebb1f794cfb4f440963c195d218b58c85e8"
+      "files": 10,
+      "sha256": "91abff63f5ea69e700f29ca839c1d50d3284ff40863b4d2b4b8243559e7eeb06"
     },
     {
       "name": "closeout-dream-report-prototype",
@@ -76,22 +100,34 @@
       "sha256": "dacfd39421ab6e79873eb42ae2e6414171b61892fa8895ed91a1fd49d17255ff"
     },
     {
-      "name": "cpanel-wordpress-domain-triage",
-      "path": "devops/cpanel-wordpress-domain-triage",
-      "files": 3,
-      "sha256": "f88226bfd91f8ee7a59455bcfe1009352985668a151792ee85de20ce2e219784"
-    },
-    {
       "name": "creative-html-visual-artifacts",
       "path": "creative/creative-html-visual-artifacts",
       "files": 93,
       "sha256": "850762f868da104e0324f5ebed4288dcac083b04a2a337451cce8446b6867240"
     },
     {
+      "name": "cross-system-mission-control",
+      "path": "devops/cross-system-mission-control",
+      "files": 7,
+      "sha256": "002093cfd0e3384e6ea671a3a4ef40ccbca7126a269dad18d21d0b8cc851d6f5"
+    },
+    {
+      "name": "cross-tracker-development-execution",
+      "path": "devops/cross-tracker-development-execution",
+      "files": 5,
+      "sha256": "c6c61f7002c980e9798d4b8b678624a4e193050f413315e32534e4b093f163e9"
+    },
+    {
       "name": "daily-log",
       "path": "productivity/daily-log",
       "files": 9,
-      "sha256": "97960e5464e52c9ee12a4807d208b9f94a808daedfdbb4e6a4f01f9f49b37081"
+      "sha256": "42686ca9f654d17efc75cfb6e92a6ee5d921039ca6087354f271d2e1362a2cff"
+    },
+    {
+      "name": "deterministic-validator-review",
+      "path": "software-development/deterministic-validator-review",
+      "files": 3,
+      "sha256": "3adb4f253c5d2972693146fbbd230c26b2c2cb0595e238e9c89ea9ecdfd00997"
     },
     {
       "name": "email-action-workflow",
@@ -148,12 +184,6 @@
       "sha256": "caf56e07ff6cb0e8bf3852165c0dba6cc94e286ad42db9a769bfa0352f42b618"
     },
     {
-      "name": "gateway-troubleshooting",
-      "path": "devops/gateway-troubleshooting",
-      "files": 5,
-      "sha256": "9c4daaf32f8e9806f7d47db746be2ae03e39b246e4630dcbf207440e0a38f160"
-    },
-    {
       "name": "github-issue-specs",
       "path": "github/github-issue-specs",
       "files": 4,
@@ -202,6 +232,18 @@
       "sha256": "ac853cd491c8624f5a7db234822240707785e2f1f8b4d1c03070bd45681edd79"
     },
     {
+      "name": "inquiry-form-formspree",
+      "path": "inquiry-form-formspree",
+      "files": 1,
+      "sha256": "7c11240435a91f09c1e11671edabade6f8fa1a4a119d98a8d462fd2f59de17ba"
+    },
+    {
+      "name": "integration-audit-review",
+      "path": "software-development/integration-audit-review",
+      "files": 2,
+      "sha256": "ecd8ea24cd9de008e8292e1e3684cabebad95a78bf1fae15b49e35496d3c7478"
+    },
+    {
       "name": "jmd-menswear",
       "path": "branding/jmd-menswear",
       "files": 20,
@@ -211,7 +253,7 @@
       "name": "knowledge-memory-workflows",
       "path": "note-taking/knowledge-memory-workflows",
       "files": 8,
-      "sha256": "75618f659e5c5a33be56ae714349b7666923b502294749d2623feb34457c9fc2"
+      "sha256": "9a35fc06d6668ad518bf5cd3d8625e34a48525317073c9c90ef205ea35a02295"
     },
     {
       "name": "kroger-grocery",
@@ -223,7 +265,25 @@
       "name": "linear",
       "path": "productivity/linear",
       "files": 2,
-      "sha256": "b21ba844e64e9f2a0c616b4b5b1e65ea5e84fb5ba510b15184f4882b6b858bdd"
+      "sha256": "316678ab8884470b1098b69b34ab3028d878e0e77ad53364e8bebd5214a283bd"
+    },
+    {
+      "name": "linear-issue-specs",
+      "path": "productivity/linear-issue-specs",
+      "files": 1,
+      "sha256": "015b48483e2a04785f92b61ff995a6c55042131e202a6192585c11f44b37c829"
+    },
+    {
+      "name": "linear-work-order",
+      "path": "productivity/linear-work-order",
+      "files": 3,
+      "sha256": "9c69003a351fd6e2682ee03d4907761f4d06e2b16778819987432991126e8f9e"
+    },
+    {
+      "name": "linear-worker-execution",
+      "path": "devops/linear-worker-execution",
+      "files": 1,
+      "sha256": "00c59758be26402ac5a946b507cda4b57c2629f2507eac52c1898a1fee15482b"
     },
     {
       "name": "local-seo-visibility-ops",
@@ -258,14 +318,20 @@
     {
       "name": "multi-agent-dev-workflow",
       "path": "multi-agent-dev-workflow",
-      "files": 47,
-      "sha256": "a099e71d93eefd3cda4004730a462bbe68208c1b86d6ac4ab2f19b6a5ce7c4ea"
+      "files": 59,
+      "sha256": "0fe6d459b08e8dd5e53c55739358bf96777b77d3d57e115831d4255590679980"
     },
     {
       "name": "native-mcp",
       "path": "mcp/native-mcp",
       "files": 4,
       "sha256": "e9a54a3394578c111c96d9e6d7f61049ca0e00fb30b42c9ce7756697491da0e6"
+    },
+    {
+      "name": "negative-space-verification",
+      "path": "software-development/negative-space-verification",
+      "files": 3,
+      "sha256": "e3e5512a2b40714a3b281f0db124d2ec777242968616ef5a79eb5bae3423dfd2"
     },
     {
       "name": "notebooklm-to-github-issues",
@@ -298,10 +364,22 @@
       "sha256": "f3e97f2d0838178743998f4e727cc20c667852ad287c30ce911331367285da2f"
     },
     {
+      "name": "preflight-qualification-gates",
+      "path": "devops/preflight-qualification-gates",
+      "files": 2,
+      "sha256": "0f12bc7b8e594b05e39de7e50d2871e5d0fe7553106e1aa552b5023c8282de15"
+    },
+    {
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
-      "files": 81,
-      "sha256": "e51832c370ee19d85021f48656480e3b2a92f914158f7f942817a41151b78c84"
+      "files": 82,
+      "sha256": "b63b0cfd20b511bbc677eab865b8b74fe39f9bf336f93aca0d2f9a17b3018bac"
+    },
+    {
+      "name": "profile-isolated-work-execution",
+      "path": "devops/profile-isolated-work-execution",
+      "files": 7,
+      "sha256": "65c51e57b9919ebb7f32eebaa0e86ef298de1855097c1bae292703a6cb023040"
     },
     {
       "name": "project-kickoff",
@@ -318,8 +396,8 @@
     {
       "name": "research-workflow",
       "path": "research/research-workflow",
-      "files": 17,
-      "sha256": "2f1408334576d074b2489ed0507ea62e73a5808746ac87891026f23dd397187e"
+      "files": 18,
+      "sha256": "1995f606410bede1a52d7e52d087e7fdb0d7078285a0f9eac3a31f418d4e9094"
     },
     {
       "name": "resume-tailoring",
@@ -334,10 +412,22 @@
       "sha256": "ae7e5f9bcf2f2a2836cfbf20f6eae9d36a55e9e87dc55bf22663721883445084"
     },
     {
+      "name": "scheduled-monitoring-workflows",
+      "path": "devops/scheduled-monitoring-workflows",
+      "files": 2,
+      "sha256": "9ba488cf3f3f917c727caa6b95a51baec9b0af7f0a8c90ff3f65294be3b2b223"
+    },
+    {
+      "name": "session-history-synthesis",
+      "path": "note-taking/session-history-synthesis",
+      "files": 4,
+      "sha256": "2f50a3d0755cebda5ba33b3465bd4e058448a29e05116ef774f2b0a2b7669c3a"
+    },
+    {
       "name": "software-development-lifecycle",
       "path": "software-development/software-development-lifecycle",
-      "files": 17,
-      "sha256": "c28f8f61b7f56206e3639eca40b26c6f61f9603248a32eb5561aa512aea89d98"
+      "files": 18,
+      "sha256": "a9935ef31b790acaafc729e1c37584e03a732d1c264b409a78735432d694b115"
     },
     {
       "name": "subagent-driven-development",
@@ -356,6 +446,12 @@
       "path": "obsidian-wiki-maintenance/wiki-health-check",
       "files": 1,
       "sha256": "e05071c1edb80801ce2a099ac0048272bcabbbe046b724a733820896c49266a1"
+    },
+    {
+      "name": "workflow-pattern-adaptation",
+      "path": "devops/workflow-pattern-adaptation",
+      "files": 2,
+      "sha256": "b23a3b95d8ba2d6e683532c45c3eddcf7c01f914d5c19b8ac404465d6f9edc9f"
     },
     {
       "name": "writing-humanization-and-voice-editing",

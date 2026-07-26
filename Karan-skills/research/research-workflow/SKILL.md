@@ -21,6 +21,7 @@ This is the class-level skill for external-information workflows. Narrow researc
 
 Absorbed subsections:
 - **Local business research**: verify local vendors/businesses with multiple sources and avoid search-result hallucinations.
+- **Facebook Marketplace local product research**: recover exact product tiers and price bands; treat user-shared monitoring repos as architectural references unless deployment is requested; build deterministic searches; bulk-extract rendered listing cards; verify the live radius label while locally rejecting injected out-of-area results; open only shortlisted candidates; and separate qualifying matches from near-misses. See `references/facebook-marketplace-local-product-research.md`.
 - **Georgia small-business registration research**: separate entity formation, federal/state tax registration, and location-dependent city/county licensing; distinguish mailing, registered-agent, and physical operating addresses; treat entity-name searches as preliminary only. See `references/georgia-small-business-registration.md`.
 - **Restaurant reservation research**: for date/time/party-size/ambiance constraints, check reservation platforms before generic search.
 - **Resume-to-role research**: extract resume facts first, build search queries from candidate profile, prioritize direct employer pages, and verify role details.
@@ -36,7 +37,7 @@ Absorbed subsections:
 Full historical playbooks are preserved in `references/`.
 
 Useful support references:
-Useful support references:
+- `references/facebook-marketplace-local-product-research.md` — one-time local Marketplace product sourcing: exact-tier recovery, 30-mile radius verification, dynamic card extraction, direct listing checks, SSD risk checks, and near-miss handling.
 - `references/medium-member-article-research.md` — Medium member-only article workflow: public preview checks, RSS/archive/search workarounds, authorized email-code login, full-body browser extraction, and linked-reference follow-up.
 - `references/pet-friendly-hotel-research.md` — road-trip lodging research workflow using Google Travel/Hotels, Serper, Google Places photos, and portable HTML verification.
 - `references/boutique-hotel-shortlist-reports.md` — boutique/lifestyle lodging reports where the user gives a vibe/inspiration property; includes availability reality checks, aesthetic-fit scoring, image capture, breakfast/pool fields, and HTML deliverable guidance.

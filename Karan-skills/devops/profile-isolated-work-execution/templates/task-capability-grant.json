@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "grant_id": "REPLACE_WITH_UNIQUE_GRANT_ID",
+  "root": "REPLACE_WITH_ROOT_ID",
+  "issue": "REPLACE_WITH_ISSUE_OR_OBJECT_ID",
+  "body_sha256": "REPLACE_WITH_64_LOWERCASE_HEX_SOURCE_BODY_DIGEST",
+  "run_id": "REPLACE_WITH_UNIQUE_RUN_ID",
+  "created_at": "REPLACE_WITH_TIMEZONE_AWARE_ISO_8601",
+  "expires_at": "REPLACE_WITH_TIMEZONE_AWARE_ISO_8601_WITHIN_POLICY_MAXIMUM",
+  "credential_env": [
+    "REPLACE_WITH_EXACT_ALLOWLISTED_ENV_NAME"
+  ],
+  "skills": [
+    "replace_with_exact_skill_name"
+  ]
+}

@@ -4,9 +4,10 @@
 > Fresh session every time.
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-4-8[1m]' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5' --print \
   --no-session-persistence \
-  --dangerously-skip-permissions \
+  --permission-mode dontAsk \
+  --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
   --system-prompt-file AGENTS.md \
   "Checkout branch feat/issue-{ISSUE_NUMBER}.
    Read docs/spec.md for context.

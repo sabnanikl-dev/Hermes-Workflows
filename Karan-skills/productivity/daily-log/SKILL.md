@@ -59,7 +59,7 @@ date: "YYYY-MM-DD"
 ## Rules
 For multi-agent/multi-repo pilot closeouts, see `references/pilot-wrap-up-log.md` for what to include: high-level outcome, verification category, tracker closeout, and durable lessons without over-recording temporary PR/branch details.
 
-1. Max 3,000 chars per file. Verify the final file after writing with Python `len(path.read_text())`; do not rely on byte counts or approximate estimates. If the file is over limit, compress immediately before finishing.
+1. Max 3,000 chars per file. For synthesized logs, draft to about 2,700 chars so compression and Unicode do not consume the limit unexpectedly. Verify the final file after writing with Python `len(path.read_text())`; `write_file` byte counts are not character counts. If the file is over limit, compress immediately before finishing.
 2. Append incrementally throughout session
 3. If approaching 2,800 chars, create next day's file
 4. Use wikilinks to lesson pages and project status
@@ -77,6 +77,8 @@ For multi-agent/multi-repo pilot closeouts, see `references/pilot-wrap-up-log.md
 
 ## Cron Discovery Fallback
 
-If the cron is synthesizing yesterday and `session_search` is sparse, do **not** assume there were no sessions until you check both recent sessions and local transcripts. First use recent-mode `session_search()` and filter sessions whose `started_at` / `last_active` fall on the target date, because many session messages never contain the literal date. Then inspect `~/.hermes/sessions/session_*YYYYMMDD*.json` or `request_dump_*YYYYMMDD*.json` when keyword search misses them. If transcript files are missing or incomplete, query `~/.hermes/state.db` directly by timestamp to enumerate that calendar day's sessions and summarize user prompts, final assistant messages, and tool counts. Summarize the session task, final answer, verified file writes, and tool failures from the JSON or SQLite rows, while redacting secrets. See `references/session-discovery-cron.md`, `references/session-transcript-fallback.md`, and `references/state-db-session-fallback.md` for fallback workflows.
+Treat date-keyword search as a **content lead, never a complete session inventory**: many sessions never mention the literal date, and recent browse may return only a small capped window. For automated daily synthesis, run recent-mode `session_search()` plus targeted date discovery, then reconcile those IDs against a target-day enumeration from `~/.hermes/state.db` whenever the database is available. Use America/New_York calendar boundaries, deduplicate by session ID, summarize root user/cron sessions, and avoid double-counting `bg_*` or `subagent` children whose work is already represented in a parent session. Include a cron session only when it produced a meaningful report, file mutation, or actionable finding.
+
+If SQLite is unavailable or incomplete, inspect `~/.hermes/sessions/session_*YYYYMMDD*.json` and `request_dump_*YYYYMMDD*.json`. Summarize the session task, final answer, verified file writes, and tool failures from JSON or SQLite rows while redacting secrets. See `references/session-discovery-cron.md`, `references/session-transcript-fallback.md`, and `references/state-db-session-fallback.md` for fallback workflows.
 
 Cron execution note: scheduled jobs may run under stricter approval rules than interactive sessions. If `execute_code` is blocked during a cron, use `terminal` with `python3.11 - <<'PY' ... PY` for deterministic local scripts, especially for `len(path.read_text())` length checks and SQLite `state.db` transcript enumeration. Do not record the blockage as a tool limitation; record/use the terminal-backed Python path as the cron-safe pattern.
