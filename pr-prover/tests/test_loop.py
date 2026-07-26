@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+
+from unittest.mock import patch
 
 from _support import (
     BRANCH,
@@ -13,6 +16,7 @@ from _support import (
     HEAD_A,
     HEAD_B,
     HEAD_C,
+    ROOT,
     FakeGitHub,
     FakeRemote,
     FakeRunner,
@@ -1408,6 +1412,293 @@ class StatePersistenceFailClosedTests(LoopHarness):
             any("could not be recorded" in event for event in result.events),
             "the unrecordable outcome is still reported as an event",
         )
+
+
+class MissingSchemaKeyRestartTests(LoopHarness):
+    """PAPI88-RESUME-READBACK, end to end: a v2 journal missing the phase keys.
+
+    The reproduced bypass, measured exactly as the reviewers measured it: a
+    journal saying ``schema_version=2``, ``attempt=1``, ``head=A`` — and nothing
+    about the verification that attempt owed — was accepted as idle. The restart
+    re-inspected, rebound itself to the live B, found the fresh B reviewers
+    clean, and reported ``merge-ready`` having invoked no builder and read no
+    comment.
+    """
+
+    def write_journal(self, *missing: str, **overrides: object) -> None:
+        payload = {
+            "schema_version": 2,
+            "repo": "example/repo",
+            "pr": 7,
+            "attempt": 1,
+            "head": HEAD_A,
+            "corrective_rerun_attempts": [],
+            "outcome": None,
+            "phase": PHASE_IDLE,
+            "attempt_head": None,
+        }
+        payload.update(overrides)
+        for key in missing:
+            payload.pop(key)
+        (self.tmp / "state.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def world_the_restart_wakes_up_in(self) -> ProverLoop:
+        """The attempt already pushed: the PR is on B and B reviews clean."""
+        loop = self.build()
+        self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+        self.review_round(HEAD_B)
+        self.github.pull_request_calls = 0
+        self.github.comment_calls = 0
+        return loop
+
+    def test_a_v2_journal_missing_both_phase_keys_cannot_reach_merge_ready(self) -> None:
+        self.write_journal("phase", "attempt_head")
+        loop = self.world_the_restart_wakes_up_in()
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "unexpected-state")
+        self.assertEqual(
+            result.evidence["evidence"]["missing_keys"], ["attempt_head", "phase"]
+        )
+        # The bypass measured as it was reproduced: no builder ran, no comment
+        # was read, and the run never rebound itself to B.
+        self.assertEqual(self.github.pull_request_calls, 0)
+        self.assertEqual(self.github.comment_calls, 0)
+        self.assertFalse(self.script.exhausted, "no lane may run on a missing-key journal")
+        self.assertNotEqual(result.head, HEAD_B)
+
+    def test_each_missing_phase_key_alone_also_stops_the_restart(self) -> None:
+        for missing in ("phase", "attempt_head"):
+            with self.subTest(missing=missing):
+                self.setUp()
+                self.write_journal(missing)
+                loop = self.world_the_restart_wakes_up_in()
+
+                result = loop.run()
+
+                self.assertEqual(result.outcome, NEEDS_KARAN)
+                self.assertEqual(result.reason, "unexpected-state")
+                self.assertEqual(result.evidence["evidence"]["missing_keys"], [missing])
+
+    def test_the_missing_key_journal_is_left_exactly_as_it_was_found(self) -> None:
+        """Nothing may quietly repair the journal into a resumable shape."""
+        self.write_journal("phase", "attempt_head")
+        loop = self.world_the_restart_wakes_up_in()
+        before = (self.tmp / "state.json").read_text(encoding="utf-8")
+
+        loop.run()
+
+        self.assertEqual((self.tmp / "state.json").read_text(encoding="utf-8"), before)
+
+    def test_an_opened_attempt_with_no_recorded_head_cannot_reach_merge_ready(self) -> None:
+        self.write_journal(attempt=1, head=None)
+        loop = self.world_the_restart_wakes_up_in()
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "unexpected-state")
+        self.assertFalse(self.script.exhausted)
+
+    def test_a_complete_idle_journal_still_resumes_normally(self) -> None:
+        """The positive control: strictness must not break an ordinary resume."""
+        self.write_journal(attempt=1, head=HEAD_B)
+        loop = self.world_the_restart_wakes_up_in()
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.head, HEAD_B)
+        self.assertEqual(result.attempts_used, 1)
+
+
+class LockAcquisitionFailClosedTests(LoopHarness):
+    """PAPI88-STATE-FAIL-CLOSED, end to end: run() keeps its no-raise promise."""
+
+    def test_a_lock_payload_failure_returns_needs_karan_instead_of_raising(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        with patch("pr_prover.state.json.dump", side_effect=OSError("simulated lock write failure")):
+            result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lock-contention")
+        self.assertEqual(result.evidence["evidence"]["stage"], "payload")
+        self.assertEqual(result.exit_code, 2)
+        self.assertFalse(self.script.exhausted, "nothing may run without the lock")
+
+    def test_a_lock_payload_failure_strands_no_lock_for_the_next_run(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        with patch("pr_prover.state.json.dump", side_effect=OSError("simulated lock write failure")):
+            loop.run()
+
+        self.assertFalse(
+            (self.tmp / "run.lock").exists(),
+            "the next run would contend against a lock nobody acquired",
+        )
+        # And the next run really can start.
+        second = self.build()
+        self.assertEqual(second.run().outcome, MERGE_READY)
+
+    def test_a_lock_stream_failure_returns_needs_karan_instead_of_raising(self) -> None:
+        real = os.fdopen
+
+        def refuse(fd, *args, **kwargs):
+            real(fd, *args, **kwargs).close()
+            raise OSError("simulated fdopen failure")
+
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        with patch("pr_prover.state.os.fdopen", refuse):
+            result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lock-contention")
+        self.assertEqual(result.evidence["evidence"]["stage"], "fdopen")
+        self.assertFalse((self.tmp / "run.lock").exists())
+
+
+class PushAncestryTests(LoopHarness):
+    """PAPI88-LOCAL-HEAD: a landed head that does not descend from the old one.
+
+    The reproduced bypass: the builder reset its attempt worktree to an
+    unrelated commit and force-pushed it. Marker, live PR head, verified remote
+    branch, commit-list tail, and the fix comment all agreed on B — and A had
+    simply been removed from the PR's history. All five advertised checks
+    passed and the run reported ``merge-ready`` after a destructive rewrite.
+    """
+
+    def attempt_round(self, *, after) -> None:
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder", builder_output(HEAD_B, addressed=["null-deref"]), after=after
+        )
+
+    def force_replace(self) -> None:
+        """Push B as an unrelated root and replace the commit list with just B."""
+        self.remote.push(HEAD_B, comment=fix_comment(HEAD_B), parent=None)
+        self.remote.commit_oids[:] = [HEAD_B]
+
+    def test_a_non_descendant_replacement_head_is_not_merge_ready(self) -> None:
+        loop = self.build()
+        self.attempt_round(after=self.force_replace)
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "ambiguous-push")
+        evidence = result.evidence["evidence"]
+        self.assertEqual(evidence["pre_attempt_head"], HEAD_A)
+        self.assertEqual(evidence["landed_head"], HEAD_B)
+        self.assertFalse(evidence["landed_head_descends"])
+
+    def test_the_five_agreeing_checks_are_all_still_satisfied(self) -> None:
+        """Proof the ancestry gate is what stopped it, not one of the old checks."""
+        loop = self.build()
+        self.attempt_round(after=self.force_replace)
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(self.remote.head, HEAD_B, "the remote branch agrees")
+        self.assertEqual(self.remote.commit_oids, [HEAD_B], "the commit list ends at B")
+        self.assertEqual(self.runner.worktree_head, None, "the attempt worktree is on B")
+        self.assertTrue(
+            any(f"local HEAD agrees with the landed head {HEAD_B}" in event for event in result.events),
+            "local-head agreement passed before the ancestry gate ran",
+        )
+        self.assertEqual(result.reason, "ambiguous-push")
+
+    def test_a_rewritten_history_that_drops_the_old_head_is_not_merge_ready(self) -> None:
+        """The subtler shape: B is a real descendant of A's parent, but not of A."""
+        self.remote.parents[HEAD_A] = ROOT
+        loop = self.build()
+
+        def rewrite() -> None:
+            self.remote.push(HEAD_B, comment=fix_comment(HEAD_B), parent=ROOT)
+            self.remote.commit_oids[:] = [ROOT, HEAD_B]
+
+        self.attempt_round(after=rewrite)
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "ambiguous-push")
+        self.assertFalse(result.evidence["evidence"]["landed_head_descends"])
+
+    def test_an_unanswerable_ancestry_question_fails_closed(self) -> None:
+        loop = self.build()
+        self.runner.merge_base_failures = 1
+        self.attempt_round(
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "worktree-error")
+        self.assertEqual(result.evidence["evidence"]["returncode"], 128)
+
+    def test_an_ordinary_descendant_push_still_reaches_merge_ready(self) -> None:
+        """The positive control, and where the ancestry question is asked."""
+        loop = self.build()
+        self.attempt_round(
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+        )
+        self.review_round(HEAD_B)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.head, HEAD_B)
+        self.assertIn(f"{HEAD_B} descends from {HEAD_A}", " ".join(result.events))
+
+    def test_the_ancestry_check_runs_in_the_exact_attempt_worktree(self) -> None:
+        loop = self.build()
+        self.attempt_round(
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+        )
+        self.review_round(HEAD_B)
+
+        loop.run()
+
+        merge_base = [
+            call
+            for call in self.runner.calls
+            if call.argv[0] == "git" and call.argv[3] == "merge-base"
+        ]
+        self.assertEqual(len(merge_base), 1, "ancestry is proved exactly once")
+        argv = merge_base[0].argv
+        self.assertEqual(list(argv[3:]), ["merge-base", "--is-ancestor", HEAD_A, HEAD_B])
+        target = Path(argv[2]).resolve()
+        self.assertIn("attempt1", argv[2])
+        self.assertNotEqual(target, self.source_repo, "not the operational clone")
+        self.assertTrue(target.is_relative_to((self.tmp / "worktrees").resolve()))
+
+    def test_the_ancestry_gate_does_not_replace_the_five_existing_checks(self) -> None:
+        """A descendant push with a commit list that does not end at it still fails."""
+        def push_then_move_the_list() -> None:
+            self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+            self.remote.commit_oids.append(HEAD_C)
+
+        loop = self.build()
+        self.attempt_round(after=push_then_move_the_list)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.evidence["evidence"]["last_listed_commit"], HEAD_C)
 
 
 class ResumeTests(LoopHarness):

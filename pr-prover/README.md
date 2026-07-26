@@ -258,5 +258,10 @@ python3 -m compileall -q pr-prover/src pr-prover/tests
 git diff --check origin/main...HEAD
 ```
 
-The suite runs entirely against deterministic doubles: no network, no `gh`, and
-no real `git`.
+The suite needs no network and never calls `gh`. Almost all of it runs against
+deterministic doubles, including every `git` call the loop makes. The one
+exception is `tests/test_integration_git.py`, which deliberately runs real
+`git`: it creates a throwaway bare repository and clone under the OS temp
+directory and drives `SourceRepo`/`WorktreeProvider` through them, because a
+double cannot catch a wrong refspec or a bad `rev-parse` argument. It touches
+nothing outside that temp directory, and skips itself when `git` is absent.

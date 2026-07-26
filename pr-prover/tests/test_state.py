@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import _support  # noqa: F401 - inserts the package on sys.path
 from pr_prover.errors import LockContention, StateError
@@ -33,7 +35,7 @@ class StateFileHarness(unittest.TestCase):
     def load(self) -> RunState:
         return RunState.load(self.path, repo="example/repo", pr=7)
 
-    def write(self, **overrides: object) -> None:
+    def payload(self, **overrides: object) -> dict:
         payload = {
             "schema_version": SCHEMA_VERSION,
             "repo": "example/repo",
@@ -46,6 +48,16 @@ class StateFileHarness(unittest.TestCase):
             "attempt_head": None,
         }
         payload.update(overrides)
+        return payload
+
+    def write(self, **overrides: object) -> None:
+        self.path.write_text(json.dumps(self.payload(**overrides)), encoding="utf-8")
+
+    def write_without(self, *missing: str, **overrides: object) -> None:
+        """Write a schema-v2 object with some saved keys simply absent."""
+        payload = self.payload(**overrides)
+        for key in missing:
+            payload.pop(key)
         self.path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -156,6 +168,9 @@ class PendingVerificationTests(StateFileHarness):
     def test_completing_the_verification_clears_the_phase(self) -> None:
         state = self.load()
         state.begin_attempt()
+        # The loop inspects before it opens an attempt, so the head is always
+        # recorded by this point; the journal is only loadable when it is.
+        state.head = HEAD
         state.begin_pending_verification(HEAD)
         state.complete_pending_verification()
         state.save()
@@ -211,6 +226,131 @@ class PendingVerificationTests(StateFileHarness):
         self.write(attempt=1, phase=PHASE_ATTEMPT_IN_FLIGHT, attempt_head="abc1234")
         with self.assertRaises(StateError):
             self.load()
+
+
+class SchemaContractTests(StateFileHarness):
+    """The complete schema-v2 key set is mandatory, not defaulted.
+
+    The reproduced bypass: a journal carrying ``schema_version=2``, ``attempt=1``
+    and the old head, but neither ``phase`` nor ``attempt_head``, loaded as a
+    run owing nothing. Defaulting the two keys that exist purely to say "this
+    attempt still owes verification" hands back exactly the interrupted-attempt
+    acceptance the version bump was supposed to end, to anyone who edits a v1
+    journal's version field.
+    """
+
+    SAVED_KEYS = (
+        "schema_version",
+        "repo",
+        "pr",
+        "attempt",
+        "head",
+        "corrective_rerun_attempts",
+        "outcome",
+        "phase",
+        "attempt_head",
+    )
+
+    def test_the_writer_produces_exactly_the_required_key_set(self) -> None:
+        """The contract is anchored to what save() actually writes."""
+        self.load().save()
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(set(payload), set(self.SAVED_KEYS))
+
+    def test_every_saved_key_is_individually_required(self) -> None:
+        for key in self.SAVED_KEYS:
+            with self.subTest(missing=key):
+                self.write_without(key)
+                with self.assertRaises(StateError):
+                    self.load()
+
+    def test_a_v2_journal_missing_the_phase_keys_is_unexpected_state(self) -> None:
+        """The exact reviewer/auditor shape: v2, attempt open, no phase contract."""
+        self.write_without("phase", "attempt_head", attempt=1, head=HEAD)
+        with self.assertRaises(StateError) as caught:
+            self.load()
+        self.assertEqual(caught.exception.reason, "unexpected-state")
+        self.assertEqual(
+            caught.exception.evidence["missing_keys"], ["attempt_head", "phase"]
+        )
+
+    def test_a_v2_journal_missing_only_phase_is_unexpected_state(self) -> None:
+        self.write_without("phase", attempt=1, head=HEAD)
+        with self.assertRaises(StateError) as caught:
+            self.load()
+        self.assertEqual(caught.exception.evidence["missing_keys"], ["phase"])
+
+    def test_a_v2_journal_missing_only_attempt_head_is_unexpected_state(self) -> None:
+        self.write_without("attempt_head", attempt=1, head=HEAD)
+        with self.assertRaises(StateError) as caught:
+            self.load()
+        self.assertEqual(caught.exception.evidence["missing_keys"], ["attempt_head"])
+
+    def test_a_missing_key_is_never_defaulted_into_an_idle_run(self) -> None:
+        """The measurement that named the bypass: it must not load at all."""
+        self.write_without("phase", "attempt_head", attempt=1, head=HEAD)
+        with self.assertRaises(StateError):
+            state = self.load()
+            self.fail(
+                f"a missing-key journal loaded as phase={state.phase} "
+                f"attempt_head={state.attempt_head}"
+            )
+
+    def test_an_opened_attempt_with_no_recorded_head_is_unexpected_state(self) -> None:
+        """The writer records the head before it opens an attempt, so this is impossible."""
+        self.write(attempt=1, head=None)
+        with self.assertRaises(StateError) as caught:
+            self.load()
+        self.assertEqual(caught.exception.evidence["attempt"], 1)
+
+    def test_an_in_flight_attempt_head_that_differs_from_the_head_is_unexpected_state(self) -> None:
+        self.write(
+            attempt=1, head=HEAD, phase=PHASE_ATTEMPT_IN_FLIGHT, attempt_head=OTHER_HEAD
+        )
+        with self.assertRaises(StateError) as caught:
+            self.load()
+        self.assertEqual(caught.exception.evidence["attempt_head"], OTHER_HEAD)
+        self.assertEqual(caught.exception.evidence["head"], HEAD)
+
+    def test_schema_v1_is_still_refused_with_reset_guidance(self) -> None:
+        """Changing a v1 journal's version field must not be a migration path."""
+        self.path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "repo": "example/repo",
+                    "pr": 7,
+                    "attempt": 1,
+                    "head": HEAD,
+                    "corrective_rerun_attempts": [],
+                    "outcome": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(StateError) as caught:
+            self.load()
+        self.assertEqual(caught.exception.evidence["found"], 1)
+        self.assertEqual(caught.exception.evidence["expected"], SCHEMA_VERSION)
+
+    def test_the_shapes_the_writer_does_produce_still_load(self) -> None:
+        """The positive control, so strictness did not become a refusal to resume."""
+        fresh = self.load()
+        fresh.save()
+        self.assertEqual(self.load().attempt, 0)
+
+        opened = self.load()
+        opened.begin_attempt()
+        opened.head = HEAD
+        opened.save()
+        self.assertEqual(self.load().attempt, 1)
+
+        in_flight = self.load()
+        in_flight.begin_pending_verification(HEAD)
+        in_flight.save()
+        reloaded = self.load()
+        self.assertTrue(reloaded.verification_pending)
+        self.assertEqual(reloaded.attempt_head, HEAD)
 
 
 class StatePersistenceFailureTests(unittest.TestCase):
@@ -346,6 +486,183 @@ class LockTests(unittest.TestCase):
             with RunLock(DEV_NULL / "run.lock", repo="example/repo", pr=7):
                 self.fail("the lock must not be acquired under an unusable path")
         self.assertEqual(caught.exception.reason, "lock-contention")
+
+
+class _StageBreaker:
+    """A text stream that fails deterministically at exactly one write stage.
+
+    It wraps the real stream so the underlying descriptor is still closed by the
+    end of the test; only the named stage raises.
+    """
+
+    def __init__(self, stream, stage: str, message: str) -> None:
+        self._stream = stream
+        self._stage = stage
+        self._message = message
+        self.close_calls = 0
+
+    def write(self, text: str) -> int:
+        if self._stage == "newline" and text == "\n":
+            raise OSError(self._message)
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        if self._stage == "flush":
+            raise OSError(self._message)
+        self._stream.flush()
+
+    def close(self) -> None:
+        self.close_calls += 1
+        # Always release the real descriptor, then fail if this is the stage
+        # under test, so a "close failed" run still leaks nothing.
+        self._stream.close()
+        if self._stage == "close":
+            raise OSError(self._message)
+
+
+# Obvious fakes. They exist only to prove the redaction boundary runs; nothing
+# here is or ever was a real credential.
+FAKE_TOKEN = "ghp_" + "A" * 30
+BROKEN_MESSAGE = f"no space left on device while writing GITHUB_TOKEN={FAKE_TOKEN}"
+
+
+class LockAcquisitionTransactionTests(unittest.TestCase):
+    """PAPI88-STATE-FAIL-CLOSED: acquisition is one fail-closed ownership transaction.
+
+    The reproduced defect: exclusive creation succeeded and then ``os.fdopen``,
+    the payload write, the newline, the flush, and the close all ran outside any
+    error boundary. Each stage escaped ``__enter__`` as a raw ``OSError`` — past
+    a ``run()`` that promises not to raise for an expected failure — and left
+    behind an empty or partial lockfile that no run holds, so the next run
+    contends against nothing.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-lock-txn-")
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "run.lock"
+
+    def lock(self) -> RunLock:
+        return RunLock(self.path, repo="example/repo", pr=7)
+
+    def breaking(self, stage: str):
+        """Patch ``os.fdopen`` so the acquired stream fails at ``stage``."""
+        real = os.fdopen
+
+        def fake(fd, *args, **kwargs):
+            return _StageBreaker(real(fd, *args, **kwargs), stage, BROKEN_MESSAGE)
+
+        return patch("pr_prover.state.os.fdopen", fake)
+
+    def acquire_failing(self, stage: str) -> LockContention:
+        """Acquire with ``stage`` broken; return the structured failure."""
+        lock = self.lock()
+        if stage == "payload":
+            # Reviewer B's exact reproducer.
+            context = patch("pr_prover.state.json.dump", side_effect=OSError(BROKEN_MESSAGE))
+        else:
+            context = self.breaking(stage)
+        with context:
+            with self.assertRaises(LockContention) as caught:
+                lock.__enter__()
+        self.lock_after_failure = lock
+        return caught.exception
+
+    def test_every_acquisition_stage_fails_closed_without_stranding_the_lock(self) -> None:
+        for stage in ("payload", "newline", "flush", "close"):
+            with self.subTest(stage=stage):
+                self.setUp()
+                failure = self.acquire_failing(stage)
+
+                self.assertEqual(failure.reason, "lock-contention")
+                self.assertEqual(failure.evidence["stage"], stage)
+                self.assertFalse(
+                    self.path.exists(),
+                    f"the {stage} failure stranded a lock no run holds",
+                )
+                self.assertFalse(
+                    self.lock_after_failure._held,
+                    "a lock is only held once initialization completed",
+                )
+
+    def test_no_raw_oserror_escapes_any_acquisition_stage(self) -> None:
+        """The regression itself: each stage used to escape as a raw OSError."""
+        for stage in ("payload", "newline", "flush", "close"):
+            with self.subTest(stage=stage):
+                self.setUp()
+                try:
+                    self.acquire_failing(stage)
+                except OSError as exc:  # pragma: no cover - the regression itself
+                    self.fail(f"acquisition raised a raw OSError at {stage}: {exc!r}")
+
+    def test_an_fdopen_failure_closes_the_descriptor_it_owned(self) -> None:
+        acquired: list[int] = []
+
+        def fake(fd, *args, **kwargs):
+            acquired.append(fd)
+            raise OSError(BROKEN_MESSAGE)
+
+        lock = self.lock()
+        with patch("pr_prover.state.os.fdopen", fake):
+            with self.assertRaises(LockContention) as caught:
+                lock.__enter__()
+
+        self.assertEqual(caught.exception.evidence["stage"], "fdopen")
+        self.assertEqual(len(acquired), 1)
+        with self.assertRaises(OSError):
+            os.fstat(acquired[0])
+        self.assertFalse(self.path.exists())
+        self.assertFalse(lock._held)
+
+    def test_the_original_cause_is_preserved_and_sanitized(self) -> None:
+        failure = self.acquire_failing("payload")
+
+        self.assertIsInstance(failure.__cause__, OSError)
+        self.assertIn("no space left on device", failure.message)
+        self.assertIn("<redacted>", failure.message)
+        self.assertNotIn(FAKE_TOKEN, failure.message)
+        self.assertNotIn(FAKE_TOKEN, json.dumps(failure.as_dict()))
+
+    def test_a_cleanup_failure_never_replaces_the_acquisition_failure(self) -> None:
+        real_unlink = Path.unlink
+
+        def refuse(self_path, *args, **kwargs):
+            if self_path == self.path:
+                raise OSError("cleanup is broken too")
+            return real_unlink(self_path, *args, **kwargs)
+
+        lock = self.lock()
+        with patch("pr_prover.state.json.dump", side_effect=OSError(BROKEN_MESSAGE)):
+            with patch.object(Path, "unlink", refuse):
+                with self.assertRaises(LockContention) as caught:
+                    lock.__enter__()
+
+        self.assertEqual(caught.exception.evidence["stage"], "payload")
+        self.assertIn("no space left on device", caught.exception.message)
+        self.assertNotIn("cleanup is broken too", caught.exception.message)
+        self.assertFalse(lock._held)
+
+    def test_a_failed_acquisition_leaves_the_path_free_for_the_next_run(self) -> None:
+        """The point of unlinking: the next run must not contend with a ghost."""
+        self.acquire_failing("payload")
+        with self.lock():
+            self.assertTrue(self.path.exists())
+        self.assertFalse(self.path.exists())
+
+    def test_a_contended_lock_written_by_someone_else_is_never_removed(self) -> None:
+        """Cleanup is scoped to the lock this acquisition created."""
+        self.path.write_text("held elsewhere\n", encoding="utf-8")
+        with patch("pr_prover.state.json.dump", side_effect=OSError(BROKEN_MESSAGE)):
+            with self.assertRaises(LockContention):
+                self.lock().__enter__()
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "held elsewhere\n")
+
+    def test_a_successful_acquisition_still_writes_the_whole_payload(self) -> None:
+        """The positive control: the transaction did not stop writing the lock."""
+        with self.lock():
+            body = self.path.read_text(encoding="utf-8")
+        self.assertEqual(json.loads(body), {"pr": 7, "repo": "example/repo"})
+        self.assertTrue(body.endswith("\n"))
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -24,9 +24,14 @@ from pr_prover.github import Comment, PullRequest
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
 HEAD_C = "c" * 40
+ROOT = "0" * 40
 SIGNATURE = "Fixed by: Claude Code via Hermes orchestration"
 BRANCH = "feat/example"
 BUILDER_LOGIN = "sabnanikl-dev"
+
+# ``push(parent=...)`` default: the pushed commit sits on the head it replaced,
+# which is what an ordinary non-destructive push does.
+_INHERIT = object()
 
 
 # -- lane output builders -------------------------------------------------
@@ -70,18 +75,49 @@ class FakeRemote:
     is_draft: bool = True
     comments: list[Comment] = field(default_factory=list)
     commit_oids: list[str] = field(default_factory=list)
+    # Commit -> its first parent. This is the only thing that makes "the new
+    # head descends from the old one" a question the doubles can answer, so a
+    # force-pushed replacement is expressible rather than indistinguishable
+    # from an ordinary push.
+    parents: dict[str, str | None] = field(default_factory=dict)
     _next_comment_id: int = 1
 
     def __post_init__(self) -> None:
         if not self.commit_oids:
             self.commit_oids = [self.head]
+        self.parents.setdefault(self.head, None)
 
-    def push(self, head: str, *, comment: str | None = None, author: str = BUILDER_LOGIN) -> None:
+    def push(
+        self,
+        head: str,
+        *,
+        comment: str | None = None,
+        author: str = BUILDER_LOGIN,
+        parent: object = _INHERIT,
+    ) -> None:
+        """Move the head. ``parent`` names the history the new commit sits on.
+
+        The default is the head being replaced, i.e. an ordinary push. Passing
+        ``None`` models an unrelated root, and passing an earlier commit models
+        a force-pushed rewrite that drops what used to be on top.
+        """
+        self.parents[head] = self.head if parent is _INHERIT else parent
         self.head = head
         if head not in self.commit_oids:
             self.commit_oids.append(head)
         if comment is not None:
             self.comment(comment, author=author)
+
+    def is_ancestor(self, old: str, new: str) -> bool:
+        """``git merge-base --is-ancestor old new`` over the recorded parents."""
+        cursor: str | None = new
+        seen: set[str] = set()
+        while cursor is not None and cursor not in seen:
+            if cursor == old:
+                return True
+            seen.add(cursor)
+            cursor = self.parents.get(cursor)
+        return False
 
     def comment(self, body: str, *, author: str = BUILDER_LOGIN) -> Comment:
         """Append a comment with a fresh, never-reused GitHub-style node id."""
@@ -200,6 +236,10 @@ class FakeRunner:
         self.calls: list[Call] = []
         self.worktree_status = ""
         self.fetch_failures = 0
+        # ``git merge-base --is-ancestor`` runs this many times as an error
+        # (exit 128) before answering, so "the ancestry question could not be
+        # answered" is testable separately from "the answer was no".
+        self.merge_base_failures = 0
         # ``git rev-parse HEAD`` inside a run-owned worktree. ``None`` models a
         # builder that really did commit and push from that worktree, so the
         # local HEAD follows the remote; a test sets it to pin a stale one.
@@ -234,6 +274,21 @@ class FakeRunner:
             return CommandResult(argv=argv, returncode=0, stdout=head + "\n", stderr="")
         if rest[0] == "rev-parse":
             return CommandResult(argv=argv, returncode=0, stdout=self.remote.head + "\n", stderr="")
+        if rest[0] == "merge-base" and rest[1] == "--is-ancestor":
+            if self.merge_base_failures:
+                self.merge_base_failures -= 1
+                return CommandResult(
+                    argv=argv,
+                    returncode=128,
+                    stdout="",
+                    stderr="fatal: Not a valid object name",
+                )
+            ancestor = self.remote.is_ancestor(rest[2], rest[3])
+            # git's own convention: 0 means "yes", 1 means "no", anything else
+            # means the question was not answered.
+            return CommandResult(
+                argv=argv, returncode=0 if ancestor else 1, stdout="", stderr=""
+            )
         if rest[0] == "worktree" and rest[1] == "add":
             path = Path(rest[3])
             path.mkdir(parents=True, exist_ok=False)

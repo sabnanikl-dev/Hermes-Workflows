@@ -55,6 +55,13 @@ leaves a clean-but-stale worktree behind. :meth:`ProverLoop._assert_local_head`
 reads ``git rev-parse HEAD`` in that exact worktree and fails closed on any
 disagreement.
 
+All five are views of where the branch points *now*, and a force-push moves
+them together, so agreement alone cannot tell a commit that was added from one
+that replaced what was there. :meth:`ProverLoop._assert_descends` asks the
+remaining question in the same attempt worktree — is the head this attempt
+opened on still an ancestor of the head that landed — and stops the run when it
+is not, or when git cannot answer.
+
 **Comment identity.** The builder's fix comment is accepted only from the exact
 configured login, and only if GitHub's own comment id was not already present
 before the builder was invoked. The signature and the head SHA both become
@@ -693,6 +700,11 @@ class ProverLoop:
         list, and the attempt worktree's own local ``HEAD``. The first is a
         claim, the next three are GitHub's account of what happened, and the
         last is the only one tied to the tree this attempt actually ran in.
+
+        Agreement fixes where the branch points; it does not prove the branch
+        grew. The ancestry gate that follows the local-head check is what
+        separates a commit added on top from one force-pushed over the head this
+        attempt was opened on.
         """
         if report.head == old_head:
             raise AmbiguousPush(
@@ -718,6 +730,7 @@ class ProverLoop:
             )
         self.worktrees.source.verified_head(refreshed.head_ref_name, new_head)
         self._assert_local_head(worktree, new_head=new_head, old_head=old_head)
+        self._assert_descends(worktree, new_head=new_head, old_head=old_head)
         self._assert_commit_list(new_head)
         self._read_back_comment(new_head, known_comments)
         self._event(f"push verified: {old_head} -> {new_head}")
@@ -745,6 +758,57 @@ class ProverLoop:
                 },
             )
         self._event(f"attempt worktree local HEAD agrees with the landed head {new_head}")
+
+    def _assert_descends(self, worktree: Path, *, new_head: str, old_head: str) -> None:
+        """The commit that landed must build on the pre-attempt head, not replace it.
+
+        Every other view of the push agrees on where the branch points *now*,
+        and a force-push moves all of them together: reset the attempt worktree
+        to an unrelated commit, push it over the branch, and the marker, the
+        live PR head, the remote branch, the commit-list tail and the fix
+        comment all name it while the head the attempt was opened on has simply
+        been deleted from the PR's history. The one question none of them asks
+        is whether the old commit is still in the new one's past.
+
+        ``git merge-base --is-ancestor`` answers exactly that, in this attempt's
+        own worktree, and nothing else is needed: a commit SHA already binds its
+        whole parent chain, so proving ``old_head`` is an ancestor also proves
+        nothing before it was rewritten. Git's convention is 0 for yes and 1 for
+        no; any other status means the question was not answered, which is not
+        the same as an answer and is treated as its own fail-closed condition.
+        """
+        result = self.runner.run(
+            ["git", "-C", str(worktree), "merge-base", "--is-ancestor", old_head, new_head],
+            timeout=120.0,
+        )
+        if result.returncode == 0:
+            self._event(f"the landed head {new_head} descends from {old_head}")
+            return
+        if result.returncode == 1:
+            raise AmbiguousPush(
+                "the head that landed does not descend from the head this attempt "
+                "opened on; the push replaced history rather than adding to it",
+                evidence={
+                    "worktree": str(worktree),
+                    "pre_attempt_head": old_head,
+                    "landed_head": new_head,
+                    "landed_head_descends": False,
+                    "resolution": (
+                        "this loop never force-pushes and never credits one; confirm on "
+                        "the PR what happened to the pre-attempt head before continuing"
+                    ),
+                },
+            )
+        raise WorktreeError(
+            "could not prove the landed head descends from the pre-attempt head",
+            evidence={
+                "worktree": str(worktree),
+                "pre_attempt_head": old_head,
+                "landed_head": new_head,
+                "returncode": result.returncode,
+                "stderr": redact_evidence(result.stderr, limit=1000),
+            },
+        )
 
     def _local_head(self, worktree: Path) -> str:
         """Read ``git rev-parse HEAD`` inside this exact attempt worktree."""

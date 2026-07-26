@@ -16,6 +16,15 @@ re-inspecting its way to a head whose push nobody ever verified. That is also
 why the schema version moved: a journal written before those keys existed
 cannot say whether it owes verification, so it is refused rather than trusted.
 
+That refusal only works if the version is not the only thing checked. A journal
+must carry the *complete* saved key set to be read at all — no key is defaulted
+— because a v1 journal whose version field is edited to 2 is otherwise
+indistinguishable from a v2 journal that genuinely owes nothing. The same rule
+rejects the attempt/phase/head combinations this writer cannot produce: an
+opened attempt with no inspected head, an in-flight phase without a full
+attempt head, and an in-flight attempt bound to a different head than the run.
+There is no migration path; an incomplete journal is reset, not repaired.
+
 Persistence itself fails closed. Every filesystem step of :meth:`RunState.save`
 — creating the parent, writing the temporary file, replacing the real one — is
 translated into :class:`~pr_prover.errors.StateError`, because a raw ``OSError``
@@ -24,6 +33,10 @@ that an expected failure mode becomes ``needs-karan`` rather than a traceback.
 
 The lock is a plain ``O_EXCL`` create. There is no PID inspection,
 proof-of-death, or takeover path: if the lock exists, this run stops and asks.
+Acquiring it is a single transaction — create, open, write, flush, close — that
+either ends with the lock held or leaves nothing behind at all, because a
+half-written lockfile no run holds would stop every later run for a reason that
+never existed.
 """
 from __future__ import annotations
 
@@ -45,7 +58,11 @@ OUTCOMES = ("merge-ready", "blocked", "needs-karan")
 PHASE_IDLE = "idle"
 PHASE_ATTEMPT_IN_FLIGHT = "attempt-in-flight"
 PHASES = (PHASE_IDLE, PHASE_ATTEMPT_IN_FLIGHT)
-_ALLOWED_KEYS = frozenset(
+# Exactly the keys :meth:`RunState.save` writes. The set is both the allowed
+# keys and the required ones: an object is only a schema-v2 journal if it
+# carries all of them. Defaulting an absent key is what let a journal written
+# before the phase contract existed pass as one that satisfies it.
+_SAVED_KEYS = frozenset(
     {
         "schema_version",
         "repo",
@@ -90,7 +107,7 @@ class RunState:
             ) from exc
         if not isinstance(raw, dict):
             raise StateError("state file is not a JSON object", evidence={"state_file": str(path)})
-        unknown = sorted(set(raw) - _ALLOWED_KEYS)
+        unknown = sorted(set(raw) - _SAVED_KEYS)
         if unknown:
             raise StateError(
                 "state file has unknown keys",
@@ -103,6 +120,27 @@ class RunState:
                     "state_file": str(path),
                     "found": raw.get("schema_version"),
                     "expected": SCHEMA_VERSION,
+                },
+            )
+        # Claiming schema v2 is a claim to carry the whole v2 contract. Filling
+        # an absent key in from a default is how a journal that predates the
+        # phase fields — or one whose version was simply edited to 2 — got read
+        # as a run owing no verification, which is the interrupted-attempt
+        # bypass the version bump existed to close. There is no migration here:
+        # an incomplete journal is reset, not repaired.
+        missing = sorted(_SAVED_KEYS - set(raw))
+        if missing:
+            raise StateError(
+                "state file does not carry the complete schema-v2 key set; "
+                "an incomplete journal cannot say whether it owes verification",
+                evidence={
+                    "state_file": str(path),
+                    "missing_keys": missing,
+                    "expected": SCHEMA_VERSION,
+                    "resolution": (
+                        "confirm on the PR whether an interrupted attempt pushed and "
+                        "commented, then run `pr-prover reset` before starting another run"
+                    ),
                 },
             )
         if raw.get("repo") != repo or raw.get("pr") != pr:
@@ -122,14 +160,22 @@ class RunState:
                 evidence={"state_file": str(path), "attempt": attempt, "max_attempts": MAX_ATTEMPTS},
             )
 
-        head = raw.get("head")
+        head = raw["head"]
         if head is not None and not (isinstance(head, str) and _is_full_sha(head)):
             raise StateError(
                 "state file head is not a full 40-hex SHA",
                 evidence={"state_file": str(path), "head": head},
             )
+        # The head is recorded at inspection, before an attempt can open, so an
+        # opened attempt with no head is a shape this writer cannot produce —
+        # and one that would leave an attempt free to bind to any later head.
+        if attempt >= 1 and head is None:
+            raise StateError(
+                "state file records an opened attempt with no inspected head",
+                evidence={"state_file": str(path), "attempt": attempt, "head": head},
+            )
 
-        reruns = raw.get("corrective_rerun_attempts", [])
+        reruns = raw["corrective_rerun_attempts"]
         if not isinstance(reruns, list):
             raise StateError(
                 "state file corrective_rerun_attempts is not a list",
@@ -154,13 +200,13 @@ class RunState:
                 evidence={"state_file": str(path), "attempt": attempt, "reruns": normalized},
             )
 
-        phase = raw.get("phase", PHASE_IDLE)
+        phase = raw["phase"]
         if phase not in PHASES:
             raise StateError(
                 "state file phase is not a known phase",
                 evidence={"state_file": str(path), "phase": phase, "known_phases": list(PHASES)},
             )
-        attempt_head = raw.get("attempt_head")
+        attempt_head = raw["attempt_head"]
         if attempt_head is not None and not (
             isinstance(attempt_head, str) and _is_full_sha(attempt_head)
         ):
@@ -186,8 +232,22 @@ class RunState:
                 "state file records an attempt head while no attempt is in flight",
                 evidence={"state_file": str(path), "phase": phase, "attempt_head": attempt_head},
             )
+        # An attempt is opened on the head that was just inspected, so the two
+        # are the same commit for as long as the attempt is in flight. A journal
+        # where they differ has had one of them moved, which is exactly the
+        # rebinding the phase contract exists to make impossible.
+        if phase == PHASE_ATTEMPT_IN_FLIGHT and attempt_head != head:
+            raise StateError(
+                "state file records an in-flight attempt on a different head than the run",
+                evidence={
+                    "state_file": str(path),
+                    "phase": phase,
+                    "head": head,
+                    "attempt_head": attempt_head,
+                },
+            )
 
-        outcome = raw.get("outcome")
+        outcome = raw["outcome"]
         if outcome is not None and outcome not in OUTCOMES:
             raise StateError(
                 "state file outcome is not a known outcome",
@@ -334,8 +394,24 @@ def _is_full_sha(value: str) -> bool:
     return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
 
 
+def _close_descriptor(handle: int) -> None:
+    """Best-effort close of a raw descriptor, never at the cost of the reason."""
+    try:
+        os.close(handle)
+    except OSError:
+        pass
+
+
+def _close_stream(stream: Any) -> None:
+    """Best-effort close of a stream this call owns; a failed close is not the story."""
+    try:
+        stream.close()
+    except OSError:
+        pass
+
+
 def _discard(path: Path) -> None:
-    """Best-effort removal of a temporary file, never at the cost of the reason.
+    """Best-effort removal of a file this call created, never at the cost of the reason.
 
     This only ever runs while a more informative failure is on its way up, so a
     cleanup that fails too is swallowed rather than allowed to replace it.
@@ -379,13 +455,70 @@ class RunLock:
             ) from exc
         except OSError as exc:
             raise LockContention(
-                f"could not create the lockfile: {exc}", evidence={"lock_file": str(self.path)}
+                f"could not create the lockfile: {redact_evidence(str(exc), limit=300)}",
+                evidence={"lock_file": str(self.path), "stage": "create"},
             ) from exc
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"repo": self.repo, "pr": self.pr}, stream, sort_keys=True)
-            stream.write("\n")
+
+        # Past this point the lockfile exists *because this call created it*, so
+        # every remaining step is one ownership transaction: it either completes
+        # and the lock is held, or it fails and leaves nothing behind. Each stage
+        # is named so the report says which one broke, and none of them may
+        # escape as a raw OSError — `run()` promises an expected failure becomes
+        # `needs-karan`, and a half-written lock nobody holds is worse than none,
+        # because the next run would contend against a ghost.
+        try:
+            stream = os.fdopen(handle, "w", encoding="utf-8")
+        except OSError as exc:
+            # fdopen did not take the descriptor over, so this call still owns it.
+            _close_descriptor(handle)
+            self._abandon()
+            raise self._uninitialized(exc, stage="fdopen") from exc
+
+        payload = {"repo": self.repo, "pr": self.pr}
+        stages: tuple[tuple[str, Any], ...] = (
+            ("payload", lambda: json.dump(payload, stream, sort_keys=True)),
+            ("newline", lambda: stream.write("\n")),
+            # A buffered write can succeed and still never reach the disk, so
+            # the flush and the close are part of acquiring the lock, not
+            # afterthoughts left to a context manager's exit.
+            ("flush", stream.flush),
+            ("close", stream.close),
+        )
+        for stage, step in stages:
+            try:
+                step()
+            except OSError as exc:
+                _close_stream(stream)
+                self._abandon()
+                raise self._uninitialized(exc, stage=stage) from exc
+
+        # Held only now: __exit__ must never try to release a lock that was
+        # never fully acquired, and must always release one that was.
         self._held = True
         return self
+
+    def _uninitialized(self, exc: OSError, *, stage: str) -> LockContention:
+        return LockContention(
+            f"the lockfile could not be initialized: {redact_evidence(str(exc), limit=300)}",
+            evidence={
+                "lock_file": str(self.path),
+                "stage": stage,
+                "resolution": (
+                    "the partial lock from this attempt was removed; fix the reason "
+                    "above and start the run again"
+                ),
+            },
+        )
+
+    def _abandon(self) -> None:
+        """Best-effort removal of the lock *this* acquisition created.
+
+        Only ever called after this call's own ``O_EXCL`` create succeeded, so it
+        can never remove a lock another run holds. Like every cleanup here it
+        runs while a more informative failure is on its way up, so a cleanup that
+        fails too is swallowed rather than allowed to replace it.
+        """
+        _discard(self.path)
 
     def __exit__(self, *_exc: object) -> None:
         if not self._held:
