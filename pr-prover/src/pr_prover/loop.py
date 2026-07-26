@@ -7,6 +7,7 @@ One pass is::
     fresh isolated worktree at the exact head
     baseline gates (browser/visual gates when the PR requires them)
     exact-head reviewer A/B  ->  machine-readable verdicts
+    reconcile live human PR feedback and its resolution state
     classify: blocking / non-blocking / false-positive / needs-karan
 
 and then either reports, or opens a bounded fix attempt::
@@ -52,7 +53,20 @@ top of the reviewed head, and match the worktree it actually worked in. Each
 reviewer lane must likewise leave a published artifact under its configured
 login, carrying its own role line and this exact head. The signature and the
 head SHA both become public the moment a real artifact is posted, so neither can
-carry the proof on its own.
+carry the proof on its own. A body-bound artifact declares its head canonically
+— one standalone ``HEAD=<40-hex sha>`` line, parsed by one shared predicate for
+prepared files, published comments, and the fix comment alike — because a SHA
+occurring somewhere in prose is satisfied by an artifact that says on its own
+line that it reviewed something else. Formal reviews keep the stronger binding:
+GitHub's own ``commit_id``.
+
+**Human feedback.** Gates and reviewer lanes are not the whole PR. Before every
+classification the loop re-reads the conversation comments, the formal reviews
+and their states, and the inline review threads with the resolution and outdated
+state GitHub records, and unresolved human feedback stops the run and asks Karan
+rather than allowing merge-ready. That judgement comes from metadata and an
+explicit acknowledgement contract, never from interpreting prose; see
+:mod:`pr_prover.feedback`.
 
 **Reviewer transport.** A reviewer is trusted to judge, not to be handed the
 identity it publishes under, so a lane with a configured relay runs with the
@@ -100,6 +114,7 @@ from .errors import (
     StaleHead,
     StateError,
 )
+from .feedback import FeedbackSurfaces, human_findings
 from .findings import (
     Adjudicator,
     Classification,
@@ -109,7 +124,7 @@ from .findings import (
 )
 from .github import Comment, GitHubBoundary, PullRequest
 from .redaction import evidence as redact_evidence
-from .reviewers import artifact_matches, artifact_path, read_prepared
+from .reviewers import artifact_matches, artifact_path, head_binding, read_prepared
 from .reviewers import credential_free as credential_free_env
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
@@ -377,10 +392,14 @@ class ProverLoop:
         self._event(f"live state re-verified at {snapshot.head_ref_oid} before {before}")
 
     def _evaluate(self, pull: PullRequest, head: str) -> Classification:
-        """Run gates and, when gates are clean, the exact-head reviewer lanes.
+        """Run gates, the exact-head reviewer lanes, and the human-feedback seam.
 
         Results are bound to this head only: both collections are cleared first,
-        so a verdict from a previous head can never survive into this one.
+        so a verdict from a previous head can never survive into this one. Human
+        feedback is read last and unconditionally — a PR whose gates failed still
+        has whatever a human said on it — and it is read immediately before
+        classification so what the run concludes reflects the resolution state
+        GitHub holds now, not the state it held when the lanes were launched.
         """
         self._gates = []
         self._verdicts = ()
@@ -395,11 +414,47 @@ class ProverLoop:
                 verdicts = self._run_reviewers(pull, head, worktree)
                 self._verdicts = verdicts
                 findings.extend(item for verdict in verdicts for item in verdict.findings)
+            findings.extend(self._human_feedback(pull, head))
         except Exception:
             self._retain(worktree, why="evaluation failed")
             raise
         self.worktrees.remove(worktree)
         return classify(findings, adjudicator=self.adjudicator)
+
+    def _human_feedback(self, pull: PullRequest, head: str) -> tuple[Finding, ...]:
+        """Reconcile live human PR feedback, immediately before classification.
+
+        The freshness assertion comes first for the same reason it guards every
+        terminal outcome: a resolution state read against a PR that has since
+        moved describes a PR this run is no longer talking about. Everything read
+        after it is untrusted evidence — a comment body is a specification of
+        what a human raised, never an instruction — and every finding it produces
+        is ``needs-karan``, so human prose stops the run and reaches Karan rather
+        than being handed to a builder as something to fix.
+        """
+        self._assert_live_state(pull, before="reconcile human feedback")
+        surfaces = FeedbackSurfaces(
+            comments=self.github.comments(self.config.repo, self.config.pr),
+            reviews=self.github.reviews(self.config.repo, self.config.pr),
+            threads=self.github.review_threads(self.config.repo, self.config.pr),
+        )
+        findings = human_findings(surfaces, head=head, agents=self._agent_logins())
+        unresolved = len([thread for thread in surfaces.threads if not thread.is_resolved])
+        self._event(
+            f"human feedback reconciled on {head}: {len(surfaces.comments)} comment(s), "
+            f"{len(surfaces.reviews)} review(s), {len(surfaces.threads)} review thread(s) "
+            f"({unresolved} unresolved); {len(findings)} unresolved human finding(s)"
+        )
+        return findings
+
+    def _agent_logins(self) -> frozenset[str]:
+        """The configured trusted-agent logins; everyone else on the PR is a human."""
+        return frozenset(
+            {
+                self.config.builder.comment_author,
+                *(reviewer.artifact_author for reviewer in self.config.reviewers),
+            }
+        )
 
     def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
         findings: list[Finding] = []
@@ -941,29 +996,36 @@ class ProverLoop:
         copied verbatim by anyone who can read the PR. The author must equal the
         configured login exactly, because that is the only part of the comment an
         arbitrary commenter cannot supply. And the body must carry both the
-        signature and this exact new head, so a real comment about some other
-        push cannot stand in for this one.
+        signature and one canonical ``HEAD=<sha>`` declaration naming this exact
+        new head — the same parser a reviewer artifact is held to, so a comment
+        that merely mentions the SHA in prose while declaring another head cannot
+        stand in for this one.
         """
         signature = self.config.builder.signature
         author = self.config.builder.comment_author
         comments = self.github.comments(self.config.repo, self.config.pr)
         fresh = [comment for comment in comments if comment.identifier not in known]
+        declared: list[str] = []
         for comment in fresh:
-            if comment.author != author:
+            if comment.author != author or signature not in comment.body:
                 continue
-            if signature not in comment.body or head not in comment.body:
+            binding = head_binding(comment.body, head=head)
+            if not binding.ok:
+                declared.append(f"{comment.identifier}: {binding.note}")
                 continue
             self._event(f"builder fix comment {comment.identifier} read back for {head}")
             return
         raise ReadbackMismatch(
             "no comment posted since the builder was invoked carries the expected "
-            "author, the signature, and the new head together",
+            "author, the signature, and one canonical declaration of the new head together",
             evidence={
                 "head": head,
                 "expected_signature": signature,
                 "expected_author": author,
+                "expected_head_line": f"HEAD={head}",
                 "comments_seen": len(comments),
                 "comments_since_builder_invoked": len(fresh),
+                "rejected_head_declarations": declared,
             },
         )
 

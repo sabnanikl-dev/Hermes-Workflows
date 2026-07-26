@@ -75,10 +75,16 @@ Artifact file to write: ${artifact_file}
 The artifact must contain, each on its own line somewhere in the body:
 
   ROLE=${role}
+  HEAD=${head}
   ${signature}
 
-and it must quote the exact head ${head}. State your verdict, every blocking
-finding with file and line, and the commands you ran with their results.
+The HEAD= line is how the artifact binds itself to what you reviewed. Write it
+exactly once, on a line of its own, with the full 40-hex lowercase SHA and
+nothing else on that line. Mentioning the SHA in prose does not count, and a
+second or conflicting HEAD= line is rejected before anything is published.
+
+State your verdict, every blocking finding with file and line, and the commands
+you ran with their results.
 
 Then print, as the last non-empty line of your own stdout, exactly:
 

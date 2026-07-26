@@ -7,6 +7,10 @@ unexpected state, and unexpected state stops the run.
 
 The lock is a plain ``O_EXCL`` create. There is no PID inspection,
 proof-of-death, or takeover path: if the lock exists, this run stops and asks.
+Acquiring it is fail-closed end to end — parent creation, the create itself,
+and initializing the file's contents all reach the caller as prover errors, so
+an unusable lock path is reported as ``needs-karan`` rather than escaping as a
+raw filesystem traceback.
 """
 from __future__ import annotations
 
@@ -227,6 +231,14 @@ def _discard(path: Path) -> None:
         pass
 
 
+def _close_descriptor(handle: int) -> None:
+    """Release a descriptor that could not be wrapped in a stream."""
+    try:
+        os.close(handle)
+    except OSError:
+        pass
+
+
 class RunLock:
     """A run-exists lockfile. Contention stops the run; it never takes over."""
 
@@ -237,7 +249,33 @@ class RunLock:
         self._held = False
 
     def __enter__(self) -> RunLock:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        """Acquire the lock, or fail closed with a reason the public loop can report.
+
+        Every step here can fail on a real filesystem — a parent that is a
+        regular file, a read-only directory, a full disk, a descriptor that
+        cannot be wrapped, a write or a close that does not complete — and none
+        of those may escape as a raw ``OSError``. ``ProverLoop.run()`` translates
+        prover errors only, so an untranslated one would bypass the sanitized
+        report entirely and surface a traceback before any inspection began.
+
+        If initialization fails after the ``O_EXCL`` create won, this run owns a
+        lockfile that no run holds. It is removed here so the next run is not
+        blocked by a lock nobody is using — but the initialization failure stays
+        the reason, and a cleanup that also fails is recorded as evidence
+        alongside it rather than replacing it.
+        """
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StateError(
+                f"could not create the run lockfile's parent directory: {exc}",
+                evidence={
+                    "lock_file": str(self.path),
+                    "lock_parent": str(self.path.parent),
+                    "error": type(exc).__name__,
+                    "stage": "parent",
+                },
+            ) from exc
         try:
             handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError as exc:
@@ -254,13 +292,59 @@ class RunLock:
             ) from exc
         except OSError as exc:
             raise LockContention(
-                f"could not create the lockfile: {exc}", evidence={"lock_file": str(self.path)}
+                f"could not create the lockfile: {exc}",
+                evidence={
+                    "lock_file": str(self.path),
+                    "error": type(exc).__name__,
+                    "stage": "create",
+                },
             ) from exc
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"repo": self.repo, "pr": self.pr}, stream, sort_keys=True)
-            stream.write("\n")
+        try:
+            stream = os.fdopen(handle, "w", encoding="utf-8")
+        except OSError as exc:
+            _close_descriptor(handle)
+            raise self._initialization_failed(exc, stage="open")
+        try:
+            with stream:
+                json.dump({"repo": self.repo, "pr": self.pr}, stream, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+        except (OSError, ValueError, TypeError) as exc:
+            raise self._initialization_failed(exc, stage="write")
         self._held = True
         return self
+
+    def _initialization_failed(self, exc: BaseException, *, stage: str) -> StateError:
+        """Turn a failed lock initialization into the error the loop reports.
+
+        The partial lock this acquisition created is removed first, because a
+        lockfile with no run behind it would stop every later run for a reason
+        that no longer exists. Whether that removal worked is evidence; the
+        initialization failure remains the primary reason either way.
+        """
+        evidence: dict[str, Any] = {
+            "lock_file": str(self.path),
+            "error": type(exc).__name__,
+            "stage": stage,
+            "partial_lock_cleanup": self._remove_partial_lock(),
+            "resolution": (
+                "confirm no other run is active, then check the lockfile's directory "
+                "is writable before starting another run"
+            ),
+        }
+        return StateError(
+            f"could not initialize the run lockfile: {exc}", evidence=evidence
+        )
+
+    def _remove_partial_lock(self) -> str:
+        """Best-effort removal of a lock created by a failed acquisition."""
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            return "already absent"
+        except OSError as exc:
+            return f"failed: {type(exc).__name__}"
+        return "removed"
 
     def __exit__(self, exc_type: object = None, *_rest: object) -> None:
         if not self._held:

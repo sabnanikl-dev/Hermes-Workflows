@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pr_prover.commands import CommandResult, validate_argv
 from pr_prover.config import RunConfig
-from pr_prover.github import Comment, PullRequest
+from pr_prover.github import Comment, PullRequest, ReviewThread
 
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
@@ -56,12 +56,13 @@ def builder_output(
 
 
 def fix_comment(head: str) -> str:
-    return f"Fixed the blockers on this head.\n\n---\n{SIGNATURE}\nHEAD: {head}\n"
+    """The builder's signed fix comment, with its canonical head declaration."""
+    return f"Fixed the blockers on this head.\n\n---\n{SIGNATURE}\nHEAD={head}\n"
 
 
 def reviewer_artifact(role: str, head: str, *, signature: str = REVIEWER_SIGNATURE) -> str:
     """The artifact body a reviewer lane is expected to publish on the PR."""
-    return f"Reviewed the diff at this head.\n\n---\n{signature}\nROLE={role}\nHEAD: {head}\n"
+    return f"Reviewed the diff at this head.\n\n---\n{signature}\nROLE={role}\nHEAD={head}\n"
 
 
 # -- fakes ----------------------------------------------------------------
@@ -77,9 +78,11 @@ class FakeRemote:
     is_draft: bool = True
     comments: list[Comment] = field(default_factory=list)
     reviews: list[Comment] = field(default_factory=list)
+    threads: list[ReviewThread] = field(default_factory=list)
     history: list[str] = field(default_factory=list)
     _next_comment_id: int = 1
     _next_review_id: int = 1
+    _next_thread_id: int = 1
 
     def __post_init__(self) -> None:
         if not self.history:
@@ -100,7 +103,14 @@ class FakeRemote:
         self.comments.append(posted)
         return posted
 
-    def review(self, body: str, *, author: str = REVIEWER_LOGIN, commit_id: str = "") -> Comment:
+    def review(
+        self,
+        body: str,
+        *,
+        author: str = REVIEWER_LOGIN,
+        commit_id: str = "",
+        state: str = "",
+    ) -> Comment:
         """Append a submitted review, which carries the commit it was made against."""
         posted = Comment(
             identifier=f"review:{self._next_review_id}",
@@ -108,10 +118,40 @@ class FakeRemote:
             body=body,
             kind="review",
             commit_id=commit_id,
+            state=state,
         )
         self._next_review_id += 1
         self.reviews.append(posted)
         return posted
+
+    def thread(
+        self,
+        body: str,
+        *,
+        author: str = "human-reviewer",
+        resolved: bool = False,
+        outdated: bool = False,
+        path: str = "src/app.py",
+    ) -> ReviewThread:
+        """Append one inline review thread with the resolution state GitHub records."""
+        identifier = f"PRRT_thread{self._next_thread_id}"
+        self._next_thread_id += 1
+        started = ReviewThread(
+            identifier=identifier,
+            is_resolved=resolved,
+            is_outdated=outdated,
+            path=path,
+            comments=(
+                Comment(
+                    identifier=f"{identifier}-c1",
+                    author=author,
+                    body=body,
+                    kind="review-thread-comment",
+                ),
+            ),
+        )
+        self.threads.append(started)
+        return started
 
     def pull_request(self) -> PullRequest:
         return PullRequest(
@@ -134,6 +174,7 @@ class FakeGitHub:
         self.pull_request_calls = 0
         self.comment_calls = 0
         self.review_calls = 0
+        self.review_thread_calls = 0
 
     def pull_request(self, repo: str, number: int) -> PullRequest:
         self.pull_request_calls += 1
@@ -146,6 +187,10 @@ class FakeGitHub:
     def reviews(self, repo: str, number: int) -> tuple[Comment, ...]:
         self.review_calls += 1
         return tuple(self.remote.reviews)
+
+    def review_threads(self, repo: str, number: int) -> tuple[ReviewThread, ...]:
+        self.review_thread_calls += 1
+        return tuple(self.remote.threads)
 
 
 @dataclass(frozen=True)

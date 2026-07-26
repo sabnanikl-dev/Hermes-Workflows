@@ -1,9 +1,11 @@
 """The injectable GitHub boundary.
 
-The loop reads GitHub for three things: the live PR (to bind the exact
+The loop reads GitHub for four things: the live PR (to bind the exact
 ``headRefOid``), the PR conversation comments (to read back the builder's signed
-fix comment), and the submitted reviews (to read back each reviewer lane's
-published artifact). It never writes.
+fix comment), the submitted reviews (to read back each reviewer lane's published
+artifact, and for their states), and the inline review threads with their
+resolution state (so human feedback nobody resolved is an input to the run's
+conclusion rather than something it never looked at). It never writes.
 
 That split is the whole trust model. The trusted agents do their own work on
 GitHub — the builder pushes, comments, and signs; the reviewers publish their
@@ -26,6 +28,29 @@ from .errors import GitHubError
 from .redaction import evidence as redact_evidence
 
 _PR_FIELDS = "number,state,isDraft,title,url,headRefName,headRefOid,baseRefName"
+
+# ``$endCursor`` is the variable ``gh api graphql --paginate`` supplies, so the
+# threads of a heavily reviewed PR cannot silently stop at the first page.
+_REVIEW_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          comments(first: 100) {
+            nodes { id url body author { login } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 @dataclass(frozen=True)
@@ -64,6 +89,33 @@ class Comment:
     url: str = ""
     kind: str = "comment"
     commit_id: str = ""
+    state: str = ""
+
+
+@dataclass(frozen=True)
+class ReviewThread:
+    """One inline review thread, with the resolution state GitHub itself records.
+
+    ``is_resolved`` and ``is_outdated`` are the only parts of a thread that say
+    whether its conversation is still live, and neither can be asserted by
+    writing prose: resolving a thread is an action on GitHub, and a thread goes
+    outdated when the lines it was anchored to stop existing. That is why they
+    are read here rather than inferred from what the comments say.
+    """
+
+    identifier: str
+    is_resolved: bool
+    is_outdated: bool
+    comments: tuple[Comment, ...] = ()
+    path: str = ""
+
+    @property
+    def authors(self) -> tuple[str, ...]:
+        seen: list[str] = []
+        for comment in self.comments:
+            if comment.author not in seen:
+                seen.append(comment.author)
+        return tuple(seen)
 
 
 class GitHubBoundary(Protocol):
@@ -74,6 +126,8 @@ class GitHubBoundary(Protocol):
     def comments(self, repo: str, number: int) -> tuple[Comment, ...]: ...
 
     def reviews(self, repo: str, number: int) -> tuple[Comment, ...]: ...
+
+    def review_threads(self, repo: str, number: int) -> tuple[ReviewThread, ...]: ...
 
 
 class GhCliGitHub:
@@ -130,6 +184,37 @@ class GhCliGitHub:
             for item in (page if isinstance(page, list) else [page])
         ]
         return tuple(_review_from(item) for item in flattened)
+
+    def review_threads(self, repo: str, number: int) -> tuple[ReviewThread, ...]:
+        """Inline review threads and their resolution state, through GraphQL.
+
+        Resolution and outdated-ness exist only in GraphQL — the REST review-comment
+        endpoints expose neither — so this one read goes through ``gh api graphql``.
+        """
+        owner, _, name = repo.partition("/")
+        payload = self._json_list(
+            [
+                self._gh,
+                "api",
+                "graphql",
+                "--paginate",
+                "--slurp",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+                "-F",
+                f"number={number}",
+                "-f",
+                f"query={_REVIEW_THREADS_QUERY}",
+            ],
+            what="pull request review threads",
+        )
+        threads: list[ReviewThread] = []
+        for page in payload:
+            for node in _thread_nodes(page):
+                threads.append(_thread_from(node))
+        return tuple(threads)
 
     def _json(self, argv: Sequence[str], *, what: str) -> dict[str, Any]:
         payload = self._payload(argv, what=what)
@@ -269,6 +354,9 @@ def _review_from(payload: object) -> Comment:
     commit_id = payload.get("commit_id")
     if commit_id is not None and not isinstance(commit_id, str):
         raise GitHubError("review payload has an unusable commit_id", evidence={"author": login})
+    state = payload.get("state")
+    if state is not None and not isinstance(state, str):
+        raise GitHubError("review payload has an unusable state", evidence={"author": login})
     return Comment(
         identifier=f"review:{identifier}",
         author=login,
@@ -276,7 +364,96 @@ def _review_from(payload: object) -> Comment:
         url=str(payload.get("html_url") or ""),
         kind="review",
         commit_id=(commit_id or "").lower(),
+        state=(state or "").upper(),
     )
 
 
-__all__ = ["Comment", "GhCliGitHub", "GitHubBoundary", "PullRequest"]
+def _thread_nodes(page: object) -> list[Any]:
+    """The ``reviewThreads`` nodes of one GraphQL page, or nothing for an empty PR."""
+    if not isinstance(page, dict):
+        raise GitHubError("review-thread payload is not an object")
+    cursor: Any = page.get("data", page)
+    for key in ("repository", "pullRequest", "reviewThreads"):
+        if not isinstance(cursor, dict):
+            raise GitHubError(
+                "review-thread payload is missing the reviewThreads connection",
+                evidence={"missing_at": key},
+            )
+        cursor = cursor.get(key)
+    if cursor is None:
+        return []
+    if not isinstance(cursor, dict):
+        raise GitHubError("review-thread payload has an unusable reviewThreads connection")
+    nodes = cursor.get("nodes")
+    if nodes is None:
+        return []
+    if not isinstance(nodes, list):
+        raise GitHubError("review-thread payload has an unusable nodes array")
+    return nodes
+
+
+def _thread_from(node: object) -> ReviewThread:
+    """One review thread. Resolution state is required; an absent flag is not 'resolved'."""
+    if not isinstance(node, dict):
+        raise GitHubError("review thread is not an object")
+    identifier = node.get("id")
+    if not isinstance(identifier, str) or not identifier:
+        raise GitHubError("review thread has no stable id")
+    resolved = node.get("isResolved")
+    outdated = node.get("isOutdated")
+    if not isinstance(resolved, bool) or not isinstance(outdated, bool):
+        raise GitHubError(
+            "review thread is missing its resolution state",
+            evidence={"thread": identifier},
+        )
+    raw = node.get("comments")
+    items = raw.get("nodes") if isinstance(raw, dict) else None
+    if items is None:
+        items = []
+    if not isinstance(items, list):
+        raise GitHubError(
+            "review thread has an unusable comments array", evidence={"thread": identifier}
+        )
+    return ReviewThread(
+        identifier=identifier,
+        is_resolved=resolved,
+        is_outdated=outdated,
+        comments=tuple(_thread_comment_from(item, thread=identifier) for item in items),
+        path=str(node.get("path") or ""),
+    )
+
+
+def _thread_comment_from(payload: object, *, thread: str) -> Comment:
+    if not isinstance(payload, dict):
+        raise GitHubError("review-thread comment is not an object", evidence={"thread": thread})
+    author = payload.get("author")
+    login = str(author.get("login") or "") if isinstance(author, dict) else ""
+    if not login:
+        # A deleted account leaves ``author: null``. That is real data, and the
+        # thread it sits in still has to be counted, so it is named rather than
+        # dropped — the resolution state is what decides, not the login.
+        login = "<unknown>"
+    identifier = payload.get("id")
+    if not isinstance(identifier, str) or not identifier:
+        raise GitHubError("review-thread comment has no stable id", evidence={"thread": thread})
+    body = payload.get("body")
+    if body is not None and not isinstance(body, str):
+        raise GitHubError(
+            "review-thread comment has an unusable body", evidence={"thread": thread}
+        )
+    return Comment(
+        identifier=identifier,
+        author=login,
+        body=body or "",
+        url=str(payload.get("url") or ""),
+        kind="review-thread-comment",
+    )
+
+
+__all__ = [
+    "Comment",
+    "GhCliGitHub",
+    "GitHubBoundary",
+    "PullRequest",
+    "ReviewThread",
+]

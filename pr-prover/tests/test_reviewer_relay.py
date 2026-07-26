@@ -38,7 +38,7 @@ from _support import (
 )
 from pr_prover.commands import SubprocessRunner, validate_argv
 from pr_prover.config import RunConfig
-from pr_prover.github import Comment, PullRequest
+from pr_prover.github import Comment, PullRequest, ReviewThread
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN, ProverLoop
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
 
@@ -60,7 +60,7 @@ with open(probe, "w", encoding="utf-8") as stream:
     json.dump({"credentials": credentials, "home": os.environ.get("HOME")}, stream)
 body = os.environ.get("PR_PROVER_TEST_BODY")
 if body is None:
-    body = "Audited this head.\\n\\n---\\n%s\\nROLE=%s\\nHEAD: %s\\n" % (signature, role, head)
+    body = "Audited this head.\\n\\n---\\n%s\\nROLE=%s\\nHEAD=%s\\n" % (signature, role, head)
 if body != "<none>":
     with open(artifact, "w", encoding="utf-8") as stream:
         stream.write(body)
@@ -113,6 +113,9 @@ class SpoolGitHub:
         return tuple(published)
 
     def reviews(self, repo: str, number: int) -> tuple[Comment, ...]:
+        return ()
+
+    def review_threads(self, repo: str, number: int) -> tuple[ReviewThread, ...]:
         return ()
 
     @property
@@ -286,7 +289,7 @@ class ReviewerRelayLifecycleTests(unittest.TestCase):
     def test_an_artifact_bound_to_another_head_never_reaches_github(self) -> None:
         os.environ["PR_PROVER_TEST_BODY"] = (
             f"Audited something else.\n\n---\n{REVIEWER_SIGNATURE}\n"
-            f"ROLE=reviewer-a\nHEAD: {'d' * 40}\n"
+            f"ROLE=reviewer-a\nHEAD={'d' * 40}\n"
         )
         self.addCleanup(os.environ.pop, "PR_PROVER_TEST_BODY", None)
 
@@ -298,7 +301,7 @@ class ReviewerRelayLifecycleTests(unittest.TestCase):
 
     def test_an_artifact_without_its_role_line_never_reaches_github(self) -> None:
         os.environ["PR_PROVER_TEST_BODY"] = (
-            f"Audited this head.\n\n---\n{REVIEWER_SIGNATURE}\nHEAD: {HEAD_A}\n"
+            f"Audited this head.\n\n---\n{REVIEWER_SIGNATURE}\nHEAD={HEAD_A}\n"
         )
         self.addCleanup(os.environ.pop, "PR_PROVER_TEST_BODY", None)
 
@@ -309,7 +312,7 @@ class ReviewerRelayLifecycleTests(unittest.TestCase):
         self.assertEqual(self.github.published, 0)
 
     def test_an_unsigned_artifact_never_reaches_github(self) -> None:
-        os.environ["PR_PROVER_TEST_BODY"] = f"Audited this head.\n\nROLE=reviewer-a\nHEAD: {HEAD_A}\n"
+        os.environ["PR_PROVER_TEST_BODY"] = f"Audited this head.\n\nROLE=reviewer-a\nHEAD={HEAD_A}\n"
         self.addCleanup(os.environ.pop, "PR_PROVER_TEST_BODY", None)
 
         result = self.build().run()

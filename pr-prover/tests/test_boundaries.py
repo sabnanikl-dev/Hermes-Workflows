@@ -12,9 +12,22 @@ from _support import BUILDER_LOGIN, HEAD_A, REVIEWER_LOGIN, REVIEWER_SIGNATURE, 
 from pr_prover import cli, redaction
 from pr_prover.commands import CommandResult
 from pr_prover.config import RunConfig
-from pr_prover.errors import CommandContractError, ConfigError, GitHubError, StateError
+from pr_prover.errors import (
+    CommandContractError,
+    ConfigError,
+    GitHubError,
+    ReviewerRelayError,
+    StateError,
+)
 from pr_prover.findings import Finding, classify
-from pr_prover.github import GhCliGitHub
+from pr_prover.github import Comment, GhCliGitHub
+from pr_prover.reviewers import (
+    artifact_matches,
+    binds_head,
+    head_binding,
+    head_declarations,
+    read_prepared,
+)
 
 
 def finding(identifier: str, severity: str = "blocking", source: str = "reviewer:A") -> Finding:
@@ -205,6 +218,125 @@ class GhBoundaryTests(unittest.TestCase):
     def test_a_review_payload_that_is_not_an_array_fails_closed(self) -> None:
         with self.assertRaises(GitHubError):
             self.boundary(json.dumps({"message": "Not Found"})).reviews("example/repo", 7)
+
+
+class CanonicalHeadBindingTests(unittest.TestCase):
+    """REVIEW-A-4 / IA-1: a body-bound artifact declares its head, it does not mention it.
+
+    The defect these pin down: the expected SHA legitimately appears in scope
+    prose, command transcripts, and quoted history, so "the expected SHA is
+    somewhere in the body" is satisfied by an artifact that says on its own line
+    that it reviewed a different commit.
+    """
+
+    OTHER = "d" * 40
+
+    def artifact(self, declared: str, *, prose: str = "") -> str:
+        lead = f"Expected launch head: {prose}\n" if prose else ""
+        return (
+            f"Audited the diff.\n{lead}\n---\n{REVIEWER_SIGNATURE}\n"
+            f"ROLE=reviewer-a\nHEAD={declared}\n"
+        )
+
+    def test_one_standalone_declaration_of_the_bound_head_is_accepted(self) -> None:
+        self.assertTrue(binds_head(self.artifact(HEAD_A), head=HEAD_A))
+
+    def test_the_expected_sha_in_prose_never_counts(self) -> None:
+        """The frozen mutation: expected SHA in prose, another SHA declared."""
+        body = self.artifact(self.OTHER, prose=HEAD_A)
+
+        binding = head_binding(body, head=HEAD_A)
+
+        self.assertIn(HEAD_A, body, "the expected SHA really is in the body")
+        self.assertFalse(binding.ok)
+        self.assertEqual(binding.problem, "mismatch")
+        self.assertEqual(binding.declared, self.OTHER)
+
+    def test_a_body_with_no_declaration_is_rejected(self) -> None:
+        binding = head_binding(f"Reviewed {HEAD_A} carefully.\n", head=HEAD_A)
+        self.assertFalse(binding.ok)
+        self.assertEqual(binding.problem, "missing")
+
+    def test_two_declarations_are_rejected_even_when_they_agree(self) -> None:
+        binding = head_binding(f"HEAD={HEAD_A}\ntext\nHEAD={HEAD_A}\n", head=HEAD_A)
+        self.assertFalse(binding.ok)
+        self.assertEqual(binding.problem, "duplicate")
+        self.assertEqual(binding.count, 2)
+
+    def test_conflicting_declarations_are_rejected(self) -> None:
+        binding = head_binding(f"HEAD={HEAD_A}\nHEAD={self.OTHER}\n", head=HEAD_A)
+        self.assertFalse(binding.ok)
+        self.assertEqual(binding.problem, "duplicate")
+
+    def test_a_malformed_declaration_is_rejected(self) -> None:
+        for value in ("", HEAD_A[:39], HEAD_A.upper(), f"{HEAD_A} (reviewed)", "not-a-sha"):
+            with self.subTest(value=value):
+                binding = head_binding(f"HEAD={value}\n", head=HEAD_A)
+                self.assertFalse(binding.ok)
+                self.assertIn(binding.problem, {"malformed", "missing"})
+
+    def test_a_declaration_is_read_as_a_whole_line(self) -> None:
+        """An inline mention is prose, however it is punctuated."""
+        for body in (f"reviewed HEAD={HEAD_A} today\n", f"`HEAD={HEAD_A}`\n"):
+            with self.subTest(body=body):
+                self.assertEqual(head_declarations(body), ())
+
+    def test_surrounding_whitespace_does_not_break_a_real_declaration(self) -> None:
+        self.assertTrue(binds_head(f"  HEAD={HEAD_A}  \r\n", head=HEAD_A))
+
+    def test_a_review_keeps_its_authoritative_commit_id_binding(self) -> None:
+        """GitHub's own commit_id is stronger than anything in a body."""
+        review = Comment(
+            identifier="review:1",
+            author=REVIEWER_LOGIN,
+            body=f"Audited.\n{REVIEWER_SIGNATURE}\nROLE=reviewer-a\n",
+            kind="review",
+            commit_id=HEAD_A,
+        )
+
+        self.assertTrue(
+            artifact_matches(
+                review,
+                author=REVIEWER_LOGIN,
+                signature=REVIEWER_SIGNATURE,
+                role="reviewer-a",
+                head=HEAD_A,
+            )
+        )
+
+    def test_a_comment_falls_to_the_canonical_declaration(self) -> None:
+        stale = Comment(
+            identifier="IC_1",
+            author=REVIEWER_LOGIN,
+            body=self.artifact(self.OTHER, prose=HEAD_A),
+        )
+
+        self.assertFalse(
+            artifact_matches(
+                stale,
+                author=REVIEWER_LOGIN,
+                signature=REVIEWER_SIGNATURE,
+                role="reviewer-a",
+                head=HEAD_A,
+            )
+        )
+
+    def test_a_prepared_artifact_is_held_to_the_same_predicate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pr-prover-artifact-") as tmp:
+            path = Path(tmp) / "prepared.md"
+            path.write_text(self.artifact(self.OTHER, prose=HEAD_A), encoding="utf-8")
+
+            with self.assertRaises(ReviewerRelayError) as caught:
+                read_prepared(
+                    path,
+                    reviewer="A",
+                    role="reviewer-a",
+                    signature=REVIEWER_SIGNATURE,
+                    head=HEAD_A,
+                )
+
+        self.assertIn("not bound to this exact head", caught.exception.message)
+        self.assertEqual(caught.exception.evidence["declared_head"], self.OTHER)
 
 
 class RedactionTests(unittest.TestCase):

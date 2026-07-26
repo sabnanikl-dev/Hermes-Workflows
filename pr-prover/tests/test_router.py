@@ -203,6 +203,7 @@ class RemovedFrameworkScanTests(unittest.TestCase):
                 "commands.py",
                 "config.py",
                 "errors.py",
+                "feedback.py",
                 "findings.py",
                 "github.py",
                 "loop.py",

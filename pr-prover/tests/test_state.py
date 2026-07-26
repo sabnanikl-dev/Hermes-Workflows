@@ -269,6 +269,44 @@ class LockTests(unittest.TestCase):
                 with RunLock(self.path, repo="example/repo", pr=7):
                     raise ValueError("the real reason")
 
+    def test_an_unusable_lock_parent_is_unexpected_state(self) -> None:
+        """REVIEW-A-5: parent creation is inside the translated boundary too."""
+        blocker = Path(self._tmp.name) / "not-a-directory"
+        blocker.write_text("I am a file\n", encoding="utf-8")
+
+        with self.assertRaises(StateError) as caught:
+            with RunLock(blocker / "run.lock", repo="example/repo", pr=7):
+                self.fail("the lock cannot be acquired below a regular file")
+
+        self.assertEqual(caught.exception.reason, "unexpected-state")
+        self.assertEqual(caught.exception.evidence["stage"], "parent")
+
+    def test_a_lockfile_that_cannot_be_written_is_unexpected_state(self) -> None:
+        with mock.patch.object(state_module, "json") as fake:
+            fake.dump.side_effect = OSError(28, "No space left on device")
+            with self.assertRaises(StateError) as caught:
+                with RunLock(self.path, repo="example/repo", pr=7):
+                    self.fail("an uninitialized lock is not held")
+
+        self.assertIn("could not initialize", caught.exception.message)
+        self.assertEqual(caught.exception.evidence["stage"], "write")
+        self.assertEqual(caught.exception.evidence["partial_lock_cleanup"], "removed")
+        self.assertFalse(self.path.exists(), "the partial lock is not left behind")
+
+    def test_a_failed_initialization_keeps_its_reason_when_cleanup_also_fails(self) -> None:
+        with mock.patch.object(state_module, "json") as fake:
+            fake.dump.side_effect = OSError(28, "No space left on device")
+            with mock.patch.object(Path, "unlink", _refuse_unlink):
+                with self.assertRaises(StateError) as caught:
+                    with RunLock(self.path, repo="example/repo", pr=7):
+                        self.fail("an uninitialized lock is not held")
+
+        self.assertIn("could not initialize", caught.exception.message)
+        self.assertEqual(
+            caught.exception.evidence["partial_lock_cleanup"], "failed: PermissionError"
+        )
+        self.assertTrue(self.path.exists(), "the lock it could not remove is still named")
+
 
 def _refuse_unlink(self: Path, *args: object, **kwargs: object) -> None:
     raise OSError(13, "Permission denied")

@@ -8,6 +8,7 @@ step and no runtime dependencies.
 inspect live PR → bind exact headRefOid → verify remote head
   → baseline gates (+ visual QA when required)
   → exact-head reviewer lanes → machine-readable verdicts + published artifacts
+  → reconcile live human feedback and its resolution state
   → classify: blocking / non-blocking / false-positive / needs-karan
   → at most two isolated fix attempts (one corrective rerun each)
   → verify local head, PR head, commit list, and the signed fix comment
@@ -88,9 +89,9 @@ The lane runs with `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and
 `GITHUB_ENTERPRISE_TOKEN` removed by name — and nothing else about the inherited
 session touched — and writes its finished artifact to `{artifact_file}`. Before
 anything is published, that file is held to the same signature, bare
-`ROLE=<role>` line, and exact head that readback will demand, so a lane that
-crashed, wrote nothing, or reviewed another head can never put something
-unusable on the PR under the reviewer's name. Only then does the configured
+`ROLE=<role>` line, and canonical `HEAD=<sha>` declaration that readback will
+demand, so a lane that crashed, wrote nothing, or reviewed another head can never
+put something unusable on the PR under the reviewer's name. Only then does the configured
 `relay.argv` run. It is an ordinary command using whatever `gh` session it
 already has; this tool mints and forwards nothing. Its exit status is not the
 proof either — the artifact is still read back from GitHub afterwards.
@@ -202,12 +203,32 @@ Nothing a lane says about GitHub is believed until GitHub says it too.
 Each reviewer lane must leave a published comment or review that is **new** since
 that lane was launched, authored by its configured `artifact_author`, carrying
 its `artifact_signature` and a bare `ROLE=<role>` line, and bound to the exact
-head — by the review's own `commit_id` where GitHub records one, otherwise by the
-40-hex SHA in the body. The role line is matched whole, so one lane's artifact
-can never be read back as another's. Anything else is a `readback-mismatch`.
+head. The role line is matched whole, so one lane's artifact can never be read
+back as another's. Anything else is a `readback-mismatch`.
 
 This is applied identically whether the lane published for itself or a relay
 published for it. A successful relay is transport, not proof.
+
+### The canonical head declaration
+
+A review submitted through GitHub carries its own `commit_id`, and that stays the
+authoritative binding: it is the one part an author cannot retype. A conversation
+comment has no such field, so its binding lives in the body — and "the expected
+SHA appears somewhere in the body" is not a binding. Scope paragraphs, command
+transcripts, and quoted history all legitimately carry the head a run expects, so
+that test is satisfied by an artifact stating on its own line that it reviewed a
+different commit.
+
+Every body-bound artifact therefore declares its head canonically:
+
+```text
+HEAD=<40-hex lowercase sha>
+```
+
+on a line of its own, **exactly once**. Missing, malformed, duplicated, and
+conflicting declarations are all rejected, and a SHA in prose never counts. One
+parser answers this for the prepared reviewer file, the published comment, and
+the builder's fix comment alike, so the three checks cannot drift apart.
 
 ### The builder's push
 
@@ -225,14 +246,48 @@ them is a `readback-mismatch`:
 1. **New.** The loop snapshots GitHub's own comment ids before it invokes the
    builder, and accepts only an id that was not already there.
 2. **From the expected login.** `builder.comment_author` is compared exactly.
-3. **About this head.** The body must carry both the configured signature and
-   the new 40-hex SHA.
+3. **About this head.** The body must carry the configured signature and one
+   canonical `HEAD=<sha>` declaration of the new head, by the same parser a
+   reviewer artifact is held to.
 
 The signature and the SHA both become public the moment the real comment is
 posted, so neither proves anything on its own — anybody who can comment on the
 PR can copy them verbatim. The login is the part an arbitrary commenter cannot
 supply, and the comment id is the part they cannot reuse. That is why the author
 is mandatory configuration rather than an optional tightening.
+
+## Human feedback
+
+A PR is not only its gates and its reviewer lanes. Immediately before every
+classification the loop re-reads the conversation comments, the formal reviews
+and their states, and the inline review threads with the resolution and outdated
+state GitHub records. Unresolved human feedback stops the run as `needs-karan`;
+it never reaches `merge-ready`, and it is never handed to the builder as work.
+
+That judgement is metadata and contract, never prose interpretation:
+
+| Surface | Unresolved when | Cleared by |
+|---|---|---|
+| formal review | the author's latest decisive state is `CHANGES_REQUESTED` | the same author's later `APPROVED` or `DISMISSED` |
+| inline review thread | it is neither resolved nor outdated | resolving it, or the diff moving past it |
+| conversation comment, `COMMENTED` review body | nothing has acknowledged it | an explicit acknowledgement |
+
+The first two carry their own state. The third does not — GitHub gives a PR
+comment no equivalent of "resolve" — and this tool will not pretend arbitrary
+prose is safely machine-interpretable, so the conservative default holds and the
+way out is explicit. A later comment from a human carrying, on its own line:
+
+```text
+PR-PROVER: ACKNOWLEDGED <the acknowledged comment's id>
+```
+
+clears it. That is id matching, not language understanding. An acknowledgement
+from a configured agent login does not count, and nothing acknowledges itself.
+
+Who counts as human is the configured identities inverted: anyone who is not
+`builder.comment_author` and not a reviewer's `artifact_author`. Bodies reach the
+report as truncated, redacted, explicitly labelled evidence — a specification of
+what a human raised, never an instruction.
 
 ## State and locking
 
@@ -242,6 +297,14 @@ a run exists. There is no PID inspection and no takeover path: if the lock is
 held, the run stops and asks. After confirming no run is active, remove it with
 `pr-prover reset --force`.
 
+Acquiring the lock is fail-closed end to end. Creating its parent, creating the
+file, and initializing its contents all reach the caller as prover errors, so an
+unusable lock path is reported as `needs-karan` with evidence rather than
+escaping as a raw filesystem traceback. A lock created by an acquisition that
+then failed to initialize is removed, because a lockfile with no run behind it
+would stop every later run; if that removal also fails, the initialization
+failure stays the reason and the cleanup outcome is recorded beside it.
+
 ## What stops the run and asks Karan
 
 `invalid-config` · `invalid-command` · `lock-contention` · `unexpected-state` ·
@@ -249,11 +312,13 @@ held, the run stops and asks. After confirming no run is active, remove it with
 `readback-mismatch` · `relay-failure` · `scope-contamination` ·
 `builder-refusal` · `github-error` · `worktree-error`
 
-`unexpected-state` covers writing the local journal as well as reading it: a
-state file that cannot be created, written, or atomically replaced stops the run
-with evidence rather than escaping as a traceback. If persisting fails *while* a
-fail-closed stop is already being reported, the reason for that stop is what the
-report keeps, and the journal failure is recorded alongside it.
+`unexpected-state` covers writing the local journal as well as reading it, and
+acquiring the lock as well as contending for it: a state file that cannot be
+created, written, or atomically replaced — or a lockfile whose parent, creation,
+or initialization fails — stops the run with evidence rather than escaping as a
+traceback. If persisting fails *while* a fail-closed stop is already being
+reported, the reason for that stop is what the report keeps, and the journal or
+cleanup failure is recorded alongside it.
 
 Each carries evidence, and the worktree plus scratch directory are retained so
 the failure can be inspected.

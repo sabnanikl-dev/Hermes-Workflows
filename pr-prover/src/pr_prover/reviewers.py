@@ -19,7 +19,10 @@ Each step is separately checkable, and this module holds the checks:
   head can never reach GitHub at all;
 * :func:`artifact_matches` is that published-artifact predicate itself, shared
   by the relayed and the self-publishing lanes so both are read back the same
-  way.
+  way;
+* :func:`head_binding` is the one canonical head declaration parser, shared by
+  the prepared file, the published comment, and the builder's fix comment, so
+  the three cannot drift apart.
 
 Only the relay command touches GitHub, and only after the prepared artifact has
 passed. Nothing here brokers, mints, or forwards a credential: the relay is an
@@ -48,6 +51,81 @@ CREDENTIAL_ENV = (
 # one and small enough that a runaway lane cannot fill the relay's argv or the
 # report with it.
 MAX_PREPARED_BYTES = 262_144
+
+# The canonical head declaration a body-bound artifact must carry.
+#
+# A comment has no GitHub-recorded ``commit_id`` to bind it to a commit, so its
+# binding has to be in the text — and "the expected SHA appears somewhere in the
+# body" is not that binding. Scope paragraphs, command transcripts, and quoted
+# history all legitimately carry the head a run expects, so an artifact can
+# satisfy a substring test while stating on its own line that it reviewed
+# something else entirely.
+#
+# The rule is therefore one whole line, exactly ``HEAD=<40 lowercase hex>``,
+# appearing exactly once. Missing, malformed, duplicated, and conflicting
+# declarations are all rejected, and prose never counts. One parser answers this
+# for the prepared file, the published comment, and the builder's fix comment,
+# so those three checks cannot drift apart.
+HEAD_PREFIX = "HEAD="
+
+
+@dataclass(frozen=True)
+class HeadBinding:
+    """Whether one body declares exactly the bound head, and why not when it does not."""
+
+    ok: bool
+    problem: str
+    declared: str
+    count: int
+
+    @property
+    def note(self) -> str:
+        """A short, body-free explanation fit for evidence."""
+        if self.problem == "missing":
+            return f"the body carries no standalone {HEAD_PREFIX}<40-hex sha> line"
+        if self.problem == "duplicate":
+            return (
+                f"the body carries {self.count} standalone {HEAD_PREFIX} lines; "
+                "exactly one is required"
+            )
+        if self.problem == "malformed":
+            return f"the {HEAD_PREFIX} line is not a full 40-hex lowercase SHA"
+        if self.problem == "mismatch":
+            return "the declared head is not the head this run is bound to"
+        return "the body declares exactly this head"
+
+
+def head_declarations(body: str) -> tuple[str, ...]:
+    """Every standalone ``HEAD=`` declaration in ``body``, in order."""
+    return tuple(
+        line.strip()[len(HEAD_PREFIX) :].strip()
+        for line in body.splitlines()
+        if line.strip().startswith(HEAD_PREFIX)
+    )
+
+
+def head_binding(body: str, *, head: str) -> HeadBinding:
+    """Parse the one canonical head declaration ``body`` is allowed to carry."""
+    declared = head_declarations(body)
+    if not declared:
+        return HeadBinding(ok=False, problem="missing", declared="", count=0)
+    if len(declared) > 1:
+        return HeadBinding(ok=False, problem="duplicate", declared="", count=len(declared))
+    value = declared[0]
+    if not _is_full_sha(value):
+        return HeadBinding(ok=False, problem="malformed", declared=value, count=1)
+    if value != head:
+        return HeadBinding(ok=False, problem="mismatch", declared=value, count=1)
+    return HeadBinding(ok=True, problem="", declared=value, count=1)
+
+
+def binds_head(body: str, *, head: str) -> bool:
+    """Does ``body`` declare exactly ``head``, canonically and unambiguously?"""
+    return head_binding(body, head=head).ok
+
+
+def _is_full_sha(value: str) -> bool:
+    return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
 
 
 @dataclass(frozen=True)
@@ -154,10 +232,18 @@ def read_prepared(
             f"reviewer {reviewer}'s prepared artifact does not carry its role on its own line",
             evidence={**evidence, "expected_role_line": f"ROLE={role}"},
         )
-    if head not in body:
+    binding = head_binding(body, head=head)
+    if not binding.ok:
         raise ReviewerRelayError(
-            f"reviewer {reviewer}'s prepared artifact is not bound to this exact head",
-            evidence=evidence,
+            f"reviewer {reviewer}'s prepared artifact is not bound to this exact head: "
+            f"{binding.note}",
+            evidence={
+                **evidence,
+                "expected_head_line": f"{HEAD_PREFIX}{head}",
+                "declared_head": binding.declared,
+                "head_declarations": binding.count,
+                "problem": binding.problem,
+            },
         )
     return PreparedArtifact(path=path, body=body)
 
@@ -168,7 +254,9 @@ def artifact_matches(artifact: Any, *, author: str, signature: str, role: str, h
     The role is matched as a whole line — read as a substring, ``ROLE=Auditor``
     would satisfy ``ROLE=A`` — and the head by the review's own ``commit_id``
     wherever GitHub records one, because that is the binding an author cannot
-    retype.
+    retype. A conversation comment has no ``commit_id``, so it falls to the
+    canonical body declaration instead, which is the same parser the prepared
+    file was held to before anything was published.
     """
     if artifact.author != author:
         return False
@@ -178,7 +266,7 @@ def artifact_matches(artifact: Any, *, author: str, signature: str, role: str, h
         return False
     if artifact.commit_id:
         return artifact.commit_id == head
-    return head in artifact.body
+    return binds_head(artifact.body, head=head)
 
 
 def _carries_role(body: str, role: str) -> bool:
@@ -188,10 +276,15 @@ def _carries_role(body: str, role: str) -> bool:
 
 __all__ = [
     "CREDENTIAL_ENV",
+    "HEAD_PREFIX",
     "MAX_PREPARED_BYTES",
+    "HeadBinding",
     "PreparedArtifact",
     "artifact_matches",
     "artifact_path",
+    "binds_head",
     "credential_free",
+    "head_binding",
+    "head_declarations",
     "read_prepared",
 ]

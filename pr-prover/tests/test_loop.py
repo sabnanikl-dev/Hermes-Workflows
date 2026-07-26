@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from _support import (
     BRANCH,
@@ -12,6 +14,7 @@ from _support import (
     HEAD_A,
     HEAD_B,
     HEAD_C,
+    SIGNATURE,
     FakeGitHub,
     FakeRemote,
     FakeRunner,
@@ -22,6 +25,7 @@ from _support import (
     make_source_repo,
     reviewer_output,
 )
+from pr_prover import state as state_module
 from pr_prover.findings import Finding
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop
 from pr_prover.state import MAX_ATTEMPTS, RunState
@@ -626,6 +630,98 @@ class LockTests(LoopHarness):
         self.assertEqual(lock.read_text(encoding="utf-8"), "held by another run\n")
 
 
+class LockAcquisitionFailClosedTests(LoopHarness):
+    """REVIEW-A-5 / IA-2: acquiring the lock never escapes the public boundary.
+
+    ``ProverLoop.run()`` translates prover errors, so anything raw from the
+    filesystem here would bypass the sanitized report and surface a traceback
+    before any inspection began. Every case goes through the public loop.
+    """
+
+    def build_under(self, lock: Path) -> ProverLoop:
+        loop = self.build()
+        loop.config = replace(loop.config, lock_file=lock)
+        return loop
+
+    def test_a_lock_parent_that_is_a_regular_file_asks_karan(self) -> None:
+        blocker = self.tmp / "not-a-directory"
+        blocker.write_text("I am a file\n", encoding="utf-8")
+        loop = self.build_under(blocker / "run.lock")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "unexpected-state")
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.evidence["evidence"]["stage"], "parent")
+        self.assertEqual(self.github.pull_request_calls, 0)
+        self.assertEqual(self.runner.calls, [], "nothing may run without the lock")
+
+    def test_a_lockfile_that_cannot_be_initialized_asks_karan(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        with mock.patch.object(
+            state_module.json, "dump", side_effect=OSError(28, "No space left on device")
+        ):
+            result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "unexpected-state")
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.evidence["evidence"]["stage"], "write")
+        self.assertIn("could not initialize", result.evidence["message"])
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_lock_created_by_a_failed_initialization_is_removed(self) -> None:
+        """A lock with no run behind it must not block the next run."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        with mock.patch.object(state_module.json, "dump", side_effect=OSError(28, "full")):
+            result = loop.run()
+
+        self.assertEqual(result.evidence["evidence"]["partial_lock_cleanup"], "removed")
+        self.assertFalse((self.tmp / "run.lock").exists())
+
+    def test_a_cleanup_that_also_fails_never_replaces_the_primary_reason(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        with mock.patch.object(state_module.json, "dump", side_effect=OSError(28, "full")):
+            with mock.patch.object(Path, "unlink", _refuse_lock_unlink):
+                result = loop.run()
+
+        self.assertEqual(result.reason, "unexpected-state")
+        self.assertIn("could not initialize", result.evidence["message"])
+        self.assertEqual(
+            result.evidence["evidence"]["partial_lock_cleanup"], "failed: PermissionError"
+        )
+
+    def test_a_lock_release_failure_never_replaces_an_in_flight_reason(self) -> None:
+        """The run already stopped for a reason; releasing is not a new one."""
+        loop = self.build()
+        self.script.add("lane-reviewer-A", "", timed_out=True, returncode=124)
+
+        with mock.patch.object(Path, "unlink", _refuse_lock_unlink):
+            result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "lane-failure")
+        self.assertTrue((self.tmp / "run.lock").exists(), "the leaked lock stops the next run")
+
+
+def _refuse_lock_unlink(self: Path, *args: object, **kwargs: object) -> None:
+    """Refuse to remove the lockfile; leave every other path alone."""
+    if self.name == "run.lock":
+        raise OSError(13, "Permission denied")
+    return _REAL_UNLINK(self, *args, **kwargs)
+
+
+_REAL_UNLINK = Path.unlink
+
+
 class NonMutationTests(LoopHarness):
     def test_the_source_clone_only_ever_sees_read_and_worktree_subcommands(self) -> None:
         loop = self.build()
@@ -757,7 +853,9 @@ class FinalFreshnessTests(LoopHarness):
             result.evidence["evidence"]["drift"]["head"],
             {"inspected": HEAD_A, "live": HEAD_B},
         )
-        self.assertEqual(result.evidence["evidence"]["before"], "report merge-ready")
+        # Caught by the freshness assertion that guards the human-feedback
+        # reconciliation, which now runs before any terminal report does.
+        self.assertEqual(result.evidence["evidence"]["before"], "reconcile human feedback")
 
     def test_a_remote_head_that_moves_during_the_last_reviewer_blocks_merge_ready(self) -> None:
         """The PR still says HEAD_A; the branch it names no longer resolves there."""
@@ -826,7 +924,7 @@ class FinalFreshnessTests(LoopHarness):
 
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "stale-head")
-        self.assertEqual(result.evidence["evidence"]["before"], "open a fix attempt")
+        self.assertEqual(result.evidence["evidence"]["before"], "reconcile human feedback")
         self.assertEqual(result.attempts_used, 0, "no attempt may be spent on a stale head")
         self.assertFalse(
             any(call.argv[0] == "lane-builder" for call in self.runner.calls),
@@ -844,7 +942,7 @@ class FinalFreshnessTests(LoopHarness):
 
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "stale-head")
-        self.assertEqual(result.evidence["evidence"]["before"], "report blocked")
+        self.assertEqual(result.evidence["evidence"]["before"], "reconcile human feedback")
 
     def test_a_needs_karan_report_is_also_held_to_the_live_head(self) -> None:
         loop = self.build()
@@ -986,6 +1084,93 @@ class CommentIdentityTests(LoopHarness):
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "readback-mismatch")
         self.assertEqual(result.evidence["evidence"]["comments_since_builder_invoked"], 1)
+
+
+class CanonicalArtifactHeadTests(LoopHarness):
+    """REVIEW-A-4 / IA-1: body-bound artifacts declare one head, canonically.
+
+    A published comment has no GitHub ``commit_id`` to bind it, so its binding
+    lives in the text. Mentioning the expected SHA in prose is not that binding:
+    every case here keeps the expected SHA in the body and moves only the
+    standalone declaration.
+    """
+
+    OTHER = "d" * 40
+
+    def signed(self, declared: str, *, mentions: str) -> str:
+        return (
+            f"Fixed the blockers.\nExpected launch head: {mentions}\n\n---\n"
+            f"{SIGNATURE}\nHEAD={declared}\n"
+        )
+
+    def test_a_reviewer_comment_declaring_another_head_fails_readback(self) -> None:
+        loop = self.build()
+        self.runner.reviewer_artifact_head = self.OTHER
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_a_fix_comment_that_only_mentions_the_new_head_fails_readback(self) -> None:
+        """The frozen mutation, end to end: prose says HEAD_B, the declaration does not."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(
+                HEAD_B, comment=self.signed(self.OTHER, mentions=HEAD_B)
+            ),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        self.assertEqual(result.evidence["evidence"]["expected_head_line"], f"HEAD={HEAD_B}")
+        self.assertEqual(len(result.evidence["evidence"]["rejected_head_declarations"]), 1)
+
+    def test_a_fix_comment_with_two_head_declarations_fails_readback(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        doubled = f"Fixed it.\n\n---\n{SIGNATURE}\nHEAD={HEAD_B}\nHEAD={self.OTHER}\n"
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=doubled),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_a_fix_comment_with_no_head_declaration_fails_readback(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        prose_only = f"Fixed it at {HEAD_B}.\n\n---\n{SIGNATURE}\n"
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=prose_only),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_a_review_still_binds_through_its_commit_id(self) -> None:
+        """The authoritative rule is preserved: GitHub's own commit_id decides."""
+        loop = self.build()
+        self.runner.reviewer_artifact_kind = "review"
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
 
 
 class LaneResultAgreementTests(LoopHarness):
