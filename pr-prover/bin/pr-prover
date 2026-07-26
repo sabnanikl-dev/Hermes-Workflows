@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Repository-owned entry point: run the prove loop without installing anything."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from pr_prover.cli import main  # noqa: E402 - path bootstrap must run first
+
+if __name__ == "__main__":
+    raise SystemExit(main())
