@@ -52,6 +52,7 @@ class StateFileHarness(unittest.TestCase):
             "outcome": None,
             "phase": PHASE_IDLE,
             "attempt_head": None,
+            "classification": None,
         }
         payload.update(overrides)
         return payload
@@ -60,7 +61,7 @@ class StateFileHarness(unittest.TestCase):
         self.path.write_text(json.dumps(self.payload(**overrides)), encoding="utf-8")
 
     def write_without(self, *missing: str, **overrides: object) -> None:
-        """Write a schema-v2 object with some saved keys simply absent."""
+        """Write a current-schema object with some saved keys simply absent."""
         payload = self.payload(**overrides)
         for key in missing:
             payload.pop(key)
@@ -104,6 +105,7 @@ class StateFileTests(StateFileHarness):
                 "outcome",
                 "phase",
                 "attempt_head",
+                "classification",
             },
         )
 
@@ -235,14 +237,14 @@ class PendingVerificationTests(StateFileHarness):
 
 
 class SchemaContractTests(StateFileHarness):
-    """The complete schema-v2 key set is mandatory, not defaulted.
+    """The complete saved key set is mandatory, not defaulted.
 
-    The reproduced bypass: a journal carrying ``schema_version=2``, ``attempt=1``
-    and the old head, but neither ``phase`` nor ``attempt_head``, loaded as a
-    run owing nothing. Defaulting the two keys that exist purely to say "this
-    attempt still owes verification" hands back exactly the interrupted-attempt
-    acceptance the version bump was supposed to end, to anyone who edits a v1
-    journal's version field.
+    The reproduced bypass: a journal carrying the then-current schema version,
+    ``attempt=1`` and the old head, but neither ``phase`` nor ``attempt_head``,
+    loaded as a run owing nothing. Defaulting the two keys that exist purely to
+    say "this attempt still owes verification" hands back exactly the
+    interrupted-attempt acceptance the version bump was supposed to end, to
+    anyone who edits an older journal's version field.
     """
 
     SAVED_KEYS = (
@@ -255,6 +257,7 @@ class SchemaContractTests(StateFileHarness):
         "outcome",
         "phase",
         "attempt_head",
+        "classification",
     )
 
     def test_the_writer_produces_exactly_the_required_key_set(self) -> None:

@@ -11,12 +11,23 @@ is the last place a value can leak, so both renderers here are built from one
 :func:`pr_prover.redaction.sanitize` pass over the assembled payload: every
 string in it, however deeply nested, is scrubbed, and the structure and scalar
 types survive so the report stays readable and machine-usable.
+
+Two things are rendered rather than summarized. A ``needs-Karan`` escalation
+prints each finding's provenance inline — who found it, on which head, at which
+surface, and the verbatim excerpt — so the decision does not require re-reading
+raw lane output. And every failure is printed from its
+:class:`~pr_prover.errors.FailureRecord`: :func:`failure_markdown` is the human
+summary and the fenced JSON block beside it is the builder's next instruction.
+Both come from the same sanitized record, so the two audiences can never be
+told two different stories about one failure.
 """
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
+from .findings import provenance_lines
 from .loop import RunResult
 from .redaction import sanitize
 
@@ -53,6 +64,7 @@ def as_dict(result: RunResult) -> dict[str, Any]:
             for verdict in result.verdicts
         ],
         "classification": result.classification.as_dict() if result.classification else None,
+        "failures": [record.as_dict() for record in result.failures],
         "events": list(result.events),
         "retained_paths": list(result.retained_paths),
     }
@@ -106,6 +118,16 @@ def to_markdown(result: RunResult) -> str:
             lines.append(f"- **{label}** ({len(items)})")
             for item in items:
                 lines.append(f"  - `{item['id']}` — {item['summary']} [{', '.join(item['sources'])}]")
+                # The escalation bucket is the one a human has to act on
+                # without the run's context, so it carries its provenance here
+                # rather than sending Karan back to the raw lane output.
+                if label == "needs-karan":
+                    lines += provenance_lines(item, indent="    ")
+
+    if payload["failures"]:
+        lines += ["", "### What failed and what to do next"]
+        for record in payload["failures"]:
+            lines += failure_markdown(record)
 
     fail_closed = payload.get("fail_closed")
     if fail_closed:
@@ -129,6 +151,38 @@ def to_markdown(result: RunResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def failure_markdown(record: Mapping[str, Any]) -> list[str]:
+    """Render one already-sanitized failure record as Markdown plus its JSON block.
+
+    The prose above the fence is for the human reading the report; the fence
+    below it is the block the trusted builder consumes as its next instruction.
+    Both are this one ``record`` — there is no second description of the failure
+    to keep in step with it.
+    """
+    lines = [
+        "",
+        f"#### `{record.get('failure_class')}` — {record.get('what_failed')}",
+    ]
+    if record.get("finding_id"):
+        lines.append(f"- finding: `{record['finding_id']}`")
+    evidence = record.get("evidence") or {}
+    if evidence:
+        lines.append("- evidence:")
+        lines += [f"  - {key}: {_inline(value)}" for key, value in sorted(evidence.items())]
+    remediation = record.get("remediation") or []
+    if remediation:
+        lines.append("- bounded remediation the builder may attempt:")
+        lines += [f"  {index}. {step}" for index, step in enumerate(remediation, start=1)]
+    lines.append(f"- escalate instead when: {record.get('escalation')}")
+    lines += [
+        "",
+        "```json",
+        json.dumps(record, indent=2, sort_keys=True, default=str),
+        "```",
+    ]
+    return lines
+
+
 def _inline(value: Any) -> str:
     """Render one already-sanitized evidence value on a single Markdown line."""
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -136,4 +190,4 @@ def _inline(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
 
-__all__ = ["as_dict", "to_json", "to_markdown"]
+__all__ = ["as_dict", "failure_markdown", "to_json", "to_markdown"]

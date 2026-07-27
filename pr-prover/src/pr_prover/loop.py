@@ -97,6 +97,7 @@ from .errors import (
     AmbiguousPush,
     BuilderRefusal,
     FailClosed,
+    FailureRecord,
     LaneFailure,
     PrProverError,
     ReadbackMismatch,
@@ -108,12 +109,17 @@ from .errors import (
 from .findings import (
     Adjudicator,
     Classification,
+    Clock,
     Finding,
+    FindingLocation,
+    FindingProvenance,
     classify,
     default_adjudicator,
+    utc_now,
 )
 from .github import GitHubBoundary, PullRequest
 from .redaction import evidence as redact_evidence
+from .redaction import sanitize
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
     BuilderReport,
@@ -161,6 +167,9 @@ class RunResult:
     events: tuple[str, ...] = ()
     evidence: dict[str, Any] = field(default_factory=dict)
     retained_paths: tuple[str, ...] = ()
+    # Every failure this run reached, in one shape: the human summary and the
+    # builder's next-instruction block are both rendered from these records.
+    failures: tuple[FailureRecord, ...] = ()
 
     @property
     def exit_code(self) -> int:
@@ -179,18 +188,21 @@ class ProverLoop:
         worktrees: Any,
         adjudicator: Adjudicator = default_adjudicator,
         scratch_root: Path | None = None,
+        clock: Clock = utc_now,
     ) -> None:
         self.config = config
         self.runner = runner
         self.github = github
         self.worktrees = worktrees
         self.adjudicator = adjudicator
+        self.clock = clock
         self._scratch_root = Path(scratch_root) if scratch_root is not None else None
         self._scratch: Path | None = None
         self._state: RunState | None = None
         self._events: list[str] = []
         self._gates: list[GateOutcome] = []
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
+        self._failures: list[FailureRecord] = []
         self._retained: list[str] = []
 
     # -- entry point ------------------------------------------------------
@@ -274,6 +286,14 @@ class ProverLoop:
             self._event(f"remote head verified as {verified} on {pull.head_ref_name}")
 
             classification = self._evaluate(pull, verified)
+            # Held on the state object with the provenance and lineage the
+            # findings were created with, so every write this run already makes
+            # — the pre-attempt journal and the terminal one, fail-closed
+            # included — carries an escalation Karan can act on rather than a
+            # list of ids. No save is added here: the freshness assertion below
+            # decides this head's fate, and a new write before it could fail and
+            # replace the reason the run actually stopped.
+            state.record_classification(classification)
 
             if classification.needs_karan:
                 return self._report(
@@ -352,7 +372,7 @@ class ProverLoop:
                     "attempt": state.attempt,
                 },
             )
-        state.head = pull.head_ref_oid
+        state.bind_head(pull.head_ref_oid)
         state.save()
         self._event(
             f"inspected {self.config.repo}#{pull.number} at head {pull.head_ref_oid}"
@@ -410,6 +430,7 @@ class ProverLoop:
         """
         self._gates = []
         self._verdicts = ()
+        self._failures = []
         worktree = self.worktrees.create(f"pr{pull.number}-{head[:12]}-inspect", head)
         try:
             findings = list(self._run_gates(pull, head, worktree))
@@ -425,7 +446,7 @@ class ProverLoop:
             self._retain(worktree, why="evaluation failed")
             raise
         self.worktrees.remove(worktree)
-        return classify(findings, adjudicator=self.adjudicator)
+        return classify(findings, adjudicator=self.adjudicator, clock=self.clock)
 
     def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
         findings: list[Finding] = []
@@ -453,17 +474,45 @@ class ProverLoop:
                 self._event(f"gate {gate.name!r} passed on {head}")
                 continue
             self._event(f"gate {gate.name!r} failed on {head} (exit {result.returncode})")
+            identifier = f"gate-{gate.name}".lower().replace(" ", "-")
             findings.append(
                 Finding(
-                    id=f"gate-{gate.name}".lower().replace(" ", "-"),
+                    id=identifier,
                     severity="blocking",
                     summary=(
                         f"baseline gate {gate.name!r} "
                         + ("timed out" if result.timed_out else f"exited {result.returncode}")
                     ),
-                    source=f"gate:{gate.name}",
-                    head=head,
+                    # The command is the surface: a gate finding a builder can
+                    # act on is one that names what to re-run and what it said.
+                    provenance=FindingProvenance(
+                        agent_id=gate.name,
+                        role="gate",
+                        head=head,
+                        location=FindingLocation(
+                            kind="gate-command",
+                            reference=redact_evidence(" ".join(argv), limit=400),
+                        ),
+                        evidence_excerpt=(
+                            redact_evidence(output.strip(), limit=1000)
+                            or f"<gate captured no output; exit {result.returncode}>"
+                        ),
+                    ),
                     detail=output,
+                )
+            )
+            # The same failure, in the form the builder consumes as its next
+            # instruction. It is built here rather than derived from the finding
+            # later, because this is where the command and the exit status are.
+            self._failures.append(
+                FailureRecord.for_gate(
+                    name=gate.name,
+                    kind=gate.kind,
+                    command=list(argv),
+                    returncode=result.returncode,
+                    timed_out=result.timed_out,
+                    output=output,
+                    finding_id=identifier,
                 )
             )
         return findings
@@ -936,8 +985,9 @@ class ProverLoop:
         omitted: tuple[str, ...] = (),
     ) -> Path:
         """Write the frozen blocker set outside every repository, as data."""
+        wanted = {item.finding.id for item in blockers}
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "note": _BLOCKERS_NOTE,
             "repo": self.config.repo,
             "pr": pull.number,
@@ -948,6 +998,15 @@ class ProverLoop:
             "mode": mode,
             "omitted_from_previous_run": list(omitted),
             "blockers": [item.as_dict() for item in blockers],
+            # The same failure records the human report renders, for exactly the
+            # blockers in this set. The builder reads them as its next
+            # instruction — what failed, the evidence, the bounded remediation,
+            # and the line past which it must escalate instead.
+            "next_instructions": [
+                record.as_dict()
+                for record in self._failures
+                if record.finding_id is not None and record.finding_id in wanted
+            ],
             "contract": {
                 "addressed_line": "ADDRESSED: ID=<blocker id>  (one per blocker you fixed)",
                 "final_marker": (
@@ -957,7 +1016,12 @@ class ProverLoop:
             },
         }
         path = self._scratch_dir() / f"blockers-attempt{state.attempt}-{mode}.json"
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # The same recursive scrub the report gets. This file now carries gate
+        # commands and provenance excerpts, and it is the one other place the
+        # loop serializes assembled evidence, so it passes the same boundary.
+        path.write_text(
+            json.dumps(sanitize(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         return path
 
     def _retain(self, worktree: Path, *, why: str) -> None:
@@ -988,6 +1052,12 @@ class ProverLoop:
         # freshness at this one point is what makes "no report for a head that
         # drifted" structural rather than a rule each call site must remember.
         self._assert_live_state(pull, before=f"report {outcome}")
+        # A needs-karan classification is a stop, not an error, so it produces
+        # no exception to render — but Karan needs the same four answers for it
+        # as for anything else, and one record per finding is what carries the
+        # provenance the escalation is judged on.
+        for item in classification.needs_karan:
+            self._failures.append(FailureRecord.for_classification_stop(finding=item.as_dict()))
         self._event(f"outcome {outcome} ({reason}) on head {pull.head_ref_oid}")
         return RunResult(
             outcome=outcome,
@@ -1002,6 +1072,7 @@ class ProverLoop:
             gates=tuple(self._gates),
             events=tuple(self._events),
             retained_paths=tuple(self._retained),
+            failures=tuple(self._failures),
         )
 
     def _failed(self, exc: PrProverError) -> RunResult:
@@ -1009,6 +1080,9 @@ class ProverLoop:
         self._event(f"fail-closed: {exc.reason}: {exc.message}")
         if self._scratch is not None:
             self._retained.append(str(self._scratch))
+        # The stop reason and its preserved evidence, in the one form the
+        # builder can read as its next instruction.
+        self._failures.append(FailureRecord.from_error(exc))
         return RunResult(
             outcome=NEEDS_KARAN,
             reason=exc.reason,
@@ -1022,6 +1096,7 @@ class ProverLoop:
             events=tuple(self._events),
             evidence=exc.as_dict(),
             retained_paths=tuple(self._retained),
+            failures=tuple(self._failures),
         )
 
 

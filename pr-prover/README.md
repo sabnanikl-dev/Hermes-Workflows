@@ -113,6 +113,50 @@ and `BLOCKING=<count>` must reconcile with the findings above it. Lane output is
 untrusted, so a body that quotes or forges a marker fails the run closed instead
 of being read as a verdict.
 
+### Every finding carries its provenance
+
+A finding is created with the evidence that explains it, never annotated with it
+afterwards. Four things travel with every one:
+
+| Field | What it is |
+|---|---|
+| `agent_id` + `role` | the exact lane and the mission role it ran as — `reviewer:A`, `gate:tests` |
+| `head` | the full 40-hex commit it was produced against |
+| `location` | a typed surface: `file-line`, `review`, `thread`, `comment`, `gate-command`, or `lane-output` |
+| `evidence_excerpt` | the verbatim text the lane emitted, scrubbed |
+
+There is no untyped location and no optional field. A finding whose provenance
+is incomplete cannot be constructed at all — the run fails closed naming the
+field that is missing — because the alternative is an escalation that looks
+complete and cannot be acted on. `head` and `source` are read *off* the
+provenance rather than stored beside it, so a rendered string can never disagree
+with the record it came from, and a stored finding whose rendered `source`
+contradicts its provenance is rejected rather than believed.
+
+Classification adds the other half. Every decision appends a lineage entry —
+who decided, about which finding, from which category to which, and when — so a
+finding two lanes raised at different severities, or one an adjudicator moved,
+records the decision instead of only its result.
+
+A `needs-Karan` report renders all of it inline under the finding, so the
+escalation is actionable without reopening the raw lane output.
+
+### Failures are the builder's next instruction
+
+Every failure is expressed as one record with four parts: **what failed**, the
+**exact evidence** (expected versus actual, or the command that ran), the
+**bounded remediation** the builder may attempt, and the **escalation
+condition** for when the fix would fall outside those bounds. Gate failures,
+readback mismatches, malformed markers, stale heads, and classification stops
+all take that shape, alongside every other fail-closed reason code.
+
+The human summary in the Markdown report and the JSON block beside it are two
+renderings of that one record — the fenced block *is* what the builder consumes,
+and the frozen blocker set carries the same block for each blocker it names. So
+there is no second description of a failure to keep in step with the first.
+Remediation is deliberately narrow: it either points at work inside the frozen
+blocker set or says plainly that there is none and the run stops.
+
 ### The marker is not the whole verdict
 
 A lane's exit status and its printed marker must agree, so parsing a marker is
@@ -190,9 +234,19 @@ is mandatory configuration rather than an optional tightening.
 ## State and locking
 
 One JSON state file holds a single attempt integer plus the head, the corrective
-reruns already spent, the terminal outcome, and the phase of the run. One
-`O_EXCL` lockfile marks that a run exists. There is no PID inspection and no
-takeover path: if the lock is held, the run stops and asks.
+reruns already spent, the terminal outcome, the phase of the run, and the four
+classification buckets for the head it is bound to. One `O_EXCL` lockfile marks
+that a run exists. There is no PID inspection and no takeover path: if the lock
+is held, the run stops and asks.
+
+The buckets are journaled with the full provenance and lineage each finding was
+created with, so an escalation read after a crash still says who found what,
+where, and on which head. They are held to the same strictness as the rest of
+the journal: an incomplete provenance record, a finding sitting in a bucket its
+own category contradicts, or a finding produced against a different head than
+the run is bound to is unexpected state, not something to repair. And because a
+finding is evidence about one exact commit, binding the run to a new head drops
+the old head's findings rather than carrying them forward.
 
 ### The lock is released by identity, not by pathname
 
@@ -259,7 +313,9 @@ reported; the save failure is noted in the run log rather than replacing it.
 `github-error` · `worktree-error`
 
 Each carries evidence, and the worktree plus scratch directory are retained so
-the failure can be inspected.
+the failure can be inspected. Each also reaches the report as a failure record —
+what failed, the evidence, the bounded remediation, the escalation condition —
+in both renderings described [above](#failures-are-the-builders-next-instruction).
 
 Redaction happens twice. Output captured from a child is scrubbed of
 credential-shaped text where it is captured, and then the assembled report —

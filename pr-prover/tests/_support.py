@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pr_prover.commands import CommandResult, validate_argv
 from pr_prover.config import RunConfig
+from pr_prover.findings import Finding, FindingLocation, FindingProvenance
 from pr_prover.github import Comment, PullRequest
 
 HEAD_A = "a" * 40
@@ -60,6 +61,46 @@ def builder_output(
 
 def fix_comment(head: str) -> str:
     return f"Fixed the blockers on this head.\n\n---\n{SIGNATURE}\nHEAD: {head}\n"
+
+
+# -- finding builders -----------------------------------------------------
+def make_provenance(
+    source: str = "reviewer:A",
+    *,
+    head: str = HEAD_A,
+    kind: str = "lane-output",
+    reference: str | None = None,
+    line: int | None = 1,
+    excerpt: str = "FINDING: SEVERITY=blocking ID=x -- s",
+) -> FindingProvenance:
+    """Provenance from a ``role:agent`` source label, the way lanes spell it."""
+    role, _, agent_id = source.partition(":")
+    return FindingProvenance(
+        agent_id=agent_id or source,
+        role=role,
+        head=head,
+        location=FindingLocation(kind=kind, reference=reference or source, line=line),
+        evidence_excerpt=excerpt,
+    )
+
+
+def make_finding(
+    identifier: str,
+    severity: str = "blocking",
+    source: str = "reviewer:A",
+    *,
+    head: str = HEAD_A,
+    summary: str = "s",
+    detail: str = "",
+    provenance: FindingProvenance | None = None,
+) -> Finding:
+    return Finding(
+        id=identifier,
+        severity=severity,
+        summary=summary,
+        provenance=provenance or make_provenance(source, head=head),
+        detail=detail,
+    )
 
 
 # -- fakes ----------------------------------------------------------------

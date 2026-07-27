@@ -18,12 +18,24 @@ cannot say whether it owes verification, so it is refused rather than trusted.
 
 That refusal only works if the version is not the only thing checked. A journal
 must carry the *complete* saved key set to be read at all — no key is defaulted
-— because a v1 journal whose version field is edited to 2 is otherwise
-indistinguishable from a v2 journal that genuinely owes nothing. The same rule
+— because an older journal whose version field is edited forward is otherwise
+indistinguishable from a current one that genuinely owes nothing. The same rule
 rejects the attempt/phase/head combinations this writer cannot produce: an
 opened attempt with no inspected head, an in-flight phase without a full
 attempt head, and an in-flight attempt bound to a different head than the run.
 There is no migration path; an incomplete journal is reset, not repaired.
+
+``classification`` is the third key that exists for something a restart cannot
+reconstruct. The four buckets are written with the full provenance and
+classification lineage each finding was created with, so an escalation read
+after a crash still says who found what, where, on which head, and how it was
+categorized — rather than a bare list of ids nobody can act on. It is held to
+the same strictness as the rest: a stored finding whose provenance is
+incomplete, whose bucket disagrees with its own category, or whose head is not
+the head the run is bound to is unexpected state, because none of those is a
+journal this writer can produce. And because a finding is evidence *for one
+exact head*, binding the run to a new head drops it rather than carrying it
+forward — the same invalidate-on-push rule the loop applies to every verdict.
 
 Persistence itself fails closed. Every filesystem step of :meth:`RunState.save`
 — creating the parent, writing the temporary file, replacing the real one — is
@@ -72,9 +84,10 @@ from pathlib import Path
 from typing import Any
 
 from .errors import LockContention, StateError
+from .findings import Classification
 from .redaction import evidence as redact_evidence
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_ATTEMPTS = 2
 OUTCOMES = ("merge-ready", "blocked", "needs-karan")
 # The two phases of a run. ``attempt-in-flight`` means a builder was invoked (or
@@ -121,7 +134,7 @@ _CLEANUP_RESOLUTIONS = {
     ),
 }
 # Exactly the keys :meth:`RunState.save` writes. The set is both the allowed
-# keys and the required ones: an object is only a schema-v2 journal if it
+# keys and the required ones: an object is only a current-schema journal if it
 # carries all of them. Defaulting an absent key is what let a journal written
 # before the phase contract existed pass as one that satisfies it.
 _SAVED_KEYS = frozenset(
@@ -135,6 +148,7 @@ _SAVED_KEYS = frozenset(
         "outcome",
         "phase",
         "attempt_head",
+        "classification",
     }
 )
 
@@ -152,6 +166,7 @@ class RunState:
     outcome: str | None = None
     phase: str = PHASE_IDLE
     attempt_head: str | None = None
+    classification: Classification | None = None
     events: list[str] = field(default_factory=list, repr=False, compare=False)
 
     # -- persistence ------------------------------------------------------
@@ -193,7 +208,7 @@ class RunState:
         missing = sorted(_SAVED_KEYS - set(raw))
         if missing:
             raise StateError(
-                "state file does not carry the complete schema-v2 key set; "
+                "state file does not carry the complete key set for the current schema; "
                 "an incomplete journal cannot say whether it owes verification",
                 evidence={
                     "state_file": str(path),
@@ -309,6 +324,34 @@ class RunState:
                 },
             )
 
+        # The four buckets, with the provenance and lineage each finding was
+        # created with. A journal that carries findings carries them completely
+        # or not at all: half a provenance record is exactly the escalation
+        # nobody can act on, and reconstructing the missing half from what is
+        # left is the guess this whole file exists to refuse.
+        classification: Classification | None = None
+        if raw["classification"] is not None:
+            try:
+                classification = Classification.from_dict(raw["classification"])
+            except StateError as exc:
+                raise StateError(
+                    f"state file classification is unusable: {exc.message}",
+                    evidence={"state_file": str(path), **exc.evidence},
+                ) from exc
+            if head is None:
+                raise StateError(
+                    "state file records findings without an inspected head to bind them to",
+                    evidence={"state_file": str(path)},
+                )
+            off_head = sorted(
+                {item.finding.head for item in classification.all()} - {head}
+            )
+            if off_head:
+                raise StateError(
+                    "state file records findings produced against a different head than the run",
+                    evidence={"state_file": str(path), "head": head, "finding_heads": off_head},
+                )
+
         outcome = raw["outcome"]
         if outcome is not None and outcome not in OUTCOMES:
             raise StateError(
@@ -331,6 +374,7 @@ class RunState:
             outcome=None,
             phase=phase,
             attempt_head=attempt_head,
+            classification=classification,
         )
 
     def save(self) -> None:
@@ -353,6 +397,9 @@ class RunState:
             "outcome": self.outcome,
             "phase": self.phase,
             "attempt_head": self.attempt_head,
+            "classification": (
+                self.classification.as_dict() if self.classification is not None else None
+            ),
         }
         body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         temporary = self.path.with_name(self.path.name + ".tmp")
@@ -380,6 +427,39 @@ class RunState:
     @property
     def attempts_remaining(self) -> int:
         return MAX_ATTEMPTS - self.attempt
+
+    def bind_head(self, head: str) -> None:
+        """Bind the run to the head just inspected, dropping any earlier head's findings.
+
+        A finding is evidence about one exact commit. Carrying it across a head
+        change would let an escalation quote a reviewer about code that is no
+        longer on the branch, so rebinding invalidates the recorded
+        classification instead of aging it — the same rule the loop applies to
+        gates and verdicts after a push.
+        """
+        if not _is_full_sha(head):
+            raise StateError(
+                "a run can only bind to a full 40-hex head",
+                evidence={"head": head},
+            )
+        if self.head != head:
+            self.classification = None
+        self.head = head
+
+    def record_classification(self, classification: Classification) -> None:
+        """Record the frozen four buckets for the head this run is bound to."""
+        if self.head is None:
+            raise StateError(
+                "a classification cannot be recorded before a head is inspected",
+                evidence={"attempt": self.attempt},
+            )
+        off_head = sorted({item.finding.head for item in classification.all()} - {self.head})
+        if off_head:
+            raise StateError(
+                "a classification carries findings produced against a different head",
+                evidence={"head": self.head, "finding_heads": off_head},
+            )
+        self.classification = classification
 
     def begin_attempt(self) -> int:
         """Open the next fix attempt. Attempt 3 is structurally unreachable."""
