@@ -19,6 +19,8 @@ import json
 import sys
 import unittest
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from itertools import permutations
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -37,8 +39,10 @@ from pr_prover.commands import CommandResult
 from pr_prover.errors import GitHubError
 from pr_prover.feedback import (
     ACKNOWLEDGEMENT,
+    ACKNOWLEDGEMENT_SEPARATOR,
     FeedbackSurfaces,
     RunArtifacts,
+    canonical_key,
     publication_evidence,
     reconcile,
 )
@@ -294,8 +298,13 @@ TRUTH_TABLE: tuple[Case, ...] = (
     Case(
         name="an acknowledgement with no timestamp clears nothing",
         comments=(RAISED, comment("c2", ack("c1"), created_at="")),
-        unresolved=("c1", "c2"),
+        unresolved=("c2", "c1"),
         cleared=(),
+        note=(
+            "c2 has no usable instant, so it sorts ahead of everything that has "
+            "one: an item nothing can be ordered against is the one a bounded "
+            "excerpt must not drop"
+        ),
     ),
     Case(
         name="a target with no timestamp cannot be cleared",
@@ -308,12 +317,14 @@ TRUTH_TABLE: tuple[Case, ...] = (
     Case(
         name="a malformed timestamp is unknown ordering",
         comments=(RAISED, comment("c2", ack("c1"), created_at="last tuesday")),
-        unresolved=("c1", "c2"),
+        unresolved=("c2", "c1"),
+        note="unorderable c2 leads the canonical stream; c1 keeps its proven instant",
     ),
     Case(
         name="a timezone-naive timestamp is not usable ordering",
         comments=(RAISED, comment("c2", ack("c1"), created_at="2026-07-27T00:02:00")),
-        unresolved=("c1", "c2"),
+        unresolved=("c2", "c1"),
+        note="a naive instant is no instant, so c2 sorts with the unorderable",
     ),
     Case(
         name="the same timestamp is not proof of order",
@@ -337,8 +348,12 @@ TRUTH_TABLE: tuple[Case, ...] = (
             comment("c1", BLOCKING_PROSE, created_at=at(5)),
             comment("c2", ack("c1"), created_at=at(2)),
         ),
-        unresolved=("c1", "c2"),
-        note="a body naming an id that did not exist yet is a guess, not a resolution",
+        unresolved=("c2", "c1"),
+        note=(
+            "a body naming an id that did not exist yet is a guess, not a "
+            "resolution; both stand, and the stream reports them by GitHub's "
+            "clock rather than by the order the page happened to list them"
+        ),
     ),
     # -- identity ---------------------------------------------------------
     Case(
@@ -648,22 +663,31 @@ class DeterministicOrderTests(unittest.TestCase):
         but the classifier must not *depend* on that: an acknowledgement is
         proven by its timestamp, and a read that arrived scrambled describes the
         same PR.
+
+        This assertion used to sort both sides before comparing them, and that
+        is why it held while the finding order was still whatever order the
+        surfaces were walked in. Sorting at assertion time turns "the same
+        answer" into "the same things", and the difference between those is the
+        property. The whole :class:`~pr_prover.feedback.Reconciliation` is
+        compared now — every field, in order — and every arrival order is tried
+        rather than just the reverse.
         """
         items = (
             RAISED,
             comment("c2", ack("c1"), created_at=at(2)),
             comment("c3", BLOCKING_PROSE, created_at=at(3)),
         )
-        forward = reconcile(FeedbackSurfaces(comments=items), artifacts=NOTHING_PROVED)
-        backward = reconcile(
-            FeedbackSurfaces(comments=tuple(reversed(items))), artifacts=NOTHING_PROVED
-        )
+        expected = reconcile(FeedbackSurfaces(comments=items), artifacts=NOTHING_PROVED)
 
-        self.assertEqual(sorted(forward.cleared), sorted(backward.cleared))
-        self.assertEqual(
-            sorted(item.identifier for item in forward.unresolved),
-            sorted(item.identifier for item in backward.unresolved),
-        )
+        self.assertEqual(tuple(item.identifier for item in expected.unresolved), ("c3",))
+        for arrival in permutations(items):
+            with self.subTest(arrival=[item.identifier for item in arrival]):
+                self.assertEqual(
+                    reconcile(
+                        FeedbackSurfaces(comments=arrival), artifacts=NOTHING_PROVED
+                    ),
+                    expected,
+                )
 
 
 class EvidenceShapeTests(unittest.TestCase):
@@ -882,6 +906,599 @@ class ReviewThreadReadTests(unittest.TestCase):
         (parsed,) = self.read(self.page(node))
         self.assertEqual(parsed.comments[0].author, "<unknown>")
 
+    def test_replies_that_never_arrived_are_not_a_thread_with_no_replies(self) -> None:
+        """M5: an absent reply list is unknown, and unknown is not empty.
+
+        A live thread is judged human feedback by finding a non-run-owned author
+        among the replies it was handed, so an empty reply list reads as "nobody
+        human is in here" and the thread is dropped. Normalizing an absent or
+        null ``nodes`` member to ``[]`` therefore does not lose a detail: it
+        turns an unresolved "do not merge" thread into a PR with nothing on it.
+        """
+        for label, mutate in (
+            ("missing nodes", lambda connection: connection.pop("nodes")),
+            ("null nodes", lambda connection: connection.update({"nodes": None})),
+            ("nodes is an object", lambda connection: connection.update({"nodes": {}})),
+        ):
+            with self.subTest(nodes=label):
+                node = self.node()
+                mutate(node["comments"])
+                with self.assertRaises(GitHubError) as caught:
+                    self.read(self.page(node))
+                self.assertIn("unknown rather than absent", caught.exception.message)
+
+    def test_a_reply_whose_body_never_arrived_fails_closed(self) -> None:
+        """The reply's text is the evidence a human is handed; absent is not blank."""
+        for label, mutate in (
+            ("missing body", lambda reply: reply.pop("body")),
+            ("null body", lambda reply: reply.update({"body": None})),
+        ):
+            with self.subTest(body=label):
+                node = self.node()
+                mutate(node["comments"]["nodes"][0])
+                with self.assertRaises(GitHubError):
+                    self.read(self.page(node))
+
+    def test_no_malformed_thread_read_can_reconcile_the_pr(self) -> None:
+        """The probe that catches this class: parse, then reconcile, end to end.
+
+        Neither end looked wrong alone. The boundary returned a plausible
+        :class:`ReviewThread` and the reconciler returned a plausible
+        ``reconciled=True``; only the two together claimed a PR carried no
+        unresolved human feedback while a thread nobody could read sat on it.
+        """
+        complete = self.read(self.page(self.node()))
+        self.assertFalse(
+            reconcile(
+                FeedbackSurfaces(threads=complete), artifacts=NOTHING_PROVED
+            ).reconciled,
+            "the control thread is live human feedback",
+        )
+        for label, mutate in (
+            ("missing nodes", lambda node: node["comments"].pop("nodes")),
+            ("null nodes", lambda node: node["comments"].update({"nodes": None})),
+            ("missing reply body", lambda node: node["comments"]["nodes"][0].pop("body")),
+            (
+                "null reply body",
+                lambda node: node["comments"]["nodes"][0].update({"body": None}),
+            ),
+        ):
+            with self.subTest(payload=label):
+                node = self.node()
+                mutate(node)
+                with self.assertRaises(GitHubError):
+                    reconcile(
+                        FeedbackSurfaces(threads=self.read(self.page(node))),
+                        artifacts=NOTHING_PROVED,
+                    )
+
+
+class MalformedFeedbackFieldTests(unittest.TestCase):
+    """M5: a required human-feedback field arrives, or the read stops.
+
+    The reconciler drops a blank conversation comment and a blank review body as
+    nothing to resolve, and that is right for a post a human really did leave
+    empty. It is exactly wrong for one whose text never arrived — and the two are
+    indistinguishable by the time the reconciler sees them. So they are told
+    apart at the only layer that can tell them apart: an absent or null required
+    field is an incomplete read here, never a blank artifact downstream.
+
+    A review's ``state`` is the same class of field for the same reason. It is
+    the whole resolution model for that surface, so a missing one rounded to
+    ``""`` turns a live ``CHANGES_REQUESTED`` into undecided prose, or into
+    nothing at all.
+    """
+
+    def boundary(self, payload: object) -> GhCliGitHub:
+        text = json.dumps(payload)
+
+        class OneShot:
+            def run(self, argv, *, cwd=None, env=None, timeout=None):
+                return CommandResult(argv=tuple(argv), returncode=0, stdout=text, stderr="")
+
+        return GhCliGitHub(OneShot())
+
+    def comment_payload(self, **overrides: object) -> dict:
+        payload: dict[str, object] = {
+            "id": 123,
+            "user": {"login": HUMAN},
+            "body": BLOCKING_PROSE,
+            "created_at": at(1),
+            "html_url": "https://example.invalid/c/123",
+        }
+        payload.update(overrides)
+        return payload
+
+    def review_payload(self, **overrides: object) -> dict:
+        payload: dict[str, object] = {
+            "id": 9,
+            "user": {"login": HUMAN},
+            "body": BLOCKING_PROSE,
+            "state": "CHANGES_REQUESTED",
+            "submitted_at": at(1),
+            "html_url": "https://example.invalid/r/9",
+        }
+        payload.update(overrides)
+        return payload
+
+    def comments(self, payload: object) -> tuple[Comment, ...]:
+        return self.boundary([[payload]]).comments("example/repo", 7)
+
+    def reviews(self, payload: object) -> tuple[Comment, ...]:
+        return self.boundary([[payload]]).reviews("example/repo", 7)
+
+    # -- the control: a complete read is unresolved feedback ---------------
+    def test_a_complete_comment_read_is_unresolved_feedback(self) -> None:
+        parsed = self.comments(self.comment_payload())
+        self.assertEqual(parsed[0].body, BLOCKING_PROSE)
+        self.assertFalse(
+            reconcile(
+                FeedbackSurfaces(comments=parsed), artifacts=NOTHING_PROVED
+            ).reconciled
+        )
+
+    def test_a_complete_review_read_is_unresolved_feedback(self) -> None:
+        parsed = self.reviews(self.review_payload())
+        self.assertEqual(parsed[0].state, "CHANGES_REQUESTED")
+        self.assertFalse(
+            reconcile(
+                FeedbackSurfaces(reviews=parsed), artifacts=NOTHING_PROVED
+            ).reconciled
+        )
+
+    # -- what is still data, and must keep parsing --------------------------
+    def test_a_comment_a_human_left_empty_is_still_data(self) -> None:
+        """Empty is a state GitHub can really deliver; absent is not."""
+        parsed = self.comments(self.comment_payload(body=""))
+        self.assertEqual(parsed[0].body, "")
+        self.assertTrue(
+            reconcile(
+                FeedbackSurfaces(comments=parsed), artifacts=NOTHING_PROVED
+            ).reconciled
+        )
+
+    def test_an_approval_with_no_text_is_still_a_review(self) -> None:
+        parsed = self.reviews(self.review_payload(body="", state="APPROVED"))
+        self.assertEqual(parsed[0].body, "")
+        self.assertEqual(parsed[0].state, "APPROVED")
+
+    # -- what must stop the read -------------------------------------------
+    def missing(self, payload: dict, key: str) -> dict:
+        payload.pop(key)
+        return payload
+
+    def test_a_comment_whose_body_never_arrived_fails_closed(self) -> None:
+        for label, payload in (
+            ("missing body", self.missing(self.comment_payload(), "body")),
+            ("null body", self.comment_payload(body=None)),
+        ):
+            with self.subTest(body=label):
+                with self.assertRaises(GitHubError) as caught:
+                    self.comments(payload)
+                self.assertIn("incomplete read", caught.exception.message)
+
+    def test_a_review_whose_body_never_arrived_fails_closed(self) -> None:
+        for label, payload in (
+            ("missing body", self.missing(self.review_payload(), "body")),
+            ("null body", self.review_payload(body=None)),
+        ):
+            with self.subTest(body=label):
+                with self.assertRaises(GitHubError) as caught:
+                    self.reviews(payload)
+                self.assertIn("incomplete read", caught.exception.message)
+
+    def test_a_review_whose_state_never_arrived_fails_closed(self) -> None:
+        """A state normalized to ``""`` is a change request nobody has to clear."""
+        for label, payload in (
+            ("missing state", self.missing(self.review_payload(), "state")),
+            ("null state", self.review_payload(state=None)),
+        ):
+            with self.subTest(state=label):
+                with self.assertRaises(GitHubError) as caught:
+                    self.reviews(payload)
+                self.assertIn("cannot be read as approval", caught.exception.message)
+
+    def test_no_malformed_conversation_read_can_reconcile_the_pr(self) -> None:
+        """Boundary to reconciler, as one path: the answer is a stop, not ``True``.
+
+        Each case builds the surfaces the way the loop does — parsed comments in
+        the comment slot, parsed reviews in the review slot — so what is proven
+        is the shipped path, not a probe arranged to fail.
+        """
+        for label, build in (
+            (
+                "comment with no body member",
+                lambda: FeedbackSurfaces(
+                    comments=self.comments(self.missing(self.comment_payload(), "body"))
+                ),
+            ),
+            (
+                "comment with a null body",
+                lambda: FeedbackSurfaces(
+                    comments=self.comments(self.comment_payload(body=None))
+                ),
+            ),
+            (
+                "review with a null body",
+                lambda: FeedbackSurfaces(
+                    reviews=self.reviews(self.review_payload(body=None))
+                ),
+            ),
+            (
+                "review with a null state",
+                lambda: FeedbackSurfaces(
+                    reviews=self.reviews(self.review_payload(state=None))
+                ),
+            ),
+            (
+                "review with neither body nor state",
+                lambda: FeedbackSurfaces(
+                    reviews=self.reviews(self.review_payload(body=None, state=None))
+                ),
+            ),
+        ):
+            with self.subTest(payload=label):
+                with self.assertRaises(GitHubError):
+                    reconcile(build(), artifacts=NOTHING_PROVED)
+
+
+@dataclass(frozen=True)
+class GrammarCase:
+    """One line, and whether the contract lets it spend anything."""
+
+    name: str
+    line: str
+    clears: bool
+
+
+GRAMMAR = (
+    GrammarCase("the canonical line", f"{ACKNOWLEDGEMENT} c1", clears=True),
+    GrammarCase(
+        "surrounding whitespace is trimmed first",
+        f" \t{ACKNOWLEDGEMENT} c1 \t",
+        clears=True,
+    ),
+    GrammarCase("two spaces", f"{ACKNOWLEDGEMENT}  c1", clears=False),
+    GrammarCase("three spaces", f"{ACKNOWLEDGEMENT}   c1", clears=False),
+    GrammarCase("a tab", f"{ACKNOWLEDGEMENT}\tc1", clears=False),
+    GrammarCase("a space and then a tab", f"{ACKNOWLEDGEMENT} \tc1", clears=False),
+    # The next two separators are literal U+00A0 and U+2002 — invisible here, and
+    # that is the point: ``str.isspace()`` and ``str.strip()`` both accept them,
+    # so "the prefix, then any whitespace" spelled the canonical line with a
+    # character a reader of the body cannot see. ``test_the_two_invisible_rows_
+    # really_are_invisible`` below pins their codepoints so a well-meaning editor
+    # cannot quietly normalize them into ordinary spaces and retire the row.
+    GrammarCase("a no-break space", f"{ACKNOWLEDGEMENT} c1", clears=False),
+    GrammarCase("an en space", f"{ACKNOWLEDGEMENT} c1", clears=False),
+    GrammarCase("no separator at all", f"{ACKNOWLEDGEMENT}c1", clears=False),
+    GrammarCase("a colon separator", f"{ACKNOWLEDGEMENT}: c1", clears=False),
+    GrammarCase("an extra token", f"{ACKNOWLEDGEMENT} c1 c2", clears=False),
+    GrammarCase("trailing prose on the line", f"{ACKNOWLEDGEMENT} c1 please", clears=False),
+    GrammarCase("all lower case", "pr-prover: acknowledged c1", clears=False),
+    GrammarCase("mixed case", "PR-PROVER: Acknowledged c1", clears=False),
+    GrammarCase("a longer prefix word", f"{ACKNOWLEDGEMENT}LY c1", clears=False),
+    GrammarCase("embedded in a sentence", f"I think {ACKNOWLEDGEMENT} c1", clears=False),
+    GrammarCase("quoted from somewhere else", f"> {ACKNOWLEDGEMENT} c1", clears=False),
+    GrammarCase("bulleted", f"- {ACKNOWLEDGEMENT} c1", clears=False),
+    GrammarCase("the prefix alone", ACKNOWLEDGEMENT, clears=False),
+    GrammarCase("the prefix and a separator", f"{ACKNOWLEDGEMENT} ", clears=False),
+)
+
+
+class AcknowledgementGrammarTests(unittest.TestCase):
+    """The acknowledgement line is one exact whole-line grammar.
+
+    The literal prefix, exactly one ordinary space, and one id carrying no
+    whitespace of its own — with only the *surrounding* whitespace of the line
+    trimmed before any of that is read.
+
+    The defect these pin down: recognising "the prefix, then any whitespace,
+    then strip what is left" made a double space, a tab, and a no-break space
+    all spell the canonical line. That is not a forgiving parser, it is a second
+    way to clear a human's stop, and it is reachable by a typo. A line the
+    contract does not admit did nothing, so it stays in the body as the prose it
+    is — which is the same rule the ineffective-line residual already relied on.
+    """
+
+    def outcome(self, line: str) -> tuple[list[str], tuple[str, ...]]:
+        result = reconcile(
+            FeedbackSurfaces(comments=(RAISED, comment("c2", line, created_at=at(2)))),
+            artifacts=NOTHING_PROVED,
+        )
+        return sorted(result.cleared), tuple(item.identifier for item in result.unresolved)
+
+    def test_the_grammar(self) -> None:
+        for case in GRAMMAR:
+            with self.subTest(case=case.name):
+                cleared, unresolved = self.outcome(case.line)
+                if case.clears:
+                    self.assertEqual(cleared, ["c1"], case.name)
+                    self.assertEqual(unresolved, (), case.name)
+                else:
+                    self.assertEqual(cleared, [], case.name)
+                    self.assertEqual(unresolved, ("c1", "c2"), case.name)
+
+    def test_every_grammar_case_is_named_once(self) -> None:
+        names = [case.name for case in GRAMMAR]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_the_two_invisible_rows_really_are_invisible(self) -> None:
+        """Their separators are unprintable, so an editor could silently fix them.
+
+        A no-break space normalized to an ordinary one would turn both rows into
+        the canonical line, and ``clears=False`` would then be asserting the
+        opposite of the contract. Pinning the codepoints keeps that a test
+        failure rather than a quiet loss of coverage.
+        """
+        by_name = {case.name: case for case in GRAMMAR}
+        self.assertEqual(
+            by_name["a no-break space"].line[len(ACKNOWLEDGEMENT)], " "
+        )
+        self.assertEqual(by_name["an en space"].line[len(ACKNOWLEDGEMENT)], " ")
+        for name in ("a no-break space", "an en space"):
+            self.assertNotEqual(
+                by_name[name].line[len(ACKNOWLEDGEMENT)], ACKNOWLEDGEMENT_SEPARATOR
+            )
+
+    def test_an_ineffective_line_is_quoted_back_as_the_prose_it_is(self) -> None:
+        """It did nothing, so it is still there, and a human has to look at it."""
+        for case in GRAMMAR:
+            if case.clears:
+                continue
+            with self.subTest(case=case.name):
+                result = reconcile(
+                    FeedbackSurfaces(
+                        comments=(RAISED, comment("c2", case.line, created_at=at(2)))
+                    ),
+                    artifacts=NOTHING_PROVED,
+                )
+                residual = next(
+                    item for item in result.unresolved if item.identifier == "c2"
+                )
+                self.assertEqual(residual.why, "unacknowledged")
+                self.assertIn(case.line.strip(), residual.excerpt)
+
+    def test_a_malformed_line_beside_a_valid_one_does_not_ride_along(self) -> None:
+        """One line of proven bookkeeping is spent; the one beside it is not."""
+        surfaces = FeedbackSurfaces(
+            comments=(
+                RAISED,
+                comment("c2", "and a second thing", created_at=at(2)),
+                comment(
+                    "c3",
+                    f"{ACKNOWLEDGEMENT} c1\n{ACKNOWLEDGEMENT}  c2",
+                    created_at=at(3),
+                ),
+            )
+        )
+
+        result = reconcile(surfaces, artifacts=NOTHING_PROVED)
+
+        self.assertEqual(sorted(result.cleared), ["c1"])
+        self.assertEqual(
+            tuple(item.identifier for item in result.unresolved), ("c2", "c3")
+        )
+        residual = next(item for item in result.unresolved if item.identifier == "c3")
+        self.assertIn(f"{ACKNOWLEDGEMENT}  c2", residual.excerpt)
+        self.assertNotIn(f"{ACKNOWLEDGEMENT} c1", residual.excerpt)
+
+    def test_the_separator_is_one_ordinary_space_and_says_so(self) -> None:
+        self.assertEqual(ACKNOWLEDGEMENT_SEPARATOR, " ")
+
+
+class OrderInvarianceTests(unittest.TestCase):
+    """The same PR reconciles to the same *sequence*, however its tuples arrived.
+
+    Not the same set — the same bytes, in order. A stop hands Karan a bounded
+    excerpt of what it found, so the order chooses which items are described at
+    all, and an order inherited from however GitHub happened to page its tuples
+    can differ between two reads of a PR nobody touched.
+
+    Nothing here sorts before comparing. Sorting at assertion time is what let
+    the defect through the first time: it turns "these are the same answer" into
+    "these contain the same things", and the whole property under test is the
+    difference between those two.
+    """
+
+    def answers(
+        self,
+        *,
+        comments: tuple[Comment, ...] = (),
+        reviews: tuple[Comment, ...] = (),
+        threads: tuple[ReviewThread, ...] = (),
+    ) -> set[str]:
+        """Every permutation of every surface, reduced to its exact output."""
+        seen: set[str] = set()
+        for ordered_comments in permutations(comments):
+            for ordered_reviews in permutations(reviews):
+                for ordered_threads in permutations(threads):
+                    result = reconcile(
+                        FeedbackSurfaces(
+                            comments=ordered_comments,
+                            reviews=ordered_reviews,
+                            threads=ordered_threads,
+                        ),
+                        artifacts=NOTHING_PROVED,
+                    )
+                    seen.add(
+                        json.dumps(
+                            [item.as_evidence() for item in result.unresolved],
+                            sort_keys=True,
+                        )
+                    )
+        return seen
+
+    def sequence(self, **surfaces: object) -> tuple[str, ...]:
+        result = reconcile(FeedbackSurfaces(**surfaces), artifacts=NOTHING_PROVED)
+        return tuple(item.identifier for item in result.unresolved)
+
+    def test_the_canonical_key_is_a_total_order_over_the_three_fields(self) -> None:
+        """The order itself, named and asserted rather than left implicit.
+
+        Everything below leans on these three properties, so they are pinned
+        here once: the instant leads, an equal instant falls through to surface
+        and then to id, and an unusable instant is grouped ahead of every proven
+        one instead of raising or comparing as "earliest".
+        """
+        moment = datetime(2026, 7, 27, 0, 5, tzinfo=timezone.utc)
+        elsewhere = datetime(2026, 7, 27, 2, 5, tzinfo=timezone(timedelta(hours=2)))
+        base = canonical_key(moment=moment, surface="comment", identifier="b")
+
+        self.assertEqual(
+            base,
+            canonical_key(moment=elsewhere, surface="comment", identifier="b"),
+            "the same instant in another offset is the same instant",
+        )
+        self.assertLess(
+            base, canonical_key(moment=moment, surface="review", identifier="a")
+        )
+        self.assertLess(
+            base, canonical_key(moment=moment, surface="comment", identifier="c")
+        )
+        self.assertLess(
+            canonical_key(moment=None, surface="review", identifier="zzz"),
+            base,
+            "an unorderable item leads; it never wins a latest",
+        )
+        self.assertLess(
+            canonical_key(moment=None, surface="comment", identifier="a"),
+            canonical_key(moment=None, surface="comment", identifier="b"),
+            "and it is still totally ordered among its own kind",
+        )
+
+    def test_the_named_change_request_is_the_later_one_either_way(self) -> None:
+        """Which of an author's still-standing requests is named must not move."""
+        first = review(
+            "review:r1", "the first", state="CHANGES_REQUESTED", created_at=at(1)
+        )
+        later = review(
+            "review:r2", "the later", state="CHANGES_REQUESTED", created_at=at(5)
+        )
+        for order in ((first, later), (later, first)):
+            with self.subTest(order=[item.identifier for item in order]):
+                (found,) = reconcile(
+                    FeedbackSurfaces(reviews=order), artifacts=NOTHING_PROVED
+                ).unresolved
+                self.assertEqual(found.identifier, "review:r2")
+                self.assertEqual(found.excerpt, "the later")
+
+    def test_the_clock_decides_it_even_when_the_ids_disagree(self) -> None:
+        """Ordering by id would pass the previous test for the wrong reason."""
+        early = review(
+            "review:r9", "the first", state="CHANGES_REQUESTED", created_at=at(1)
+        )
+        late = review(
+            "review:r1", "the later", state="CHANGES_REQUESTED", created_at=at(5)
+        )
+        for order in ((early, late), (late, early)):
+            with self.subTest(order=[item.identifier for item in order]):
+                (found,) = reconcile(
+                    FeedbackSurfaces(reviews=order), artifacts=NOTHING_PROVED
+                ).unresolved
+                self.assertEqual(found.identifier, "review:r1")
+                self.assertEqual(found.excerpt, "the later")
+
+    def test_two_authors_change_requests_are_reported_in_one_order(self) -> None:
+        theirs = review(
+            "review:r1", "mine", state="CHANGES_REQUESTED", created_at=at(4), author=HUMAN
+        )
+        others = review(
+            "review:r2",
+            "theirs",
+            state="CHANGES_REQUESTED",
+            created_at=at(2),
+            author=OTHER_HUMAN,
+        )
+        self.assertEqual(len(self.answers(reviews=(theirs, others))), 1)
+        self.assertEqual(
+            self.sequence(reviews=(theirs, others)), ("review:r2", "review:r1")
+        )
+        self.assertEqual(
+            self.sequence(reviews=(others, theirs)), ("review:r2", "review:r1")
+        )
+
+    def test_reversing_two_comments_does_not_reverse_their_evidence(self) -> None:
+        first = comment("c1", BLOCKING_PROSE, created_at=at(1))
+        second = comment("c2", "and another thing", created_at=at(2))
+        self.assertEqual(self.sequence(comments=(first, second)), ("c1", "c2"))
+        self.assertEqual(self.sequence(comments=(second, first)), ("c1", "c2"))
+
+    def test_reversing_two_threads_does_not_reverse_their_evidence(self) -> None:
+        early = ReviewThread(
+            identifier="t-late-id",
+            is_resolved=False,
+            is_outdated=False,
+            path="src/a.py",
+            comments=(
+                Comment(
+                    identifier="t-late-id-reply",
+                    author=HUMAN,
+                    body="the earlier thread",
+                    kind="review-thread-comment",
+                    created_at=at(1),
+                ),
+            ),
+        )
+        late = ReviewThread(
+            identifier="t-early-id",
+            is_resolved=False,
+            is_outdated=False,
+            path="src/b.py",
+            comments=(
+                Comment(
+                    identifier="t-early-id-reply",
+                    author=HUMAN,
+                    body="the later thread",
+                    kind="review-thread-comment",
+                    created_at=at(6),
+                ),
+            ),
+        )
+        self.assertEqual(self.sequence(threads=(early, late)), ("t-late-id", "t-early-id"))
+        self.assertEqual(self.sequence(threads=(late, early)), ("t-late-id", "t-early-id"))
+
+    def test_every_permutation_of_a_mixed_conversation_gives_one_answer(self) -> None:
+        """All three surfaces at once, in all eight arrival orders."""
+        comments = (
+            comment("c1", BLOCKING_PROSE, created_at=at(4)),
+            comment("c2", "and another thing", created_at=at(2)),
+        )
+        reviews = (
+            review("review:r1", "please fix", state="CHANGES_REQUESTED", created_at=at(3)),
+            review("review:r2", "a note nothing resolves", state="COMMENTED", created_at=at(1)),
+        )
+        threads = (thread("t1"), thread("t2"))
+
+        self.assertEqual(
+            len(self.answers(comments=comments, reviews=reviews, threads=threads)), 1
+        )
+        self.assertEqual(
+            self.sequence(comments=comments, reviews=reviews, threads=threads),
+            ("review:r2", "t1", "t2", "c2", "review:r1", "c1"),
+        )
+
+    def test_an_unorderable_post_still_has_one_place_in_the_stream(self) -> None:
+        """It cannot be ordered against anything, so it leads — deterministically.
+
+        Dropping it would lose feedback and ranking it last would let a bounded
+        excerpt truncate away the one item whose evidence is already suspect.
+        """
+        naive = comment("c-naive", BLOCKING_PROSE, created_at="2026-07-27T00:09:00")
+        dated = comment("c-dated", "and another thing", created_at=at(3))
+        self.assertEqual(self.sequence(comments=(naive, dated)), ("c-naive", "c-dated"))
+        self.assertEqual(self.sequence(comments=(dated, naive)), ("c-naive", "c-dated"))
+
+    def test_a_bounded_excerpt_describes_the_same_items_every_time(self) -> None:
+        """Which few a stop describes is chosen by this order, so it must be fixed."""
+        many = tuple(
+            comment(f"c{index:02d}", f"{BLOCKING_PROSE} ({index})", created_at=at(index))
+            for index in range(1, 13)
+        )
+        forward = self.sequence(comments=many)
+        backward = self.sequence(comments=tuple(reversed(many)))
+        self.assertEqual(forward, backward)
+        self.assertEqual(forward[:3], ("c01", "c02", "c03"))
+
 
 class PublicLoopTests(LoopHarness):
     """The reproduced public-loop cases, driven end to end through ``run()``."""
@@ -966,6 +1583,73 @@ class PublicLoopTests(LoopHarness):
         self.assertEqual(
             [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]],
             [mixed.identifier],
+        )
+
+    def test_a_mistyped_acknowledgement_clears_nothing_through_the_whole_loop(self) -> None:
+        """The double-space form, end to end: the stop is still there.
+
+        This is the shape a human actually produces by accident, which is why a
+        parser forgiving enough to accept it is a second, unwritten way to clear
+        somebody's "do not merge".
+        """
+        loop = self.build()
+        self.review_round(HEAD_A)
+        raised = self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        mistyped = self.remote.comment(
+            f"{ACKNOWLEDGEMENT}  {raised.identifier}", author=HUMAN
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "human-feedback")
+        self.assertEqual(
+            [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]],
+            [raised.identifier, mistyped.identifier],
+        )
+
+    def test_a_tab_separated_acknowledgement_clears_nothing_either(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+        raised = self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        self.remote.comment(f"{ACKNOWLEDGEMENT}\t{raised.identifier}", author=HUMAN)
+
+        result = loop.run()
+
+        self.assertEqual(result.reason, "human-feedback")
+        self.assertEqual(len(result.evidence["evidence"]["unresolved"]), 2)
+
+    def test_the_reported_change_request_is_the_later_one(self) -> None:
+        """One finding per author, and it names what GitHub's clock says is latest."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+        self.remote.review("the first pass", author=HUMAN, state="CHANGES_REQUESTED")
+        later = self.remote.review(
+            "and still not this", author=HUMAN, state="CHANGES_REQUESTED"
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.reason, "human-feedback")
+        self.assertEqual(
+            [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]],
+            [later.identifier],
+        )
+        self.assertIn("still not this", result.evidence["evidence"]["unresolved"][0]["excerpt"])
+
+    def test_the_evidence_is_reported_by_the_clock_across_every_surface(self) -> None:
+        """What Karan reads is one chronological stream, not three appended lists."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+        first = self.remote.comment(BLOCKING_PROSE, author=HUMAN)
+        raised = self.remote.review("please fix", author=HUMAN, state="CHANGES_REQUESTED")
+        started = self.remote.thread("and this line too", author=HUMAN)
+
+        result = loop.run()
+
+        self.assertEqual(
+            [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]],
+            [first.identifier, raised.identifier, started.identifier],
         )
 
     def test_a_lane_login_cannot_acknowledge_the_feedback_aimed_at_it(self) -> None:

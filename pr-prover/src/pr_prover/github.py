@@ -631,9 +631,18 @@ def _comment_from(payload: object) -> Comment:
             "comment payload has no author login",
             evidence={"comment_id": str(payload.get("id") or "")},
         )
+    # A comment GitHub delivered with no text at all answers with ``""``. An
+    # absent or null member is a read that did not deliver the body, and the two
+    # must not become the same value here: reconciliation drops a blank comment
+    # as nothing to resolve, so a body rounded down to absence is a human "do not
+    # merge" that clears the PR by disappearing.
     body = payload.get("body")
-    if body is not None and not isinstance(body, str):
-        raise GitHubError("comment payload has an unusable body", evidence={"author": login})
+    if not isinstance(body, str):
+        raise GitHubError(
+            "comment payload has no usable body; an absent body is an incomplete "
+            "read, not a comment with nothing in it",
+            evidence={"author": login, "field": "body"},
+        )
     # A comment without a stable id cannot be told apart from a copy of itself,
     # so there is nothing to fall back to: fail closed rather than compare bodies.
     identifier = payload.get("id")
@@ -649,7 +658,7 @@ def _comment_from(payload: object) -> Comment:
     return Comment(
         identifier=str(identifier),
         author=login,
-        body=body or "",
+        body=body,
         url=str(payload.get("html_url") or ""),
         created_at=_timestamp(payload, "created_at", what="comment", author=login),
     )
@@ -693,25 +702,39 @@ def _review_from(payload: object) -> Comment:
         or str(identifier) == ""
     ):
         raise GitHubError("review payload has no stable id", evidence={"author": login})
+    # An approval with no text is a real review whose body is ``""``. An absent
+    # or null body is a payload that did not carry one, and rounding that down to
+    # blank is how a human's review prose stops being unresolved feedback.
     body = payload.get("body")
-    if body is not None and not isinstance(body, str):
-        raise GitHubError("review payload has an unusable body", evidence={"author": login})
+    if not isinstance(body, str):
+        raise GitHubError(
+            "review payload has no usable body; an absent body is an incomplete "
+            "read, not a review with nothing written in it",
+            evidence={"author": login, "field": "body"},
+        )
     commit_id = payload.get("commit_id")
     if commit_id is not None and not isinstance(commit_id, str):
         raise GitHubError("review payload has an unusable commit_id", evidence={"author": login})
+    # The state is the whole resolution model for this surface: a missing one
+    # normalized to ``""`` is neither decisive nor blocking, so a live
+    # ``CHANGES_REQUESTED`` would silently become plain prose — or nothing.
     state = payload.get("state")
-    if state is not None and not isinstance(state, str):
-        raise GitHubError("review payload has an unusable state", evidence={"author": login})
+    if not isinstance(state, str):
+        raise GitHubError(
+            "review payload has no usable state; GitHub's own review state is what "
+            "resolves this surface, and an absent one cannot be read as approval",
+            evidence={"author": login, "field": "state"},
+        )
     return Comment(
         # Namespaced, because a review id and a comment id are two different
         # counters and the loop keeps both in one set of run-owned identities.
         identifier=f"review:{identifier}",
         author=login,
-        body=body or "",
+        body=body,
         url=str(payload.get("html_url") or ""),
         kind="review",
         commit_id=(commit_id or "").lower(),
-        state=(state or "").upper(),
+        state=state.upper(),
         # A review's immutable ordering evidence is when it was submitted. A
         # review still being drafted has no such moment, and it is carried as
         # the empty string rather than invented.
@@ -867,12 +890,17 @@ def _thread_from(node: object) -> ReviewThread:
             "review thread has no comments connection", evidence={"thread": identifier}
         )
     _require_complete_thread_comments(raw, thread=identifier)
+    # The query always asks for these nodes. Absent and ``null`` are the same
+    # answer as an unusable array — the replies are *unknown* — and none of the
+    # three may become an empty reply list: a thread with no readable human
+    # author is dropped downstream, so an unknown reply list is exactly how a
+    # live "do not merge" thread clears the PR by looking agent-only.
     items = raw.get("nodes")
-    if items is None:
-        items = []
     if not isinstance(items, list):
         raise GitHubError(
-            "review thread has an unusable comments array", evidence={"thread": identifier}
+            "review thread has no usable comments array, so its replies are unknown "
+            "rather than absent",
+            evidence={"thread": identifier},
         )
     return ReviewThread(
         identifier=identifier,
@@ -922,14 +950,16 @@ def _thread_comment_from(payload: object, *, thread: str) -> Comment:
     if not isinstance(identifier, str) or not identifier:
         raise GitHubError("review-thread comment has no stable id", evidence={"thread": thread})
     body = payload.get("body")
-    if body is not None and not isinstance(body, str):
+    if not isinstance(body, str):
         raise GitHubError(
-            "review-thread comment has an unusable body", evidence={"thread": thread}
+            "review-thread comment has no usable body; an absent body is an "
+            "incomplete read, not a reply with nothing in it",
+            evidence={"thread": thread, "field": "body"},
         )
     return Comment(
         identifier=identifier,
         author=login,
-        body=body or "",
+        body=body,
         url=str(payload.get("url") or ""),
         kind="review-thread-comment",
         created_at=_timestamp(payload, "createdAt", what="review-thread comment", author=login),

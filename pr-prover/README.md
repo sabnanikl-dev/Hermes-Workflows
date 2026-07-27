@@ -387,27 +387,55 @@ reads them again until two consecutive passes agree, and reconciles them in
 [`feedback.py`](src/pr_prover/feedback.py). Anything it cannot prove somebody
 resolved stops the run and asks Karan.
 
+"Read to their last page" is checked rather than assumed, and so is every field
+the reconciler needs. A thread whose reply list did not arrive, a comment or
+review whose body did not arrive, and a review with no state are each an
+incomplete read — not a thread with no replies, a post with nothing in it, or a
+review nobody has to clear. Each stops the read where it happened. A post a
+human really did leave empty is still data and still parses; the difference
+between "empty" and "absent" only exists at the boundary, so that is where it is
+decided.
+
 Nothing here interprets prose. Two surfaces carry their own resolution state and
 one does not:
 
 - a formal `CHANGES_REQUESTED` clears only when the **same author** submits a
   later `APPROVED` or `DISMISSED` review;
 - an inline thread clears only when GitHub records it resolved or outdated;
-- a conversation comment — which has no resolve button at all — clears only
-  through a later line reading, after surrounding trim:
+- prose on the surfaces GitHub gives no resolution state — a conversation
+  comment, and the body of a review carrying no decisive state, such as a plain
+  `COMMENTED` one — clears only through a later line reading, after the
+  surrounding whitespace of that line is trimmed:
 
   ```text
   PR-PROVER: ACKNOWLEDGED <one immutable GitHub artifact id>
   ```
+
+  Neither of the first two is acknowledgeable. A `CHANGES_REQUESTED` review and
+  an inline thread each have a native GitHub action that resolves them, so an
+  acknowledgement naming one of those is a line that clears nothing — it stays
+  in the body as the prose it is.
+
+  The grammar is the whole line and it is exact: the literal prefix, **exactly
+  one ordinary space**, and one id containing no whitespace. A double space, a
+  tab, a case variant, an extra token, or the same words inside a sentence are
+  all ineffective, on purpose — a form loose enough to forgive a typo is a
+  second, unwritten way to clear somebody's stop.
 
 That line is *spent* only when all six of these hold: its author is not a
 configured publishing login; it names exactly one eligible unresolved prose item
 on a surface with no native resolution; GitHub's own UTC-aware timestamps put
 that target strictly earlier; the target is not the post itself; the target is
 not already cleared, globally or by an earlier line of the same post; and so the
-line performs exactly one unresolved-to-cleared transition. Candidate posts are
-ordered globally by timestamp, then surface, then id, so the same conversation
-reconciles the same way however its pages were grouped.
+line performs exactly one unresolved-to-cleared transition.
+
+One canonical order — UTC-aware timestamp, then surface, then immutable id —
+governs everywhere an order exists: which posts are considered as candidates,
+which of an author's still-standing change requests a finding names, and the
+sequence of findings a stop reports. The same conversation therefore reconciles
+to the same answer, in the same order, however its pages were grouped or its
+tuples arrived. That last one is not presentation: a stop describes only the
+first few items it found, so the order decides which ones Karan is shown at all.
 
 Only spent lines are removed from the body. A blank remainder is pure
 bookkeeping and creates no finding — otherwise acknowledging anything would
