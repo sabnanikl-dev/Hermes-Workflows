@@ -28,10 +28,11 @@ router that sends Hermes here are **PAPI-92**; finding provenance and the
 structured failure records are **PAPI-99**; the trusted execution adapters,
 reviewer artifact lifecycle, and GitHub readback below are **PAPI-90**;
 complete feedback surfaces, run-owned publication evidence, native
-review/thread resolution, and the acknowledgement contract are **PAPI-97**. The
-final integration proof (PAPI-93) is still pending; see the proof map in
-[`MISSION.md`](MISSION.md) for exactly which invariants are shipped and which
-are owed.
+review/thread resolution, and the acknowledgement contract are **PAPI-97**; and
+the cross-slice integration proof — the ordered lifecycle composed end to end,
+the anti-Goodhart bad-faith-pass case, and this metadata reconciliation — is
+**PAPI-93**. See the proof map in [`MISSION.md`](MISSION.md) for exactly which
+invariants are shipped and which are owed.
 
 ## Run it
 
@@ -823,3 +824,21 @@ or Codex. Almost all of it runs against deterministic doubles, including every
 
 All three touch nothing outside their temp directories, and each skips itself
 when what it needs (`git`, a POSIX shell) is absent.
+
+One more file is worth naming, because it asks a different kind of question.
+Every other module proves a seam; [`tests/test_integration_matrix.py`](tests/test_integration_matrix.py)
+proves that the seams still hold *composed*, across a sequence of heads — the
+ordered pass from inspection through to the rendered report, several
+repository-native gates at once, visual QA selected and evidenced on the exact
+head, a quiet builder distinguished from a stalled one, and the artifact
+defects that must stop a run rather than reach the pull request.
+
+Its load-bearing case is the one a passing loop cannot check for itself. A
+builder can satisfy a gate by deleting the test that failed it, and every
+mechanical measure this tool owns — the gate, the five-way push agreement, the
+comment readback, the artifact lifecycle — is then green. What answers is the
+adversarial review triad, and the fixture pins the consequence rather than the
+intention: on a head whose only qualification is a metric the builder rewrote,
+no `merge-ready` is reachable. The same fixture run with reviewers that share
+the builder's framing reports `merge-ready`, which is why the adversarial
+stance in [`MISSION.md`](MISSION.md) is load-bearing rather than stylistic.

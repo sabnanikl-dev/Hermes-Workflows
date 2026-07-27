@@ -27,7 +27,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pr_prover.commands import RUNNER_DEFAULT, Budget, CommandResult, validate_argv
+from pr_prover.commands import (
+    RUNNER_DEFAULT,
+    Budget,
+    CommandResult,
+    Progress,
+    validate_argv,
+)
 from pr_prover.config import RunConfig
 from pr_prover.findings import Finding, FindingLocation, FindingProvenance
 from pr_prover.github import (
@@ -404,13 +410,23 @@ class Call:
 
 @dataclass(frozen=True)
 class ScriptedResult:
-    """One queued lane outcome: what it printed and how the process ended."""
+    """One queued lane outcome: what it printed and how the process ended.
+
+    ``duration``/``quiet_seconds`` are what the real runner measures while a
+    child runs, and ``progress`` is what it reported *during* the run as
+    ``(elapsed, output_bytes, quiet_seconds)`` observations. All three default
+    to "instant and talkative", which is what almost every test wants; a test
+    about a lane that went quiet for twenty minutes sets them explicitly.
+    """
 
     returncode: int
     stdout: str
     stderr: str
     timed_out: bool
     after: Callable[[], None] | None
+    duration: float = 0.0
+    quiet_seconds: float = 0.0
+    progress: tuple[tuple[float, int, float], ...] = ()
 
 
 class LaneScript:
@@ -428,6 +444,9 @@ class LaneScript:
         stderr: str = "",
         timed_out: bool = False,
         after: Callable[[], None] | None = None,
+        duration: float = 0.0,
+        quiet_seconds: float = 0.0,
+        progress: Sequence[tuple[float, int, float]] = (),
     ) -> LaneScript:
         self._queues.setdefault(program, deque()).append(
             ScriptedResult(
@@ -436,11 +455,19 @@ class LaneScript:
                 stderr=stderr,
                 timed_out=timed_out,
                 after=after,
+                duration=duration,
+                quiet_seconds=quiet_seconds,
+                progress=tuple(progress),
             )
         )
         return self
 
-    def __call__(self, argv: tuple[str, ...], cwd: str | None) -> CommandResult:
+    def __call__(
+        self,
+        argv: tuple[str, ...],
+        cwd: str | None,
+        progress: Callable[[Progress], None] | None = None,
+    ) -> CommandResult:
         queue = self._queues.get(argv[0])
         if not queue:
             if argv[0].startswith("lane-reviewer-"):
@@ -453,6 +480,18 @@ class LaneScript:
                 )
             raise AssertionError(f"unscripted lane call: {list(argv)}")
         scripted = queue.popleft()
+        # Replayed before ``after``, in the order the real runner reports them:
+        # a progress observation is something said *while* the child is alive.
+        if progress is not None:
+            for elapsed, output_bytes, quiet in scripted.progress:
+                progress(
+                    Progress(
+                        argv=argv,
+                        elapsed=elapsed,
+                        output_bytes=output_bytes,
+                        quiet_seconds=quiet,
+                    )
+                )
         if scripted.after is not None:
             scripted.after()
         return CommandResult(
@@ -461,6 +500,8 @@ class LaneScript:
             stdout=scripted.stdout,
             stderr=scripted.stderr,
             timed_out=scripted.timed_out,
+            duration=scripted.duration,
+            quiet_seconds=scripted.quiet_seconds,
         )
 
     @property
@@ -566,7 +607,7 @@ class FakeRunner:
             self.blocker_files.append(
                 json.loads(Path(blockers).read_text(encoding="utf-8"))
             )
-        result = self.script(checked, str(cwd) if cwd is not None else None)
+        result = self.script(checked, str(cwd) if cwd is not None else None, progress)
         if checked[0].startswith("lane-reviewer-"):
             packet = _flag(checked, "--evidence-packet")
             if packet:

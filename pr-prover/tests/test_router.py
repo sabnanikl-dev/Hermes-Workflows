@@ -57,6 +57,11 @@ LAUNCHER = "pr-prover/bin/pr-prover"
 SHIPPED = (
     *sorted((PR_PROVER / "src").rglob("*.py")),
     *sorted((PR_PROVER / "examples").glob("*.json")),
+    # The two repository-owned adapters are shipped surface too: they are what
+    # actually launches a reviewer and a builder, and the rejected apparatus is
+    # exactly the kind of thing that would reappear in a launcher rather than
+    # in a module.
+    *sorted((PR_PROVER / "scripts").glob("*.sh")),
     PR_PROVER / "README.md",
     PR_PROVER / "bin" / "pr-prover",
     SKILL,
@@ -84,9 +89,50 @@ REJECTED = (
     "cgroup",
     "job object",
     "job_object",
+    # The hyphenated form is the spelling both contracts actually use, so the
+    # two above were the only two shapes the scan could not see.
+    "job-object",
     "detached descendant",
+    # Container/VM qualification, in the forms it would plausibly reappear as.
+    # Bare "container" is deliberately absent: it is an ordinary word for an
+    # ordinary data structure, and a scan that cannot be satisfied is a scan
+    # that gets deleted.
+    "container/vm",
+    "docker",
+    "podman",
+    "chroot",
     "telegram",
     "approval grammar",
+)
+
+# One sample per rejected token, in the shape the superseded slice actually
+# wrote it. This is what keeps the scan above from quietly becoming a list of
+# strings nothing would ever match.
+REJECTED_SAMPLES = (
+    "the capability broker hands each lane a token",
+    "class CapabilityBroker: ...",
+    "write the lane secret to the socket",
+    "lane_secret = derive(run_id)",
+    "authenticate with the lane's bearer secret",
+    "issue a per-lane secret for the reviewer",
+    "the channel authentication handshake fails closed",
+    "sandbox-exec -f /tmp/policy.sb codex",
+    "the seatbelt profile denies host paths",
+    "SandboxPolicy(deny_all=True)",
+    "wrap the request in a MAC envelope",
+    "runtime attestation of the launcher bytes",
+    "compare the byte fingerprint of the executable",
+    "move the lane into its own cgroup",
+    "assign the job object before spawning",
+    "job_object = CreateJobObject()",
+    "job-object qualification is a prerequisite",
+    "prove no detached descendant survives",
+    "container/VM qualification of the host",
+    "run the lane in a docker container",
+    "podman run --rm reviewer",
+    "chroot into the disposable tree",
+    "notify the operator over telegram",
+    "the approval grammar accepts YES/NO",
 )
 
 # The core of the thin tool as it exists on current main. Later slices may add
@@ -658,6 +704,33 @@ class RemovedFrameworkScanTests(unittest.TestCase):
             for token in REJECTED:
                 with self.subTest(path=path.name, token=token):
                     self.assertNotIn(token, lowered)
+
+    def test_the_shipped_surface_includes_the_launchers_it_actually_runs(self) -> None:
+        """Non-vacuity for the scan's *scope* rather than its contents.
+
+        The scan is only worth as much as the surface it reads, and the two
+        adapter scripts are the part of that surface a module-shaped scan would
+        naturally miss.
+        """
+        scanned = {path.name for path in SHIPPED}
+        for launcher in ("codex-reviewer.sh", "claude-builder.sh"):
+            with self.subTest(launcher=launcher):
+                self.assertIn(launcher, scanned)
+                self.assertTrue((PR_PROVER / "scripts" / launcher).is_file())
+
+    def test_the_removal_scan_is_not_vacuous(self) -> None:
+        """Every rejected token must still catch the machinery it was written for.
+
+        The same guard the conflicting-lifecycle scan carries. A token nothing
+        could ever match reads as coverage and is worth nothing, and the two
+        ways to get one are a typo and a concept nobody would spell that way.
+        """
+        for token in REJECTED:
+            with self.subTest(token=token):
+                self.assertTrue(
+                    any(token in sample.lower() for sample in REJECTED_SAMPLES),
+                    f"{token!r} no longer catches any known form of the rejected slice",
+                )
 
     def test_the_contracts_name_the_rejected_apparatus_only_to_forbid_it(self) -> None:
         """Naming it under 'do not introduce' is the point; asserting it is drift."""
