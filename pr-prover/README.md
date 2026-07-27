@@ -136,10 +136,23 @@ contradicts its provenance is rejected rather than believed.
 Classification adds the other half. Every decision appends a lineage entry —
 who decided, about which finding, from which category to which, and when — so a
 finding two lanes raised at different severities, or one an adjudicator moved,
-records the decision instead of only its result.
+records the decision instead of only its result. A lineage entry naming a
+different finding than the one it sits under is refused, at construction and
+again when a journal is read back: decision history that could belong to
+another finding is not decision history.
 
-A `needs-Karan` report renders all of it inline under the finding, so the
-escalation is actionable without reopening the raw lane output.
+Deduplication picks which claim *governs* a finding id; it does not decide that
+the other lane's evidence stops existing. Every originating claim is kept whole
+in `origins` — its own typed location, its own excerpt, its own head — and
+`sources` is read off that list rather than stored beside it, exactly as a
+finding's `head` and `source` are read off its provenance. One entry per lane:
+a lane restating an id replaces its own earlier claim, never another lane's.
+
+A `needs-Karan` report renders all of it inline under the finding — every
+origin, not only the governing one — so the escalation is actionable without
+reopening the raw lane output, and it names the exact head the ledger was
+produced against. A fail-closed stop after classification is an escalation too,
+so it carries the same ledger rather than leaving it in the state file.
 
 ### Failures are the builder's next instruction
 
@@ -156,6 +169,16 @@ and the frozen blocker set carries the same block for each blocker it names. So
 there is no second description of a failure to keep in step with the first.
 Remediation is deliberately narrow: it either points at work inside the frozen
 blocker set or says plainly that there is none and the run stops.
+
+That includes the two classes that stop before a run report exists.
+`invalid-config` and `invalid-command` are caught in the CLI, before a loop can
+be built, and they are still rendered as the same record in the same two forms
+rather than as one line of prose on stderr. The prose line stays, as the
+operator's log summary of the record printed beside it.
+
+A readback mismatch says which condition each fresh comment actually failed —
+wrong login, missing signature, or a body about some other head — for a bounded
+number of candidates, because those are three different fixes.
 
 ### The marker is not the whole verdict
 
@@ -240,13 +263,16 @@ that a run exists. There is no PID inspection and no takeover path: if the lock
 is held, the run stops and asks.
 
 The buckets are journaled with the full provenance and lineage each finding was
-created with, so an escalation read after a crash still says who found what,
-where, and on which head. They are held to the same strictness as the rest of
-the journal: an incomplete provenance record, a finding sitting in a bucket its
-own category contradicts, or a finding produced against a different head than
-the run is bound to is unexpected state, not something to repair. And because a
-finding is evidence about one exact commit, binding the run to a new head drops
-the old head's findings rather than carrying them forward.
+created with — every origin of it, not only the governing claim — so an
+escalation read after a crash still says who found what, where, and on which
+head. They are held to the same strictness as the rest of the journal: an
+incomplete provenance record, a finding sitting in a bucket its own category
+contradicts, lineage or an origin attributed to a different finding, a rendered
+`sources` list that disagrees with the origins it was rendered from, or *any*
+origin produced against a different head than the run is bound to is unexpected
+state, not something to repair. And because a finding is evidence about one
+exact commit, binding the run to a new head drops the old head's findings rather
+than carrying them forward.
 
 ### The lock is released by identity, not by pathname
 
@@ -313,9 +339,12 @@ reported; the save failure is noted in the run log rather than replacing it.
 `github-error` · `worktree-error`
 
 Each carries evidence, and the worktree plus scratch directory are retained so
-the failure can be inspected. Each also reaches the report as a failure record —
-what failed, the evidence, the bounded remediation, the escalation condition —
-in both renderings described [above](#failures-are-the-builders-next-instruction).
+the failure can be inspected. Each also reaches a failure record — what failed,
+the evidence, the bounded remediation, the escalation condition — in both
+renderings described [above](#failures-are-the-builders-next-instruction),
+including the two classes the CLI reaches before a run report exists. A stop
+that happens after classification also carries the ledger it froze, with the
+exact head that ledger was produced against printed beside it.
 
 Redaction happens twice. Output captured from a child is scrubbed of
 credential-shaped text where it is captured, and then the assembled report —

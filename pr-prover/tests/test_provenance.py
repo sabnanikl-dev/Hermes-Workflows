@@ -301,14 +301,16 @@ class ClassificationLineageTests(unittest.TestCase):
             to_category="blocking",
             at="2026-07-26T09:00:00Z",
         )
+        finding = make_finding("a")
         with self.assertRaises(StateError):
             ClassifiedFinding(
-                finding=make_finding("a"), category="non-blocking", sources=("reviewer:A",), lineage=(event,)
+                finding=finding, category="non-blocking", origins=(finding,), lineage=(event,)
             )
 
     def test_a_classified_finding_without_lineage_fails_closed(self) -> None:
+        finding = make_finding("a")
         with self.assertRaises(StateError) as caught:
-            ClassifiedFinding(finding=make_finding("a"), category="blocking", sources=("reviewer:A",))
+            ClassifiedFinding(finding=finding, category="blocking", origins=(finding,))
         self.assertEqual(caught.exception.evidence["incomplete_field"], "lineage")
 
     def test_an_unknown_lineage_action_fails_closed(self) -> None:
@@ -382,6 +384,242 @@ class ClassificationRoundTripTests(unittest.TestCase):
             Classification.from_dict(payload)
 
 
+class DuplicateOriginProvenanceTests(unittest.TestCase):
+    """PAPI99-RA-P1-001 / PAPI99-RB-001: deduplication must not delete evidence.
+
+    Two lanes raising one id looked at two surfaces and quoted two excerpts.
+    Choosing which claim governs the bucket is not a licence to forget the other
+    one, because the escalation is judged on both.
+    """
+
+    def duplicate(self, first: str = "non-blocking", second: str = "blocking"):
+        origin_a = make_finding(
+            "same-id",
+            first,
+            "reviewer:A",
+            summary="the retry loop never terminates",
+            provenance=make_provenance(
+                "reviewer:A",
+                kind="file-line",
+                reference="src/retry.py",
+                line=42,
+                excerpt="evidence-A",
+            ),
+        )
+        origin_b = make_finding(
+            "same-id",
+            second,
+            "reviewer:B",
+            summary="the retry loop never terminates",
+            provenance=make_provenance(
+                "reviewer:B",
+                kind="review",
+                reference="PRR_9",
+                line=None,
+                excerpt="evidence-B",
+            ),
+        )
+        return classify([origin_a, origin_b], clock=stopped_clock()), origin_a, origin_b
+
+    def test_every_origin_keeps_its_own_location_and_excerpt(self) -> None:
+        result, origin_a, origin_b = self.duplicate()
+        item = result.blocking[0]
+        self.assertEqual(item.origins, (origin_a, origin_b))
+        self.assertEqual(item.sources, ("reviewer:A", "reviewer:B"))
+        self.assertEqual(
+            [origin.provenance.location.describe() for origin in item.origins],
+            ["src/retry.py:42", "review PRR_9"],
+        )
+        self.assertEqual(
+            [origin.provenance.evidence_excerpt for origin in item.origins],
+            ["evidence-A", "evidence-B"],
+        )
+
+    def test_the_stronger_claim_still_governs_the_bucket(self) -> None:
+        result, _, origin_b = self.duplicate()
+        item = result.blocking[0]
+        self.assertEqual(item.category, "blocking")
+        self.assertEqual(item.finding, origin_b)
+        self.assertEqual(result.non_blocking, ())
+
+    def test_the_serialized_form_carries_both_origins(self) -> None:
+        """The reviewer's probe: both excerpts must survive serialization."""
+        result, _, _ = self.duplicate()
+        serialized = json.dumps(result.as_dict())
+        self.assertIn("evidence-A", serialized)
+        self.assertIn("evidence-B", serialized)
+        stored = result.as_dict()["blocking"][0]
+        self.assertEqual(stored["sources"], ["reviewer:A", "reviewer:B"])
+        self.assertEqual(
+            [origin["provenance"]["evidence_excerpt"] for origin in stored["origins"]],
+            ["evidence-A", "evidence-B"],
+        )
+
+    def test_both_origins_survive_a_round_trip(self) -> None:
+        result, _, _ = self.duplicate()
+        self.assertEqual(Classification.from_dict(result.as_dict()), result)
+
+    def test_a_milder_second_claim_still_keeps_its_own_origin(self) -> None:
+        result, origin_a, origin_b = self.duplicate(first="blocking", second="non-blocking")
+        item = result.blocking[0]
+        self.assertEqual(item.finding, origin_a)
+        self.assertEqual(item.origins, (origin_a, origin_b))
+        self.assertEqual(
+            [origin.provenance.evidence_excerpt for origin in item.origins],
+            ["evidence-A", "evidence-B"],
+        )
+
+    def test_one_lane_restating_its_own_id_stays_one_origin(self) -> None:
+        """Origins are per lane: a lane's governing claim replaces its own earlier one."""
+        milder = make_finding("a", "non-blocking", "reviewer:A", provenance=make_provenance("reviewer:A", excerpt="first-look"))
+        stronger = make_finding("a", "blocking", "reviewer:A", provenance=make_provenance("reviewer:A", excerpt="second-look"))
+        item = classify([milder, stronger], clock=stopped_clock()).blocking[0]
+        self.assertEqual(item.sources, ("reviewer:A",))
+        self.assertEqual(item.origins, (stronger,))
+        self.assertEqual(item.finding, stronger)
+
+    def test_a_lane_restating_a_milder_claim_keeps_the_governing_one(self) -> None:
+        stronger = make_finding("a", "blocking", "reviewer:A", provenance=make_provenance("reviewer:A", excerpt="first-look"))
+        milder = make_finding("a", "non-blocking", "reviewer:A", provenance=make_provenance("reviewer:A", excerpt="second-look"))
+        item = classify([stronger, milder], clock=stopped_clock()).blocking[0]
+        self.assertEqual(item.origins, (stronger,))
+        self.assertEqual(item.finding, stronger)
+
+    def test_an_origin_for_another_finding_fails_closed(self) -> None:
+        governing = make_finding("a", "blocking", "reviewer:A")
+        stranger = make_finding("b", "blocking", "reviewer:B")
+        with self.assertRaises(StateError) as caught:
+            ClassifiedFinding(
+                finding=governing,
+                category="blocking",
+                origins=(governing, stranger),
+                lineage=(self.event("a"),),
+            )
+        self.assertEqual(caught.exception.evidence["origin_finding_id"], "b")
+
+    def test_a_governing_finding_absent_from_its_origins_fails_closed(self) -> None:
+        governing = make_finding("a", "blocking", "reviewer:A")
+        other = make_finding("a", "blocking", "reviewer:B")
+        with self.assertRaises(StateError) as caught:
+            ClassifiedFinding(
+                finding=governing, category="blocking", origins=(other,), lineage=(self.event("a"),)
+            )
+        self.assertEqual(caught.exception.evidence["governing_source"], "reviewer:A")
+
+    def test_the_same_lane_recorded_twice_fails_closed(self) -> None:
+        governing = make_finding("a", "blocking", "reviewer:A")
+        with self.assertRaises(StateError) as caught:
+            ClassifiedFinding(
+                finding=governing,
+                category="blocking",
+                origins=(governing, governing),
+                lineage=(self.event("a"),),
+            )
+        self.assertEqual(caught.exception.evidence["source"], "reviewer:A")
+
+    def test_a_classified_finding_without_origins_fails_closed(self) -> None:
+        governing = make_finding("a", "blocking", "reviewer:A")
+        with self.assertRaises(StateError) as caught:
+            ClassifiedFinding(
+                finding=governing, category="blocking", origins=(), lineage=(self.event("a"),)
+            )
+        self.assertEqual(caught.exception.evidence["incomplete_field"], "origins")
+
+    def test_a_stored_finding_with_no_origins_fails_closed(self) -> None:
+        result, _, _ = self.duplicate()
+        payload = result.as_dict()
+        payload["blocking"][0].pop("origins")
+        with self.assertRaises(StateError) as caught:
+            Classification.from_dict(payload)
+        self.assertEqual(caught.exception.evidence["incomplete_field"], "origins")
+
+    def test_stored_sources_that_disagree_with_the_origins_fail_closed(self) -> None:
+        """A rendered label may never outvote the records it was rendered from."""
+        result, _, _ = self.duplicate()
+        payload = result.as_dict()
+        payload["blocking"][0]["sources"] = ["reviewer:A", "reviewer:C"]
+        with self.assertRaises(StateError) as caught:
+            Classification.from_dict(payload)
+        self.assertEqual(caught.exception.evidence["origins"], ["reviewer:A", "reviewer:B"])
+
+    def test_a_stored_origin_with_half_a_provenance_fails_closed(self) -> None:
+        result, _, _ = self.duplicate()
+        payload = result.as_dict()
+        payload["blocking"][0]["origins"][1]["provenance"].pop("evidence_excerpt")
+        with self.assertRaises(StateError) as caught:
+            Classification.from_dict(payload)
+        self.assertEqual(caught.exception.evidence["incomplete_field"], "evidence_excerpt")
+
+    def event(self, finding_id: str) -> ClassificationEvent:
+        return ClassificationEvent(
+            finding_id=finding_id,
+            actor="hermes",
+            action="classified",
+            from_category="blocking",
+            to_category="blocking",
+            at="2026-07-26T09:00:00Z",
+        )
+
+
+class LineageIdentityTests(unittest.TestCase):
+    """PAPI99-RA-P1-002 / PAPI99-RB-001 / IA-PAPI99-001: lineage belongs to its finding.
+
+    Decision history that can be attributed to another finding is not decision
+    history. Every event names the finding it decided about, and the record it
+    sits in refuses any event that names a different one.
+    """
+
+    def classification(self) -> Classification:
+        return classify([make_finding("actual-id", "blocking", "reviewer:A")], clock=stopped_clock())
+
+    def test_lineage_for_another_finding_cannot_be_constructed(self) -> None:
+        governing = make_finding("actual-id", "blocking", "reviewer:A")
+        event = ClassificationEvent(
+            finding_id="different-id",
+            actor="hermes",
+            action="classified",
+            from_category="blocking",
+            to_category="blocking",
+            at="2026-07-26T09:00:00Z",
+        )
+        with self.assertRaises(StateError) as caught:
+            ClassifiedFinding(
+                finding=governing, category="blocking", origins=(governing,), lineage=(event,)
+            )
+        self.assertEqual(caught.exception.evidence["lineage_finding_id"], "different-id")
+        self.assertEqual(caught.exception.evidence["finding_id"], "actual-id")
+
+    def test_deserialization_refuses_lineage_for_another_finding(self) -> None:
+        """The reviewers' exact probe, at the schema-v3 boundary."""
+        payload = self.classification().as_dict()
+        payload["blocking"][0]["lineage"][0]["finding_id"] = "different-id"
+        with self.assertRaises(StateError) as caught:
+            Classification.from_dict(payload)
+        self.assertEqual(caught.exception.evidence["lineage_finding_id"], "different-id")
+
+    def test_a_merge_event_for_another_finding_is_refused(self) -> None:
+        """Every event is checked, not only the first or the last."""
+        result = classify(
+            [
+                make_finding("a", "non-blocking", "reviewer:A"),
+                make_finding("a", "blocking", "reviewer:B"),
+            ],
+            clock=stopped_clock(),
+        )
+        payload = result.as_dict()
+        self.assertEqual(len(payload["blocking"][0]["lineage"]), 3)
+        for index in range(3):
+            with self.subTest(event=index):
+                mutated = result.as_dict()
+                mutated["blocking"][0]["lineage"][index]["finding_id"] = "different-id"
+                with self.assertRaises(StateError):
+                    Classification.from_dict(mutated)
+
+    def test_untouched_lineage_still_round_trips(self) -> None:
+        original = self.classification()
+        self.assertEqual(Classification.from_dict(original.as_dict()), original)
+
+
 class DurableProvenanceTests(unittest.TestCase):
     """The journal is what a restart reads, so provenance has to be in it."""
 
@@ -437,6 +675,109 @@ class DurableProvenanceTests(unittest.TestCase):
         with self.assertRaises(StateError) as caught:
             self.load()
         self.assertIn("classification is unusable", caught.exception.message)
+
+    def duplicate_state(self) -> RunState:
+        """A journal whose one blocker two lanes raised, on two surfaces."""
+        state = self.load()
+        state.bind_head(HEAD_A)
+        state.record_classification(
+            classify(
+                [
+                    make_finding(
+                        "same-id",
+                        "non-blocking",
+                        "reviewer:A",
+                        provenance=make_provenance(
+                            "reviewer:A", kind="file-line", reference="src/retry.py", line=42,
+                            excerpt="evidence-A",
+                        ),
+                    ),
+                    make_finding(
+                        "same-id",
+                        "blocking",
+                        "reviewer:B",
+                        provenance=make_provenance("reviewer:B", excerpt="evidence-B"),
+                    ),
+                ],
+                clock=stopped_clock(),
+            )
+        )
+        state.save()
+        return state
+
+    def test_every_origin_survives_a_restart(self) -> None:
+        original = self.duplicate_state()
+
+        reloaded = self.load()
+
+        self.assertEqual(reloaded.classification, original.classification)
+        item = reloaded.classification.blocking[0]
+        self.assertEqual(item.sources, ("reviewer:A", "reviewer:B"))
+        self.assertEqual(
+            [origin.provenance.evidence_excerpt for origin in item.origins],
+            ["evidence-A", "evidence-B"],
+        )
+        self.assertEqual(item.origins[0].provenance.location.describe(), "src/retry.py:42")
+
+    def test_the_journal_holds_every_origin_on_disk(self) -> None:
+        self.duplicate_state()
+        stored = json.loads(self.path.read_text(encoding="utf-8"))["classification"]["blocking"][0]
+        self.assertEqual(stored["sources"], ["reviewer:A", "reviewer:B"])
+        self.assertEqual(
+            [origin["provenance"]["evidence_excerpt"] for origin in stored["origins"]],
+            ["evidence-A", "evidence-B"],
+        )
+
+    def test_a_journal_with_lineage_for_another_finding_is_unexpected_state(self) -> None:
+        """IA-PAPI99-001's exact mutation probe, at the restart boundary."""
+        self.saved_state()
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        payload["classification"]["blocking"][0]["lineage"][0]["finding_id"] = "different-finding"
+        self.path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaises(StateError) as caught:
+            self.load()
+
+        self.assertIn("classification is unusable", caught.exception.message)
+        self.assertEqual(caught.exception.evidence["lineage_finding_id"], "different-finding")
+
+    def test_a_journal_whose_sources_disagree_with_its_origins_is_unexpected_state(self) -> None:
+        self.duplicate_state()
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        payload["classification"]["blocking"][0]["sources"] = ["reviewer:A"]
+        self.path.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaises(StateError) as caught:
+            self.load()
+        self.assertIn("classification is unusable", caught.exception.message)
+
+    def test_a_journal_with_a_runner_up_origin_on_another_head_is_unexpected_state(self) -> None:
+        """Exact-head invalidation reads every origin, not only the governing one."""
+        self.duplicate_state()
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        stale = payload["classification"]["blocking"][0]["origins"][0]
+        stale["provenance"]["head"] = HEAD_B
+        stale["head"] = HEAD_B
+        self.path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaises(StateError) as caught:
+            self.load()
+
+        self.assertEqual(caught.exception.evidence["finding_heads"], [HEAD_B])
+
+    def test_a_runner_up_origin_on_another_head_cannot_be_recorded(self) -> None:
+        state = self.load()
+        state.bind_head(HEAD_A)
+        with self.assertRaises(StateError) as caught:
+            state.record_classification(
+                classify(
+                    [
+                        make_finding("a", "blocking", "reviewer:A", head=HEAD_A),
+                        make_finding("a", "non-blocking", "reviewer:B", head=HEAD_B),
+                    ],
+                    clock=stopped_clock(),
+                )
+            )
+        self.assertEqual(caught.exception.evidence["finding_heads"], [HEAD_B])
 
     def test_a_journal_binding_findings_to_another_head_is_unexpected_state(self) -> None:
         self.saved_state()
@@ -523,6 +864,80 @@ class NeedsKaranRenderingTests(unittest.TestCase):
         self.assertEqual(item["provenance"]["location"]["line"], 4)
         self.assertEqual(item["lineage"][0]["to_category"], "needs-karan")
 
+    def duplicate_result(self) -> RunResult:
+        """One escalation two lanes raised, each from its own surface."""
+        return RunResult(
+            outcome=NEEDS_KARAN,
+            reason="needs-karan-finding",
+            head=HEAD_A,
+            branch="feat/example",
+            classification=classify(
+                [
+                    make_finding(
+                        "copy-tone",
+                        "non-blocking",
+                        "reviewer:A",
+                        summary="headline wording is a product call",
+                        provenance=make_provenance(
+                            "reviewer:A", kind="file-line", reference="web/hero.tsx", line=12,
+                            excerpt="evidence-A",
+                        ),
+                    ),
+                    make_finding(
+                        "copy-tone",
+                        "needs-karan",
+                        "reviewer:B",
+                        summary="headline wording is a product call",
+                        provenance=make_provenance(
+                            "reviewer:B", kind="review", reference="PRR_9", line=None,
+                            excerpt="evidence-B",
+                        ),
+                    ),
+                ],
+                clock=stopped_clock(),
+            ),
+            classification_head=HEAD_A,
+        )
+
+    def test_the_escalation_renders_every_origin_inline(self) -> None:
+        """PAPI99-RA-P1-001: Karan decides on both lanes' evidence or neither."""
+        text = report.to_markdown(self.duplicate_result())
+        self.assertIn("[reviewer:A, reviewer:B]", text)
+        self.assertIn("found by `A` (role `reviewer`)", text)
+        self.assertIn("found by `B` (role `reviewer`)", text)
+        self.assertIn("location: web/hero.tsx:12", text)
+        self.assertIn("location: review PRR_9", text)
+        self.assertIn("evidence: `evidence-A`", text)
+        self.assertIn("evidence: `evidence-B`", text)
+
+    def test_the_json_escalation_carries_every_origin(self) -> None:
+        payload = json.loads(report.to_json(self.duplicate_result()))
+        item = payload["classification"]["needs-karan"][0]
+        self.assertEqual(item["sources"], ["reviewer:A", "reviewer:B"])
+        self.assertEqual(
+            [origin["provenance"]["evidence_excerpt"] for origin in item["origins"]],
+            ["evidence-A", "evidence-B"],
+        )
+
+    def test_the_escalation_names_the_head_its_findings_were_produced_against(self) -> None:
+        text = report.to_markdown(self.duplicate_result())
+        self.assertIn(f"### Classification (exact head `{HEAD_A}`)", text)
+
+    def test_a_classification_from_another_head_is_marked_historical(self) -> None:
+        """Carrying a ledger into a report never silently re-dates it."""
+        result = self.duplicate_result()
+        text = report.to_markdown(
+            RunResult(
+                outcome=NEEDS_KARAN,
+                reason="stale-head",
+                head=HEAD_B,
+                classification=result.classification,
+                classification_head=HEAD_A,
+            )
+        )
+        self.assertIn("historical evidence only", text)
+        self.assertIn(f"produced against `{HEAD_A}`", text)
+
     def test_a_non_escalating_bucket_stays_a_one_liner(self) -> None:
         """Provenance is inline where a human must act on it, not everywhere."""
         result = RunResult(
@@ -598,6 +1013,46 @@ class LoopProvenanceTests(LoopHarness):
         self.assertEqual(provenance["head"], HEAD_A)
         self.assertIn("ID=null-deref", provenance["evidence_excerpt"])
         self.assertEqual(payload["blockers"][0]["lineage"][0]["to_category"], "blocking")
+
+    def test_two_lanes_raising_one_id_keep_both_lanes_evidence(self) -> None:
+        """The shipped path: A and B both raise it, and both claims reach the builder."""
+        loop = self.build()
+        self.script.add(
+            "lane-reviewer-A",
+            reviewer_output(HEAD_A, [("blocking", "null-deref", "crashes on empty input")]),
+        )
+        self.script.add(
+            "lane-reviewer-B",
+            reviewer_output(HEAD_A, [("blocking", "null-deref", "same crash, seen in review")]),
+        )
+        captured: dict[str, str] = {}
+
+        def capture() -> None:
+            call = next(call for call in self.runner.calls if call.argv[0] == "lane-builder")
+            captured["path"] = call.argv[call.argv.index("--blockers") + 1]
+
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"], status="failure"),
+            after=capture,
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        stored = self.state()["classification"]["blocking"][0]
+        self.assertEqual(stored["sources"], ["reviewer:A", "reviewer:B"])
+        self.assertEqual(
+            [origin["provenance"]["location"]["reference"] for origin in stored["origins"]],
+            ["reviewer:A", "reviewer:B"],
+        )
+        excerpts = [origin["provenance"]["evidence_excerpt"] for origin in stored["origins"]]
+        self.assertIn("crashes on empty input", excerpts[0])
+        self.assertIn("same crash, seen in review", excerpts[1])
+        # The frozen set the builder was handed carries the same two claims.
+        frozen = json.loads(Path(captured["path"]).read_text(encoding="utf-8"))["blockers"][0]
+        self.assertEqual(frozen["sources"], ["reviewer:A", "reviewer:B"])
+        self.assertEqual(len(frozen["origins"]), 2)
 
     def test_the_run_journal_holds_the_classification_it_reported(self) -> None:
         loop = self.build()

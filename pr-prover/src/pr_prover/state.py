@@ -343,9 +343,7 @@ class RunState:
                     "state file records findings without an inspected head to bind them to",
                     evidence={"state_file": str(path)},
                 )
-            off_head = sorted(
-                {item.finding.head for item in classification.all()} - {head}
-            )
+            off_head = sorted(_finding_heads(classification) - {head})
             if off_head:
                 raise StateError(
                     "state file records findings produced against a different head than the run",
@@ -453,7 +451,7 @@ class RunState:
                 "a classification cannot be recorded before a head is inspected",
                 evidence={"attempt": self.attempt},
             )
-        off_head = sorted({item.finding.head for item in classification.all()} - {self.head})
+        off_head = sorted(_finding_heads(classification) - {self.head})
         if off_head:
             raise StateError(
                 "a classification carries findings produced against a different head",
@@ -534,6 +532,17 @@ class RunState:
 
 def _is_full_sha(value: str) -> bool:
     return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+
+
+def _finding_heads(classification: Classification) -> set[str]:
+    """Every head any origin of any classified finding was produced against.
+
+    A finding two lanes raised carries both lanes' records, so the head check
+    reads all of them: a runner-up origin bound to an older commit is evidence
+    about code that may no longer be on the branch, and it must not ride into
+    the journal behind a governing claim that is on the right head.
+    """
+    return {head for item in classification.all() for head in item.heads}
 
 
 def _close_descriptor(handle: int) -> None:

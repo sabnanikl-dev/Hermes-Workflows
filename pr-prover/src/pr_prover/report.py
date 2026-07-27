@@ -28,7 +28,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .findings import provenance_lines
-from .loop import RunResult
+from .loop import NEEDS_KARAN, RunResult
 from .redaction import sanitize
 
 
@@ -64,6 +64,7 @@ def as_dict(result: RunResult) -> dict[str, Any]:
             for verdict in result.verdicts
         ],
         "classification": result.classification.as_dict() if result.classification else None,
+        "classification_head": result.classification_head,
         "failures": [record.as_dict() for record in result.failures],
         "events": list(result.events),
         "retained_paths": list(result.retained_paths),
@@ -111,17 +112,29 @@ def to_markdown(result: RunResult) -> str:
             )
 
     if payload["classification"] is not None:
-        lines += ["", "### Classification"]
+        bound = payload.get("classification_head")
+        # The findings are evidence about one exact commit, so the report says
+        # which one rather than letting a reader infer it from the outcome.
+        heading = f"### Classification (exact head `{bound}`)" if bound else "### Classification"
+        lines += ["", heading]
+        if bound and payload["head"] and bound != payload["head"]:
+            lines.append(
+                f"- historical evidence only: these findings were produced against `{bound}`, "
+                "not the head reported above"
+            )
+        # A needs-Karan report is the one a human has to act on without the
+        # run's context — including a fail-closed stop, where the ledger it
+        # reached is the whole subject of the escalation — so every finding it
+        # carries prints its provenance rather than sending Karan back to the
+        # raw lane output.
+        escalating = payload["outcome"] == NEEDS_KARAN
         for label, items in payload["classification"].items():
             if not items:
                 continue
             lines.append(f"- **{label}** ({len(items)})")
             for item in items:
                 lines.append(f"  - `{item['id']}` — {item['summary']} [{', '.join(item['sources'])}]")
-                # The escalation bucket is the one a human has to act on
-                # without the run's context, so it carries its provenance here
-                # rather than sending Karan back to the raw lane output.
-                if label == "needs-karan":
+                if escalating or label == "needs-karan":
                     lines += provenance_lines(item, indent="    ")
 
     if payload["failures"]:

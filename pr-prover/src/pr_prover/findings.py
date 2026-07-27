@@ -35,6 +35,16 @@ it about, from which category to which, and when — so a finding that two lanes
 raised at different severities, or that an adjudicator moved, records the
 decision rather than only its result. The clock is injected so the lineage is
 deterministic under test.
+
+Deduplication chooses which claim *governs* a finding id; it does not decide
+that the other lane's evidence stops existing. Every originating finding is kept
+whole in :attr:`ClassifiedFinding.origins`, with its own location and excerpt,
+and ``sources`` is read off that list rather than stored beside it — so a
+``needs-Karan`` packet can still show where each lane looked and what each one
+actually said. The record is held to its own identity in both directions: an
+origin or a lineage event attributed to a different finding id, and a governing
+finding that is not one of the origins it was chosen from, are refused rather
+than believed.
 """
 from __future__ import annotations
 
@@ -78,7 +88,7 @@ _EVENT_KEYS = frozenset(
     {"finding_id", "actor", "action", "from_category", "to_category", "at", "rationale"}
 )
 _FINDING_KEYS = frozenset({"id", "severity", "summary", "source", "head", "detail", "provenance"})
-_CLASSIFIED_KEYS = _FINDING_KEYS | {"category", "sources", "lineage"}
+_CLASSIFIED_KEYS = _FINDING_KEYS | {"category", "sources", "origins", "lineage"}
 
 Clock = Callable[[], str]
 
@@ -387,11 +397,19 @@ class Finding:
 
 @dataclass(frozen=True)
 class ClassifiedFinding:
-    """A finding, the category Hermes assigned it, every lane that raised it, and why."""
+    """A finding, the category Hermes assigned it, every lane that raised it, and why.
+
+    ``finding`` is the claim that governs the bucket. ``origins`` is every lane's
+    claim about this id, each one whole: its own typed location and its own
+    verbatim excerpt. Losing the runner-up would leave an escalation able to say
+    that a second lane agreed and unable to say where it looked or what it saw,
+    so the governing claim is a choice made *among* the origins rather than a
+    replacement for them, and ``sources`` is read back off that list.
+    """
 
     finding: Finding
     category: str
-    sources: tuple[str, ...]
+    origins: tuple[Finding, ...]
     lineage: tuple[ClassificationEvent, ...] = ()
 
     def __post_init__(self) -> None:
@@ -400,10 +418,56 @@ class ClassifiedFinding:
                 f"unknown finding category {self.category!r}",
                 evidence={"finding_id": self.finding.id, "category": str(self.category)},
             )
-        if not self.sources:
-            raise _incomplete("classified finding", "sources", {"finding_id": self.finding.id})
+        if not self.origins:
+            raise _incomplete("classified finding", "origins", {"finding_id": self.finding.id})
+        seen_sources: list[str] = []
+        for origin in self.origins:
+            if not isinstance(origin, Finding):
+                raise _incomplete("classified finding", "origins", {"finding_id": self.finding.id})
+            if origin.id != self.finding.id:
+                raise StateError(
+                    "classified finding carries an origin for a different finding",
+                    evidence={
+                        "finding_id": self.finding.id,
+                        "origin_finding_id": origin.id,
+                        "origin_source": origin.source,
+                    },
+                )
+            if origin.source in seen_sources:
+                raise StateError(
+                    "classified finding records the same origin lane twice",
+                    evidence={"finding_id": self.finding.id, "source": origin.source},
+                )
+            seen_sources.append(origin.source)
+        # The governing claim has to be one of the claims actually made. A
+        # ``finding`` that is not among its own origins is a record whose
+        # provenance describes lanes that never raised it.
+        if not any(origin == self.finding for origin in self.origins):
+            raise StateError(
+                "the governing finding is not among the origins it was chosen from",
+                evidence={
+                    "finding_id": self.finding.id,
+                    "governing_source": self.finding.source,
+                    "sources": list(seen_sources),
+                },
+            )
         if not self.lineage:
             raise _incomplete("classified finding", "lineage", {"finding_id": self.finding.id})
+        # Lineage is only decision history if it is *this* finding's decision
+        # history. Without the identity check a journal can claim that one
+        # finding's escalation was decided about another one, and the bucket
+        # check below would still pass.
+        for event in self.lineage:
+            if event.finding_id != self.finding.id:
+                raise StateError(
+                    "classification lineage is attributed to a different finding",
+                    evidence={
+                        "finding_id": self.finding.id,
+                        "lineage_finding_id": event.finding_id,
+                        "actor": event.actor,
+                        "at": event.at,
+                    },
+                )
         if self.lineage[-1].to_category != self.category:
             raise StateError(
                 "classification lineage does not end at the assigned category",
@@ -414,10 +478,21 @@ class ClassifiedFinding:
                 },
             )
 
+    @property
+    def sources(self) -> tuple[str, ...]:
+        """``role:agent`` for every lane that raised this id, in first-seen order."""
+        return tuple(origin.source for origin in self.origins)
+
+    @property
+    def heads(self) -> frozenset[str]:
+        """Every exact head any origin of this finding was produced against."""
+        return frozenset(origin.head for origin in self.origins)
+
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = dict(self.finding.as_dict())
         payload["category"] = self.category
         payload["sources"] = list(self.sources)
+        payload["origins"] = [origin.as_dict() for origin in self.origins]
         payload["lineage"] = [event.as_dict() for event in self.lineage]
         return payload
 
@@ -429,20 +504,35 @@ class ClassifiedFinding:
         sources = raw.get("sources")
         if not isinstance(sources, (list, tuple)) or not sources:
             raise _incomplete("classified finding", "sources")
+        origins = raw.get("origins")
+        if not isinstance(origins, (list, tuple)) or not origins:
+            raise _incomplete("classified finding", "origins")
         lineage = raw.get("lineage")
         if not isinstance(lineage, (list, tuple)) or not lineage:
             raise _incomplete("classified finding", "lineage")
         finding = Finding.from_dict(
             {key: value for key, value in raw.items() if key in _FINDING_KEYS}
         )
-        return cls(
+        classified = cls(
             finding=finding,
             category=raw.get("category"),
-            sources=tuple(
-                _text(source, what="classified finding", field="sources") for source in sources
-            ),
+            origins=tuple(Finding.from_dict(origin) for origin in origins),
             lineage=tuple(ClassificationEvent.from_dict(event) for event in lineage),
         )
+        # ``sources`` is rendered for readers, exactly as a finding's ``source``
+        # is: stored so a report can be read without reassembling it, and never
+        # read back as authority over the origins it was rendered from.
+        stored = [str(source) for source in sources]
+        if stored != list(classified.sources):
+            raise StateError(
+                "stored classified finding sources disagree with its origins",
+                evidence={
+                    "finding_id": classified.finding.id,
+                    "stored": stored,
+                    "origins": list(classified.sources),
+                },
+            )
+        return classified
 
 
 @dataclass(frozen=True)
@@ -562,15 +652,26 @@ def classify(
         previous = chosen.get(finding.id)
         if previous is None:
             chosen[finding.id] = ClassifiedFinding(
-                finding=finding, category=category, sources=(finding.source,), lineage=(decided,)
+                finding=finding, category=category, origins=(finding,), lineage=(decided,)
             )
             continue
-        sources = previous.sources + tuple(
-            source for source in (finding.source,) if source not in previous.sources
-        )
         keep_previous = _PRECEDENCE[previous.category] <= _PRECEDENCE[category]
         winning_finding = previous.finding if keep_previous else finding
         winning_category = previous.category if keep_previous else category
+        # Every lane keeps its own claim whole. A second lane appends its
+        # finding — location, excerpt and all — and a lane restating an id it
+        # already raised replaces its own earlier claim only when that later
+        # claim is the one that governs, so ``origins`` stays one entry per lane
+        # and still contains whatever ``winning_finding`` is.
+        if finding.source not in previous.sources:
+            origins = previous.origins + (finding,)
+        elif keep_previous:
+            origins = previous.origins
+        else:
+            origins = tuple(
+                finding if origin.source == finding.source else origin
+                for origin in previous.origins
+            )
         lineage = previous.lineage + (decided,)
         # Two lanes disagreeing about one id is itself a decision, and it is
         # recorded as one rather than left to be inferred from the bucket that
@@ -609,7 +710,7 @@ def classify(
         chosen[finding.id] = ClassifiedFinding(
             finding=winning_finding,
             category=winning_category,
-            sources=sources,
+            origins=origins,
             lineage=lineage,
         )
 
@@ -626,32 +727,43 @@ def classify(
 
 
 def provenance_lines(payload: Mapping[str, Any], *, indent: str = "") -> list[str]:
-    """Render one already-sanitized finding's provenance as Markdown bullets.
+    """Render one already-sanitized classified finding's provenance as Markdown bullets.
 
     The escalation report and any other reader share this one rendering, so a
     ``needs-Karan`` packet shows who found what, where, and on what evidence
-    without anybody re-deriving it from the raw lane output.
+    without anybody re-deriving it from the raw lane output. Every origin is
+    rendered, not only the claim that governs the bucket: two lanes raising one
+    id looked at two places and quoted two excerpts, and an escalation that
+    printed one of them would be asking Karan to decide on half the evidence.
     """
-    provenance = payload.get("provenance") or {}
-    location = provenance.get("location") or {}
     # Rendered from the sanitized payload rather than the live object, so the
     # renderer never re-validates — a redacted or elided value is displayed as
-    # what it is instead of failing the report that carries it.
-    kind = location.get("kind", "unknown")
-    reference = location.get("reference", "unknown")
-    line = location.get("line")
-    if kind == "file-line":
-        where = f"{reference}:{line}"
-    elif line is not None:
-        where = f"{kind} {reference} line {line}"
-    else:
-        where = f"{kind} {reference}"
-    lines = [
-        f"{indent}- found by `{provenance.get('agent_id', 'unknown')}` "
-        f"(role `{provenance.get('role', 'unknown')}`) on head `{provenance.get('head', 'unknown')}`",
-        f"{indent}- location: {where}",
-        f"{indent}- evidence: `{provenance.get('evidence_excerpt', '')}`",
-    ]
+    # what it is instead of failing the report that carries it. A payload with
+    # no ``origins`` (a bare finding rather than a classified one) is its own
+    # single origin.
+    origins: Sequence[Any] = payload.get("origins") or (payload,)
+    lines: list[str] = []
+    for origin in origins:
+        if not isinstance(origin, Mapping):
+            continue
+        provenance = origin.get("provenance") or {}
+        location = provenance.get("location") or {}
+        kind = location.get("kind", "unknown")
+        reference = location.get("reference", "unknown")
+        line = location.get("line")
+        if kind == "file-line":
+            where = f"{reference}:{line}"
+        elif line is not None:
+            where = f"{kind} {reference} line {line}"
+        else:
+            where = f"{kind} {reference}"
+        lines += [
+            f"{indent}- found by `{provenance.get('agent_id', 'unknown')}` "
+            f"(role `{provenance.get('role', 'unknown')}`) on head "
+            f"`{provenance.get('head', 'unknown')}`",
+            f"{indent}- location: {where}",
+            f"{indent}- evidence: `{provenance.get('evidence_excerpt', '')}`",
+        ]
     lineage: Sequence[Any] = payload.get("lineage") or ()
     for event in lineage:
         if not isinstance(event, Mapping):

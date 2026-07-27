@@ -8,11 +8,15 @@ and the builder's next-instruction block are two renderings of that one record.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
-from _support import HEAD_A, HEAD_B, builder_output, fix_comment, reviewer_output
+from _support import BUILDER_LOGIN, HEAD_A, HEAD_B, builder_output, fix_comment, reviewer_output
+from pr_prover import cli
 from pr_prover import report
 from pr_prover.errors import (
     CLASSIFICATION_STOP,
@@ -409,6 +413,91 @@ class LoopFailureRecordTests(LoopHarness):
         self.assertEqual(self.classes(result), ["readback-mismatch"])
         self.assertIn("signature", " ".join(result.failures[0].remediation))
 
+    def assert_sole_candidate_failed(self, result: RunResult, failed: list[str]) -> None:
+        """PAPI99-RA-P1-003: the record names which condition this candidate missed."""
+        observed = result.failures[0].evidence["observed"]
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["failed_conditions"], failed)
+        self.assertEqual(observed[0]["author_matches"], "author" not in failed)
+        self.assertEqual(observed[0]["signature_present"], "signature" not in failed)
+        self.assertEqual(observed[0]["head_present"], "head" not in failed)
+        self.assertTrue(observed[0]["comment_id"])
+
+    def test_a_readback_record_distinguishes_the_wrong_login(self) -> None:
+        result = self.readback_failure(
+            lambda self: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B), author="someone-else")
+        )
+        self.assert_sole_candidate_failed(result, ["author"])
+
+    def test_a_readback_record_distinguishes_a_missing_signature(self) -> None:
+        result = self.readback_failure(
+            lambda self: self.remote.push(HEAD_B, comment=f"pushed {HEAD_B}\n")
+        )
+        self.assert_sole_candidate_failed(result, ["signature"])
+
+    def test_a_readback_record_distinguishes_a_comment_about_the_previous_head(self) -> None:
+        result = self.readback_failure(
+            lambda self: self.remote.push(HEAD_B, comment=fix_comment(HEAD_A))
+        )
+        self.assert_sole_candidate_failed(result, ["head"])
+
+    def test_a_readback_record_states_what_was_expected(self) -> None:
+        result = self.readback_failure(
+            lambda self: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B), author="someone-else")
+        )
+        evidence = result.failures[0].evidence
+        self.assertIn(BUILDER_LOGIN, evidence["expected"])
+        self.assertIn(HEAD_B, evidence["expected"])
+        self.assertIn("1 comment(s) posted since the builder was invoked", evidence["actual"])
+
+    def test_a_readback_with_no_new_comment_says_so(self) -> None:
+        result = self.readback_failure(lambda self: self.remote.push(HEAD_B))
+        evidence = result.failures[0].evidence
+        self.assertEqual(evidence["observed"], [])
+        self.assertEqual(evidence["comments_since_builder_invoked"], 0)
+        self.assertIn("no comment was posted", evidence["actual"])
+
+    def test_the_observed_evidence_is_bounded(self) -> None:
+        """Enough to name the failing condition on each candidate, never the whole PR."""
+
+        def noisy(self) -> None:
+            self.remote.push(HEAD_B)
+            for index in range(12):
+                self.remote.comment(f"unrelated note {index}\n")
+
+        result = self.readback_failure(noisy)
+        evidence = result.failures[0].evidence
+        self.assertEqual(evidence["comments_since_builder_invoked"], 12)
+        self.assertEqual(len(evidence["observed"]), 10)
+        self.assertEqual(evidence["observed_not_described"], 2)
+
+    def test_both_renderings_carry_the_observed_evidence(self) -> None:
+        result = self.readback_failure(
+            lambda self: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B), author="someone-else")
+        )
+
+        markdown = report.to_markdown(result)
+        self.assertIn("observed", markdown)
+        self.assertIn("author_matches", markdown)
+        self.assertIn("failed_conditions", markdown)
+
+        rendered = json.loads(report.to_json(result))["failures"][0]
+        self.assertEqual(rendered["evidence"]["observed"][0]["failed_conditions"], ["author"])
+        self.assertEqual(rendered["evidence"]["observed"][0]["author"], "someone-else")
+
+    def readback_failure(self, push) -> RunResult:
+        """One fix cycle whose push lands and whose fix comment does not read back."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: push(self),
+        )
+        result = loop.run()
+        self.assertEqual(self.classes(result), ["readback-mismatch"])
+        return result
+
     def test_a_clean_run_emits_no_records(self) -> None:
         loop = self.build()
         self.review_round(HEAD_A)
@@ -432,6 +521,187 @@ class LoopFailureRecordTests(LoopHarness):
         result = loop.run()
 
         self.assertEqual(result.failures, (), "a fixed gate must not still be reported as failing")
+
+
+class FailClosedLedgerTests(LoopHarness):
+    """PAPI99-RB-002: a fail-closed escalation carries the ledger it reached.
+
+    Stopping after classification does not make the classification stop being
+    the subject of the escalation. The report hands Karan the frozen blockers,
+    their provenance, and the exact head they were produced against — without
+    letting evidence from a head that has since moved ride along.
+    """
+
+    def refusal(self) -> RunResult:
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder", builder_output(HEAD_B, addressed=["null-deref"], status="failure")
+        )
+        result = loop.run()
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "builder-refusal")
+        return result
+
+    def test_a_builder_refusal_still_reports_the_current_head_ledger(self) -> None:
+        result = self.refusal()
+        self.assertIsNotNone(result.classification)
+        self.assertEqual(
+            [item.finding.id for item in result.classification.blocking], ["null-deref"]
+        )
+        self.assertEqual(result.classification_head, HEAD_A)
+
+    def test_the_reported_ledger_is_the_one_the_journal_holds(self) -> None:
+        result = self.refusal()
+        self.assertEqual(
+            result.classification.as_dict(), self.state()["classification"]
+        )
+
+    def test_the_escalation_renders_the_blocker_and_its_provenance(self) -> None:
+        text = report.to_markdown(self.refusal())
+        self.assertIn(f"### Classification (exact head `{HEAD_A}`)", text)
+        self.assertIn("`null-deref`", text)
+        self.assertIn("found by `A` (role `reviewer`)", text)
+        self.assertIn(f"on head `{HEAD_A}`", text)
+        self.assertIn("ID=null-deref", text)
+        self.assertNotIn("historical evidence only", text)
+
+    def test_the_json_escalation_carries_the_ledger_and_its_head(self) -> None:
+        payload = json.loads(report.to_json(self.refusal()))
+        self.assertEqual(payload["classification_head"], HEAD_A)
+        self.assertEqual(
+            [item["id"] for item in payload["classification"]["blocking"]], ["null-deref"]
+        )
+        self.assertEqual(
+            payload["classification"]["blocking"][0]["provenance"]["agent_id"], "A"
+        )
+
+    def test_a_stop_before_classification_carries_no_ledger(self) -> None:
+        """Nothing is invented: a run that never classified reports nothing to classify."""
+        loop = self.build()
+        self.script.add("lane-reviewer-A", "looks fine to me\n")
+
+        result = loop.run()
+
+        self.assertEqual(
+            [record.failure_class for record in result.failures], ["malformed-verdict"]
+        )
+        self.assertIsNone(result.classification)
+        self.assertIsNone(result.classification_head)
+        self.assertNotIn("### Classification", report.to_markdown(result))
+
+    def test_a_stop_after_a_push_does_not_carry_the_old_heads_ledger(self) -> None:
+        """Invalidation is untouched: the pushed-away head's findings do not ride along."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+        self.script.add("lane-reviewer-A", "no marker here\n")
+
+        result = loop.run()
+
+        self.assertEqual(
+            [record.failure_class for record in result.failures], ["malformed-verdict"]
+        )
+        self.assertEqual(result.head, HEAD_B)
+        self.assertIsNone(result.classification)
+        self.assertNotIn("null-deref", report.to_markdown(result))
+
+
+class CliStructuredFailureTests(unittest.TestCase):
+    """IA-PAPI99-002: a declared class does not get prose instead of a record.
+
+    ``invalid-config`` and ``invalid-command`` stop the run before a
+    :class:`RunResult` exists. They are in the shipped taxonomy with playbooks,
+    so they reach the same record and the same two renderings as every stop the
+    loop itself reaches.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-cli-failure-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name).resolve()
+        self.bad = self.tmp / "run.json"
+        self.bad.write_text("{}", encoding="utf-8")
+
+    def invoke(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_an_invalid_config_emits_the_builder_facing_json_block(self) -> None:
+        """The auditor's reproducer: exit 64 with a record, not zero stdout bytes."""
+        code, out, err = self.invoke(["run", "--config", str(self.bad), "--json"])
+
+        self.assertEqual(code, cli.USAGE_ERROR)
+        record = json.loads(out)
+        self.assertEqual(record["failure_class"], "invalid-config")
+        self.assertIn("schema_version", record["what_failed"])
+        self.assertTrue(record["remediation"])
+        self.assertTrue(record["escalation"])
+        self.assertIn("invalid-config", err)
+
+    def test_an_invalid_config_emits_the_human_summary_and_the_same_record(self) -> None:
+        code, out, _ = self.invoke(["run", "--config", str(self.bad)])
+
+        self.assertEqual(code, cli.USAGE_ERROR)
+        self.assertIn("stopped before the run started", out)
+        self.assertIn("#### `invalid-config`", out)
+        self.assertIn("bounded remediation the builder may attempt", out)
+        self.assertIn("escalate instead when:", out)
+        fenced = json.loads(out.split("```json")[1].split("```")[0])
+        self.assertEqual(fenced["failure_class"], "invalid-config")
+        self.assertEqual(fenced["remediation"], list(_STOP_ONLY_STEPS))
+
+    def test_check_config_reports_the_same_record(self) -> None:
+        code, out, _ = self.invoke(["check-config", "--config", str(self.bad)])
+        self.assertEqual(code, cli.USAGE_ERROR)
+        self.assertIn("#### `invalid-config`", out)
+
+    def test_an_absent_config_is_still_a_record(self) -> None:
+        code, out, _ = self.invoke(["run", "--config", str(self.tmp / "absent.json"), "--json"])
+        self.assertEqual(code, cli.USAGE_ERROR)
+        self.assertEqual(json.loads(out)["failure_class"], "invalid-config")
+
+    def test_the_record_passes_the_same_redaction_boundary_as_the_report(self) -> None:
+        secret = "ghp_0123456789abcdefghijABCDEFGHIJ0123"
+        self.bad.write_text(
+            json.dumps({"schema_version": 1, "repo": secret}), encoding="utf-8"
+        )
+
+        code, out, _ = self.invoke(["run", "--config", str(self.bad), "--json"])
+
+        self.assertEqual(code, cli.USAGE_ERROR)
+        self.assertNotIn(secret, out)
+        self.assertIn("<redacted>", out)
+
+    def test_the_invalid_command_class_renders_through_the_same_path(self) -> None:
+        """The other pre-loop class shares one renderer with the config one above."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = cli._fail_closed(
+                CommandContractError("gate argv is not a list", evidence={"gate": "tests"}),
+                as_json=True,
+            )
+
+        self.assertEqual(code, cli.USAGE_ERROR)
+        record = json.loads(out.getvalue())
+        self.assertEqual(record["failure_class"], "invalid-command")
+        self.assertEqual(record["evidence"]["gate"], "tests")
+        self.assertTrue(record["remediation"])
+        self.assertTrue(record["escalation"])
+
+
+# The stop-only playbook, spelled here so the CLI rendering is checked against
+# the shipped steps rather than against itself.
+_STOP_ONLY_STEPS = (
+    "make no further change and push nothing for this head",
+    "report the failure verbatim, including the evidence below",
+)
 
 
 if __name__ == "__main__":  # pragma: no cover
