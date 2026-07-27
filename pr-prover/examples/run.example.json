@@ -9,6 +9,7 @@
   "state_file": "/tmp/pr-prover-owner-name-89.state.json",
   "lock_file": "/tmp/pr-prover-owner-name-89.lock",
   "visual_qa_required": false,
+  "governing_issues": [1],
   "gates": [
     {
       "name": "tests",

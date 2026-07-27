@@ -911,6 +911,7 @@ class CliStructuredFailureTests(unittest.TestCase):
             "schema_version": CONFIG_SCHEMA_VERSION,
             "repo": "example/repo",
             "pr": 7,
+            "governing_issues": [1],
             "source_repo": str(clone),
             "worktree_root": str(self.tmp / "worktrees"),
             "state_file": str(self.tmp / "state.json"),

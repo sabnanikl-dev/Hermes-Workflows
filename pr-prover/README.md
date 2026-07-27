@@ -56,7 +56,7 @@ its `reviewers` were a free list of lanes, with no required `role`,
 `artifact_author`, or `artifact_signature` and no fixed three-role lifecycle. One
 version number cannot truthfully denote both shapes, so the discriminator was
 bumped rather than left in place over new semantics. A v1 file is refused with
-the four ordered upgrade steps printed as a structured `invalid-config` record —
+the ordered upgrade steps printed as a structured `invalid-config` record —
 there is no migration layer, because the edit is mechanical and a migration would
 be more machinery than the break is worth. The state journal keeps its own schema
 version, which is independent of this one.
@@ -84,6 +84,15 @@ tokens, and an unknown token fails the run rather than rendering literally:
 builder comments under. See [Fix-comment readback](#fix-comment-readback). Each
 reviewer's `artifact_author` is required for the same reason — see
 [The reviewer artifact lifecycle](#the-reviewer-artifact-lifecycle).
+
+`governing_issues` is **required** and must name at least one issue number. It is
+the task contract: the reviewers are handed those issue bodies in their frozen
+packet, because a lane judging shrunken scope or acceptance criteria needs the
+document those are written in. It lives here, and not in anything parsed out of
+the pull request, because a PR body is untrusted prose — a PR that says
+`Refs #1` closes nothing, and one that says `Closes #999` names whatever its
+author typed. Which contract a change is measured against is not a question the
+change gets to answer.
 
 `env` and `env_unset` are a small **named overlay** on the environment a lane
 inherits, never a replacement for it. The trusted agents run as the operator's
@@ -148,8 +157,9 @@ Two are repository-owned, and the example config wires both:
   credential and no reachable `gh` login**, and writes its finished artifact to
   `{artifact_file}`. It refuses to run if a token variable is set, if
   `GH_CONFIG_DIR` is unset or still holds a `gh` hosts file, or if the packet at
-  `{evidence_packet}` is missing, empty, or bound to another repo, PR, base, or
-  head — each of those is the lifecycle being misconfigured, and running anyway
+  `{evidence_packet}` is missing, empty, bound to another repo, PR, base, or
+  head, or carrying none of the task contract its prompt sends the reviewer to
+  read — each of those is the lifecycle being misconfigured, and running anyway
   would hide it. Its prompt points at the packet rather than at live `gh`, and
   is deliberately **adversarial**: the reviewer's
   job on a fixed head is to try to *kill* the change — bad-faith passes,
@@ -213,16 +223,36 @@ frozen evidence packet → credential-free audit
 A lane with no way to reach GitHub cannot inspect the PR, so the parent reads it
 and freezes what it read to `{evidence_packet}` — a JSON file outside every
 repository, written before the lane launches and cleared with the rest of the
-scratch directory afterwards. It carries the pull request's own state, the
-conversation comments, the submitted reviews with their `commit_id`s, the inline
-review comments, the check runs for this exact commit, and the issues the PR
-closes. The `base..head` diff and the commit history are *not* in it: the lane
-has a real checkout and reads those with `git`.
+scratch directory afterwards. It carries exactly these surfaces:
+
+| Surface | What it is |
+|---|---|
+| `pull_request_body` | the live PR description — the change's own stated contract |
+| `governing_issues` | the body of each issue `governing_issues` names: the task contract |
+| `conversation_comments` | the PR conversation |
+| `reviews` | submitted reviews, with their `commit_id`s |
+| `inline_comments` | what was said inline on the diff |
+| `check_runs` | the checks GitHub recorded for this exact commit |
+| `linked_issues` | the issues the PR itself *claims* to close |
+
+The `base..head` diff and the commit history are *not* in it: the lane has a real
+checkout and reads those with `git`.
+
+The first two are why the rest are worth having. The reviewer prompt tells a lane
+to check the PR body for stale claims and to judge scope against the issue's
+acceptance criteria; a lane handed neither can complete both kill switches
+without ever seeing their source. They are also the two the PR cannot supply for
+itself: `linked_issues` is what the PR *says* about which issues it closes, which
+is evidence about the PR rather than authority over it, and a PR using `Refs #1`
+closes nothing at all.
 
 Each surface says how it was read and whether that read reached the end. An
 incomplete surface is not an error — the conversation-comment read carries no
 pagination guarantee yet, and proving it does is PAPI-97's obligation (M5) — but
-it is stated, so a reviewer cannot mistake a first page for a whole PR.
+it is stated, so a reviewer cannot mistake a first page for a whole PR. The two
+contract surfaces are the exception: they are not reads that may honestly come
+back empty, so an empty or clipped one stops the lane rather than being handed
+over as evidence.
 
 The packet binds itself with one canonical line:
 
@@ -231,13 +261,24 @@ REPO=<owner/name> PR=<number> BASE=<ref> HEAD=<40-hex sha> SEQUENCE=<n>
 ```
 
 `SEQUENCE` is per-run and strictly increasing, so a packet belongs to one lane
-and no lane can be handed another's. The loop writes the packet and then reads
-it back and holds it to that line, for the same reason it reads its artifacts
-back from GitHub: what a lane is handed is the file on disk, not the payload the
-process assembled. The adapter checks the same line again from its own
-arguments. A packet that did not land, landed empty, or was left at that path by
-an earlier cycle stops the lane **before** it is launched, rather than producing
-a confident review of the wrong head.
+and no lane can be handed another's — the number and the lane's own name and
+role are both written into the file and both checked. The loop writes the packet
+and then reads it back and holds it to all of that, for the same reason it reads
+its artifacts back from GitHub: what a lane is handed is the file on disk, not
+the payload the process assembled. The adapter checks the binding line and the
+two contract surfaces again from its own arguments. A packet that did not land,
+landed empty, or was left at that path by an earlier cycle stops the lane
+**before** it is launched, rather than producing a confident review of the wrong
+head.
+
+Binding is necessary and not sufficient, so the shape is validated too. Every
+required surface must be present, with a boolean `complete`, a non-empty
+`read_as`, a non-negative integer `count`, a list of `items`, and a count that
+equals how many there are; `schema_version` and `SEQUENCE` must be actual
+integers, because Python reads `true` as `1` and a JSON boolean would otherwise
+satisfy both. A file that keeps the binding and loses the evidence is the one
+failure a reviewer cannot detect from the inside: every one of those surfaces
+would simply read as *nothing to see here*.
 
 Everything inside is untrusted evidence. The whole payload goes through the same
 recursive redaction the report and the frozen blocker file do, with the clip set

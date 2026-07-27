@@ -12,10 +12,10 @@ from _support import BUILDER_LOGIN, HEAD_A, make_finding, make_source_repo
 from pr_prover import cli, redaction
 from pr_prover.commands import CommandResult
 from pr_prover.config import _V1_UPGRADE_STEPS as V1_UPGRADE_STEPS
-from pr_prover.config import SCHEMA_VERSION, RunConfig
+from pr_prover.config import MAX_GOVERNING_ISSUES, SCHEMA_VERSION, RunConfig
 from pr_prover.errors import CommandContractError, ConfigError, GitHubError, StateError
 from pr_prover.findings import Finding, classify
-from pr_prover.github import GhCliGitHub
+from pr_prover.github import _PR_FIELDS, GhCliGitHub
 
 
 def finding(identifier: str, severity: str = "blocking", source: str = "reviewer:A") -> Finding:
@@ -89,6 +89,7 @@ class GhBoundaryTests(unittest.TestCase):
             "headRefName": "feat/example",
             "headRefOid": HEAD_A,
             "baseRefName": "main",
+            "body": "the change's own stated contract",
         }
         body.update(overrides)
         return json.dumps(body)
@@ -97,6 +98,28 @@ class GhBoundaryTests(unittest.TestCase):
         pull = self.boundary(self.payload()).pull_request("example/repo", 7)
         self.assertEqual(pull.head_ref_oid, HEAD_A)
         self.assertTrue(pull.is_draft)
+        self.assertEqual(pull.body, "the change's own stated contract")
+
+    def test_the_pr_body_is_read_because_the_reviewer_cannot_read_it(self) -> None:
+        """The body is the contract a reviewer checks stale claims against.
+
+        A relayed lane has no credential and no second chance at this text, so
+        an absent or null field is a read that did not deliver it — not a PR
+        that has nothing to say about itself.
+        """
+        self.assertIn("body", _PR_FIELDS.split(","))
+        empty = self.boundary(self.payload(body="")).pull_request("example/repo", 7)
+        self.assertEqual(empty.body, "")
+        for label, value in (("missing", None), ("null", None), ("not text", 12)):
+            with self.subTest(body=label):
+                body = json.loads(self.payload())
+                if label == "missing":
+                    del body["body"]
+                else:
+                    body["body"] = value
+                with self.assertRaises(GitHubError) as caught:
+                    self.boundary(json.dumps(body)).pull_request("example/repo", 7)
+                self.assertIn("missing its body", caught.exception.message)
 
     def test_gh_is_invoked_as_an_argv_array_with_the_json_fields(self) -> None:
         seen: list[tuple[str, ...]] = []
@@ -208,13 +231,21 @@ class GhReviewEvidenceTests(unittest.TestCase):
             {"number": 1, "title": "mission", "state": "OPEN", "url": "https://example.invalid/1"}
         ]
     }
+    GOVERNING = {
+        "number": 1,
+        "title": "mission contract",
+        "state": "OPEN",
+        "url": "https://example.invalid/issues/1",
+        "body": "ACCEPTANCE: the contract this change is measured against",
+    }
 
-    def boundary(self, *, inline=None, checks=None, issues=None) -> GhCliGitHub:
-        """A runner that answers each of the three reads with its own payload."""
+    def boundary(self, *, inline=None, checks=None, issues=None, governing=None) -> GhCliGitHub:
+        """A runner that answers each of the four reads with its own payload."""
         pages = {
             "comments?": json.dumps([self.INLINE if inline is None else inline]),
             "check-runs?": json.dumps([self.CHECKS if checks is None else checks]),
             "closingIssuesReferences": json.dumps(self.ISSUES if issues is None else issues),
+            "gh issue view": json.dumps(self.GOVERNING if governing is None else governing),
         }
         self.seen: list[tuple[str, ...]] = []
 
@@ -231,8 +262,11 @@ class GhReviewEvidenceTests(unittest.TestCase):
 
         return GhCliGitHub(Scripted())
 
-    def test_the_three_surfaces_are_read_and_carried(self) -> None:
-        evidence = self.boundary().review_evidence("example/repo", 7, HEAD_A)
+    def read(self, boundary: GhCliGitHub, *, governing_issues=(1,)):
+        return boundary.review_evidence("example/repo", 7, HEAD_A, governing_issues)
+
+    def test_the_four_surfaces_are_read_and_carried(self) -> None:
+        evidence = self.read(self.boundary())
 
         self.assertEqual(evidence.inline_comments[0].identifier, "inline:11")
         self.assertEqual(evidence.inline_comments[0].path, "src/thing.py")
@@ -241,19 +275,47 @@ class GhReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.inline_comments[0].commit_id, HEAD_A)
         self.assertEqual(evidence.check_runs[0].conclusion, "success")
         self.assertEqual(evidence.linked_issues[0].number, 1)
+        self.assertEqual(evidence.governing_issues[0].number, 1)
+        self.assertIn("ACCEPTANCE", evidence.governing_issues[0].body)
+
+    def test_the_governing_issue_is_asked_for_by_configured_number(self) -> None:
+        """Authority comes from the run config, never from the PR's own prose."""
+        self.read(self.boundary(), governing_issues=(1,))
+        issue_reads = [argv for argv in self.seen if argv[1:3] == ("issue", "view")]
+        self.assertEqual(len(issue_reads), 1)
+        self.assertEqual(issue_reads[0][:6], ("gh", "issue", "view", "1", "--repo", "example/repo"))
+        self.assertIn("body", issue_reads[0][-1].split(","))
+
+    def test_a_governing_issue_without_a_body_fails_closed(self) -> None:
+        """A contract read that delivered no contract is not a thin issue."""
+        for label, payload in (
+            ("no body", {"number": 1, "title": "x", "state": "OPEN"}),
+            ("null body", {"number": 1, "body": None}),
+            ("another issue", {"number": 2, "body": "wrong contract"}),
+        ):
+            with self.subTest(payload=label):
+                with self.assertRaises(GitHubError):
+                    self.read(self.boundary(governing=payload))
 
     def test_each_read_that_can_prove_completeness_claims_it(self) -> None:
-        evidence = self.boundary().review_evidence("example/repo", 7, HEAD_A)
+        evidence = self.read(self.boundary())
 
         self.assertTrue(evidence.inline_comments_complete)
         self.assertTrue(evidence.check_runs_complete)
         self.assertTrue(evidence.linked_issues_complete)
+        self.assertTrue(evidence.governing_issues_complete)
         self.assertTrue(evidence.reviews_complete)
         # ...and the one that cannot does not. M5 is owed by PAPI-97.
         self.assertFalse(evidence.conversation_comments_complete)
 
+    def test_no_configured_governing_issue_is_not_a_complete_contract(self) -> None:
+        """Config refuses this, and the boundary does not paper over it either."""
+        evidence = self.read(self.boundary(), governing_issues=())
+        self.assertEqual(evidence.governing_issues, ())
+        self.assertFalse(evidence.governing_issues_complete)
+
     def test_the_paginated_reads_ask_gh_to_paginate(self) -> None:
-        self.boundary().review_evidence("example/repo", 7, HEAD_A)
+        self.read(self.boundary())
         paginated = [argv for argv in self.seen if "--paginate" in argv]
         self.assertEqual(len(paginated), 2)
         for argv in paginated:
@@ -262,16 +324,14 @@ class GhReviewEvidenceTests(unittest.TestCase):
 
     def test_fewer_check_runs_than_github_counted_is_not_complete(self) -> None:
         """The one surface that states its own total, held to it."""
-        evidence = self.boundary(
-            checks={"total_count": 3, "check_runs": self.CHECKS["check_runs"]}
-        ).review_evidence("example/repo", 7, HEAD_A)
+        evidence = self.read(
+            self.boundary(checks={"total_count": 3, "check_runs": self.CHECKS["check_runs"]})
+        )
         self.assertEqual(len(evidence.check_runs), 1)
         self.assertFalse(evidence.check_runs_complete)
 
     def test_a_head_with_no_checks_is_complete_rather_than_unknown(self) -> None:
-        evidence = self.boundary(
-            checks={"total_count": 0, "check_runs": []}
-        ).review_evidence("example/repo", 7, HEAD_A)
+        evidence = self.read(self.boundary(checks={"total_count": 0, "check_runs": []}))
         self.assertEqual(evidence.check_runs, ())
         self.assertTrue(evidence.check_runs_complete)
 
@@ -279,17 +339,31 @@ class GhReviewEvidenceTests(unittest.TestCase):
         """A full page and a truncated one are the same response."""
         issues = {
             "closingIssuesReferences": [
-                {"number": index, "title": "x", "state": "OPEN"} for index in range(100)
+                {"number": index + 1, "title": "x", "state": "OPEN"} for index in range(100)
             ]
         }
-        evidence = self.boundary(issues=issues).review_evidence("example/repo", 7, HEAD_A)
+        evidence = self.read(self.boundary(issues=issues))
         self.assertEqual(len(evidence.linked_issues), 100)
         self.assertFalse(evidence.linked_issues_complete)
 
-    def test_a_pr_that_closes_nothing_is_complete(self) -> None:
-        evidence = self.boundary(issues={}).review_evidence("example/repo", 7, HEAD_A)
+    def test_a_pr_that_closes_nothing_says_so_with_an_empty_array(self) -> None:
+        """Present-and-empty is a fact; absent is a read that did not happen.
+
+        This PR's own ``Refs #1`` closes nothing, so the empty array is the
+        ordinary shipped answer — and it must stay distinguishable from a
+        response that never carried the requested field at all.
+        """
+        evidence = self.read(self.boundary(issues={"closingIssuesReferences": []}))
         self.assertEqual(evidence.linked_issues, ())
         self.assertTrue(evidence.linked_issues_complete)
+
+    def test_absent_or_null_closing_references_are_not_a_complete_empty_read(self) -> None:
+        """Former red: both used to arrive as an empty, *complete* surface."""
+        for label, issues in (("absent", {}), ("null", {"closingIssuesReferences": None})):
+            with self.subTest(payload=label):
+                with self.assertRaises(GitHubError) as caught:
+                    self.read(self.boundary(issues=issues))
+                self.assertIn("closingIssuesReferences", caught.exception.message)
 
     def test_an_unusable_payload_fails_closed_rather_than_reading_as_empty(self) -> None:
         for label, kwargs in (
@@ -302,7 +376,7 @@ class GhReviewEvidenceTests(unittest.TestCase):
         ):
             with self.subTest(payload=label):
                 with self.assertRaises(GitHubError):
-                    self.boundary(**kwargs).review_evidence("example/repo", 7, HEAD_A)
+                    self.read(self.boundary(**kwargs))
 
 
 class RedactionTests(unittest.TestCase):
@@ -484,6 +558,7 @@ class ConfigTests(unittest.TestCase):
             "schema_version": SCHEMA_VERSION,
             "repo": "example/repo",
             "pr": 7,
+            "governing_issues": [1],
             "source_repo": str(self.clone),
             "worktree_root": "worktrees",
             "state_file": "state.json",
@@ -621,6 +696,49 @@ class ConfigTests(unittest.TestCase):
                         self.load(**{key: value})
                     self.assertEqual(caught.exception.reason, "invalid-config")
                     self.assertIn(key, caught.exception.message)
+
+    # -- the task contract ----------------------------------------------------
+    def test_the_governing_issues_are_configured_not_parsed_from_the_pr(self) -> None:
+        """Which contract a change is measured against is Hermes's call.
+
+        A PR body is untrusted prose — this repository's own PAPI-90 PR says
+        ``Refs #1`` and closes nothing — so the reviewer's contract arrives by
+        number from this file and cannot be moved by what the PR claims.
+        """
+        self.assertEqual(self.load().governing_issues, (1,))
+        self.assertEqual(self.load(governing_issues=[1, 84]).governing_issues, (1, 84))
+
+    def test_a_run_with_no_governing_issue_fails_closed(self) -> None:
+        for label, value in (
+            ("null", None),
+            ("empty", []),
+            ("a bare number", 1),
+            ("a string", "1"),
+        ):
+            with self.subTest(governing_issues=label):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(governing_issues=value)
+                self.assertIn("governing_issues", caught.exception.message)
+
+    def test_an_unusable_governing_issue_number_fails_closed(self) -> None:
+        for label, value in (
+            ("a boolean", [True]),
+            ("zero", [0]),
+            ("negative", [-3]),
+            ("text", ["1"]),
+            ("a float", [1.5]),
+        ):
+            with self.subTest(governing_issues=label):
+                with self.assertRaises(ConfigError):
+                    self.load(governing_issues=value)
+
+    def test_a_repeated_or_unbounded_governing_issue_list_fails_closed(self) -> None:
+        with self.assertRaises(ConfigError) as repeated:
+            self.load(governing_issues=[1, 1])
+        self.assertIn("same issue twice", repeated.exception.message)
+        with self.assertRaises(ConfigError) as many:
+            self.load(governing_issues=list(range(1, MAX_GOVERNING_ISSUES + 2)))
+        self.assertEqual(many.exception.evidence["limit"], MAX_GOVERNING_ISSUES)
 
     def test_an_unknown_key_fails_closed(self) -> None:
         with self.assertRaises(ConfigError) as caught:
@@ -925,6 +1043,7 @@ class CliTests(unittest.TestCase):
                     "schema_version": SCHEMA_VERSION,
                     "repo": "example/repo",
                     "pr": 7,
+                    "governing_issues": [1],
                     "source_repo": str(self.clone),
                     "worktree_root": str(self.tmp / "worktrees"),
                     "state_file": str(self.tmp / "state.json"),
@@ -982,6 +1101,8 @@ class CliTests(unittest.TestCase):
         printed = buffer.getvalue()
         self.assertIn("config ok:", printed)
         self.assertIn("reviewer-a, reviewer-b, integration-auditor", printed)
+        # The contract the lanes will be held to is part of what was validated.
+        self.assertIn("governed by #1", printed)
 
     def test_check_config_prints_budget_advisories_without_failing(self) -> None:
         payload = json.loads(self.config_path.read_text(encoding="utf-8"))

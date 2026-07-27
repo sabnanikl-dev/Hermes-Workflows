@@ -31,7 +31,24 @@ lane rather than producing a confident review of the wrong thing.
 
 ``SEQUENCE`` is per-run and strictly increasing, so a packet is bound not only
 to a head but to the one lane it was frozen for. Two lanes on one head get two
-packets and cannot be handed each other's.
+packets and cannot be handed each other's: the number and the lane's own name
+and role are both written into the file and both checked before it is launched.
+
+The task contract
+-----------------
+
+Two of the surfaces are not GitHub *feedback* at all. ``pull_request_body`` is
+the change's own stated contract — the text a reviewer is told to check for
+stale claims — and ``governing_issues`` holds the bodies of the issues this
+run's configuration names as the work's acceptance criteria. Without them a
+credential-free lane is asked to judge scope and staleness against documents it
+was never handed.
+
+Which issue governs comes from the run configuration, by number, and from
+nowhere else. A PR body is untrusted prose: ``Refs #1`` closes nothing, so the
+PR's closing references are evidence about what the PR *claims*, not authority
+over what it is measured against. Those claims are still carried, in
+``linked_issues``, as the separate fact they are.
 
 Completeness, not comfort
 -------------------------
@@ -41,6 +58,13 @@ it reached the end. An incomplete surface is not an error — some GitHub reads
 simply carry no pagination guarantee, and proving the conversation surface
 complete is PAPI-97's obligation (M5). What matters is that the reviewer is
 told which is which, instead of reading a first page as a whole PR.
+
+Which is why the shape is validated rather than trusted. "Complete" has to be a
+boolean, a count has to be an integer that equals the number of items beside it,
+and every required surface has to be present: an absent flag, a ``true`` where
+an integer belongs, or a missing surface all read to a reviewer as *nothing to
+see here*, which is the one thing an evidence boundary must never say by
+accident.
 
 Everything inside a packet is untrusted evidence. Comment and review bodies are
 other people's prose; they are data for a reviewer to weigh, never instructions,
@@ -60,10 +84,29 @@ from typing import Any
 from .errors import EvidencePacketError
 from .github import Comment, PullRequest, ReviewEvidence
 from .redaction import evidence as redact_evidence
-from .redaction import sanitize
+from .redaction import sanitize, scrub
 from .reviewers import MAX_PREPARED_BYTES
 
 PACKET_SCHEMA_VERSION = 1
+
+# Exactly the surfaces this tool writes, and exactly the ones a lane may be
+# launched against. A packet missing one is not a quiet PR: it is a reviewer
+# about to judge without something the prompt tells it to read. A packet
+# carrying an extra one is not this tool's packet at all.
+REQUIRED_SURFACES = frozenset(
+    {
+        "pull_request_body",
+        "governing_issues",
+        "conversation_comments",
+        "reviews",
+        "inline_comments",
+        "check_runs",
+        "linked_issues",
+    }
+)
+# The four keys every surface carries, and the reason each one exists: what the
+# read was, whether it reached the end, how many items it holds, and the items.
+_SURFACE_KEYS = ("complete", "read_as", "count", "items")
 
 # A packet is one PR's conversation plus its checks. Four megabytes is far more
 # than any real one and small enough that a runaway surface cannot fill the
@@ -151,6 +194,40 @@ def build_packet(
             "base_ref_name": pull.base_ref_name,
         },
         "surfaces": {
+            # The change's own stated contract, and the governing contract it is
+            # held to. Without these two a lane can be told to check the PR body
+            # for stale claims and to judge scope against the issue's acceptance
+            # criteria while having been handed neither.
+            "pull_request_body": _surface(
+                [{"number": pull.number, "title": pull.title, "body": pull.body}],
+                complete=_fits(pull.body) and _fits(pull.title),
+                how=(
+                    "one 'gh pr view --json body' read of the live PR at this head; "
+                    "complete=false means the body was longer than a packet body and "
+                    "was clipped"
+                ),
+            ),
+            "governing_issues": _surface(
+                [
+                    {
+                        "number": item.number,
+                        "title": item.title,
+                        "state": item.state,
+                        "url": item.url,
+                        "body": item.body,
+                    }
+                    for item in evidence.governing_issues
+                ],
+                complete=(
+                    evidence.governing_issues_complete
+                    and all(_fits(item.body) for item in evidence.governing_issues)
+                ),
+                how=(
+                    "one 'gh issue view --json body' read per issue named by this "
+                    "run's trusted configuration; these are the task contract, and "
+                    "they are not inferred from the PR's own prose"
+                ),
+            ),
             "conversation_comments": _surface(
                 [
                     {
@@ -233,6 +310,17 @@ def _surface(items: list[dict[str, Any]], *, complete: bool, how: str) -> dict[s
     return {"complete": bool(complete), "read_as": how, "count": len(items), "items": items}
 
 
+def _fits(text: str) -> bool:
+    """Whether this text reaches the packet whole rather than clipped.
+
+    Redaction clips as well as scrubs, and a clipped contract is not the
+    contract. The scrub runs first here for the same reason it does in
+    :func:`pr_prover.redaction.evidence`, so this asks the question the writer
+    will actually answer rather than an approximation of it.
+    """
+    return len(scrub(text)) <= MAX_BODY_BYTES
+
+
 def write_packet(path: Path, payload: dict[str, Any]) -> EvidencePacket:
     """Write one packet, redacted, and record what was written.
 
@@ -270,7 +358,15 @@ def write_packet(path: Path, payload: dict[str, Any]) -> EvidencePacket:
 
 
 def read_packet(
-    path: Path, *, repo: str, pr: int, base: str, head: str, sequence: int
+    path: Path,
+    *,
+    repo: str,
+    pr: int,
+    base: str,
+    head: str,
+    sequence: int,
+    reviewer: str,
+    role: str,
 ) -> dict[str, Any]:
     """Read one packet back from disk and hold it to its binding, or stop.
 
@@ -279,6 +375,15 @@ def read_packet(
     not the payload the process assembled. A packet that did not land, landed
     empty, landed truncated, or is the one an earlier cycle left at this path is
     caught here — before a lane forms a confident review of the wrong head.
+
+    Binding is necessary and not sufficient. A file can name this repository,
+    PR, base, head, and lane and still be missing the surfaces the lane is about
+    to be told it has, or carry a count that disagrees with its own items, or
+    answer ``true`` where an integer belongs — Python's ``==`` reads ``True`` as
+    ``1``. All of that would reach a reviewer as evidence, so the shape is
+    checked here too, exactly: the required surfaces, and for each of them a
+    boolean ``complete``, a non-empty ``read_as``, a non-negative integer
+    ``count``, a list of ``items``, and a count that equals how many there are.
     """
     expected = packet_binding(repo=repo, pr=pr, base=base, head=head, sequence=sequence)
     context: dict[str, Any] = {
@@ -317,7 +422,9 @@ def read_packet(
             "the frozen evidence packet is not a JSON object", evidence=context
         )
     version = payload.get("schema_version")
-    if version != PACKET_SCHEMA_VERSION:
+    # ``type(...) is int`` rather than ``isinstance``: ``True == 1`` in Python,
+    # so an ordinary comparison would read a JSON boolean as this schema.
+    if type(version) is not int or version != PACKET_SCHEMA_VERSION:
         raise EvidencePacketError(
             "the frozen evidence packet is not this tool's packet schema",
             evidence={**context, "schema_version": redact_evidence(str(version), limit=80)},
@@ -337,22 +444,47 @@ def read_packet(
     # The binding is one string; the fields a reader actually indexes are
     # separate values in the same file. They have to agree, or a packet could
     # satisfy the grep the adapter does while presenting a different PR to
-    # anything that reads it structurally.
-    for key, expected_value in (
-        ("repo", repo),
-        ("pr", pr),
-        ("base", base),
-        ("head", head),
-        ("sequence", sequence),
-    ):
-        if payload.get(key) != expected_value:
+    # anything that reads it structurally. Types are exact on both sides: a
+    # string field has to be a string, and an integer field has to be an
+    # integer rather than a boolean that compares equal to one.
+    def disagrees(key: str, expected_value: Any, found_value: Any) -> EvidencePacketError:
+        return EvidencePacketError(
+            f"the frozen evidence packet's {key} disagrees with its own binding line",
+            evidence={
+                **context,
+                "field": key,
+                "expected": expected_value,
+                "found": redact_evidence(str(found_value), limit=200),
+            },
+        )
+
+    for key, expected_value in (("repo", repo), ("base", base), ("head", head)):
+        found_value = payload.get(key)
+        if not isinstance(found_value, str) or found_value != expected_value:
+            raise disagrees(key, expected_value, found_value)
+    for key, expected_value in (("pr", pr), ("sequence", sequence)):
+        found_value = payload.get(key)
+        if type(found_value) is not int or found_value < 1 or found_value != expected_value:
+            raise disagrees(key, expected_value, found_value)
+    # ``SEQUENCE`` binds a packet to one lane, and the packet says which lane in
+    # its own words. Checking only the number would leave the claim that a lane
+    # cannot be handed another's packet resting on the loop's path naming.
+    frozen_for = payload.get("frozen_for")
+    if not isinstance(frozen_for, dict):
+        raise EvidencePacketError(
+            "the frozen evidence packet does not say which lane it was frozen for",
+            evidence=context,
+        )
+    for key, expected_value in (("reviewer", reviewer), ("role", role)):
+        found_value = frozen_for.get(key)
+        if not isinstance(found_value, str) or found_value != expected_value:
             raise EvidencePacketError(
-                f"the frozen evidence packet's {key} disagrees with its own binding line",
+                "the frozen evidence packet was frozen for another lane",
                 evidence={
                     **context,
-                    "field": key,
+                    "field": f"frozen_for.{key}",
                     "expected": expected_value,
-                    "found": redact_evidence(str(payload.get(key)), limit=200),
+                    "found": redact_evidence(str(found_value), limit=200),
                 },
             )
     surfaces = payload.get("surfaces")
@@ -361,12 +493,106 @@ def read_packet(
             "the frozen evidence packet carries no GitHub surfaces to review",
             evidence=context,
         )
+    present = set(surfaces)
+    missing = sorted(REQUIRED_SURFACES - present)
+    if missing:
+        raise EvidencePacketError(
+            "the frozen evidence packet is missing surfaces this reviewer is told it has",
+            evidence={
+                **context,
+                "missing_surfaces": missing,
+                "required_surfaces": sorted(REQUIRED_SURFACES),
+            },
+        )
+    unknown = sorted(present - REQUIRED_SURFACES)
+    if unknown:
+        raise EvidencePacketError(
+            "the frozen evidence packet carries surfaces this tool does not write",
+            evidence={
+                **context,
+                "unknown_surfaces": unknown,
+                "required_surfaces": sorted(REQUIRED_SURFACES),
+            },
+        )
+    for name in sorted(REQUIRED_SURFACES):
+        _validate_surface(surfaces[name], name=name, context=context)
+    # Most surfaces may honestly be empty or partial: a PR really can have no
+    # inline comments, and the conversation read really cannot prove it reached
+    # the end. The two contract surfaces are different in kind. The run named
+    # the governing issues itself and every PR has a body, so an empty or
+    # incomplete one is not a quiet PR — it is a lane about to judge scope,
+    # staleness, and acceptance criteria against a document nobody handed it.
+    for name in ("pull_request_body", "governing_issues"):
+        surface = surfaces[name]
+        if not surface["items"] or not surface["complete"]:
+            raise EvidencePacketError(
+                "the frozen evidence packet does not carry the task contract this "
+                "reviewer is required to judge against",
+                evidence={
+                    **context,
+                    "surface": name,
+                    "count": surface["count"],
+                    "complete": surface["complete"],
+                },
+            )
     return payload
+
+
+def _validate_surface(surface: Any, *, name: str, context: dict[str, Any]) -> None:
+    """Hold one surface to the shape the reviewer prompt promises it has.
+
+    Every failure here is a packet that would otherwise have been read as
+    evidence: a surface with no completeness flag reads as complete, a surface
+    with no items reads as an empty PR, and a count that disagrees with its own
+    items is one of the two numbers being wrong with no way to tell which.
+    """
+    where = {**context, "surface": name}
+    if not isinstance(surface, dict):
+        raise EvidencePacketError(
+            f"the frozen evidence packet's {name} surface is not an object", evidence=where
+        )
+    absent = [key for key in _SURFACE_KEYS if key not in surface]
+    if absent:
+        raise EvidencePacketError(
+            f"the frozen evidence packet's {name} surface is incomplete",
+            evidence={**where, "missing_fields": absent},
+        )
+    complete = surface["complete"]
+    if type(complete) is not bool:
+        raise EvidencePacketError(
+            f"the frozen evidence packet's {name} surface does not say whether its "
+            "read reached the end",
+            evidence={**where, "complete": redact_evidence(str(complete), limit=80)},
+        )
+    read_as = surface["read_as"]
+    if not isinstance(read_as, str) or not read_as.strip():
+        raise EvidencePacketError(
+            f"the frozen evidence packet's {name} surface does not say how it was read",
+            evidence=where,
+        )
+    count = surface["count"]
+    if type(count) is not int or count < 0:
+        raise EvidencePacketError(
+            f"the frozen evidence packet's {name} surface has no usable item count",
+            evidence={**where, "count": redact_evidence(str(count), limit=80)},
+        )
+    items = surface["items"]
+    if not isinstance(items, list):
+        raise EvidencePacketError(
+            f"the frozen evidence packet's {name} surface carries no item list",
+            evidence=where,
+        )
+    if count != len(items):
+        raise EvidencePacketError(
+            f"the frozen evidence packet's {name} surface counts items it does not carry",
+            evidence={**where, "count": count, "items": len(items)},
+        )
 
 
 __all__ = [
     "MAX_PACKET_BYTES",
     "PACKET_SCHEMA_VERSION",
+    "REQUIRED_SURFACES",
     "EvidencePacket",
     "build_packet",
     "packet_binding",

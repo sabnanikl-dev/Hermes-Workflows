@@ -42,6 +42,14 @@ a relayed lane with nowhere to read its evidence from is as misconfigured as one
 with nowhere to write its artifact, and both are refused here rather than
 discovered by a lane that quietly reviewed nothing.
 
+``governing_issues`` is where the task contract comes from, and it is required.
+The reviewers are handed those issue bodies in the same packet, because a lane
+judging scope, acceptance criteria, or shrunken fixes needs the document those
+are written in. It is configuration rather than something parsed out of the PR
+for one reason: a PR body is untrusted prose that names whichever issue its
+author typed, and "which contract am I held to" is not a question the thing
+under review gets to answer.
+
 The argv arrays are where the trusted agents are named. Hermes writes the exact
 invocation of the installed Claude/Codex wrapper it wants — model, empty MCP
 config, task-scoped tools, pointer-first prompt — and the loop runs it
@@ -102,8 +110,14 @@ _V1_UPGRADE_STEPS = (
     "'artifact_signature' line its published artifact must carry",
     "point each relayed lane's argv at '{artifact_file}' and '{evidence_packet}', "
     "and give it a 'relay' command that publishes that file",
+    "list the issue number(s) that govern this work in 'governing_issues'",
     "set 'schema_version' to 2",
 )
+# How many governing issues one run may name. A slice is measured against its
+# own contract and the umbrella it refers to, not against a reading list: the
+# bound exists so a misconfiguration cannot quietly turn every reviewer packet
+# into a document dump.
+MAX_GOVERNING_ISSUES = 8
 GATE_KINDS = ("baseline", "visual")
 # The acceptance lifecycle, as configuration rather than operator convention.
 #
@@ -139,6 +153,7 @@ _TOP_LEVEL_KEYS = frozenset(
         "state_file",
         "lock_file",
         "visual_qa_required",
+        "governing_issues",
         "gates",
         "reviewers",
         "builder",
@@ -286,6 +301,7 @@ class RunConfig:
     lock_file: Path
     builder: BuilderConfig
     reviewers: tuple[ReviewerConfig, ...]
+    governing_issues: tuple[int, ...]
     gates: tuple[GateConfig, ...] = ()
     branch: str | None = None
     base: str | None = None
@@ -493,6 +509,8 @@ class RunConfig:
                 evidence={"gate_kinds": sorted({gate.kind for gate in gates})},
             )
 
+        governing_issues = _governing_issues(raw)
+
         branch = _optional_text(raw, "branch")
         base = _optional_text(raw, "base")
 
@@ -510,6 +528,7 @@ class RunConfig:
             lock_file=lock_file,
             builder=_builder(raw.get("builder")),
             reviewers=reviewers,
+            governing_issues=governing_issues,
             gates=gates,
             branch=branch,
             base=base,
@@ -535,6 +554,44 @@ def _reject_control_paths_inside(source_repo: Path, **control_files: Path) -> No
                 "state and lock files must live outside source_repo",
                 evidence={key: str(path), "source_repo": str(source_repo)},
             )
+
+
+def _governing_issues(raw: Mapping[str, Any]) -> tuple[int, ...]:
+    """The issue numbers whose bodies are this run's task contract.
+
+    Required, and required to be non-empty. The reviewer lanes are handed these
+    bodies in place of GitHub, and a lane with no contract in front of it can
+    still write a confident review — of whether the code looks nice. Which issue
+    governs is also exactly the question a PR body must not be allowed to answer
+    for itself, so it is asked here, of the operator, once.
+    """
+    value = raw.get("governing_issues")
+    if not isinstance(value, list) or not value:
+        raise ConfigError(
+            "config governing_issues must list at least one issue number: it is the "
+            "task contract every credential-free reviewer is handed in place of "
+            "GitHub, and it comes from this file rather than from the PR's own prose",
+            evidence={"governing_issues": value if isinstance(value, (list, int, str)) else None},
+        )
+    if len(value) > MAX_GOVERNING_ISSUES:
+        raise ConfigError(
+            f"config governing_issues names more than {MAX_GOVERNING_ISSUES} issues",
+            evidence={"count": len(value), "limit": MAX_GOVERNING_ISSUES},
+        )
+    numbers: list[int] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, int) or isinstance(item, bool) or item < 1:
+            raise ConfigError(
+                f"config governing_issues[{index}] must be a positive issue number",
+                evidence={"index": index, "value": item if isinstance(item, int) else None},
+            )
+        if item in numbers:
+            raise ConfigError(
+                "config governing_issues names the same issue twice",
+                evidence={"issue": item},
+            )
+        numbers.append(item)
+    return tuple(numbers)
 
 
 def _sequence(raw: Mapping[str, Any], key: str, *, required: bool) -> list[Any]:
@@ -763,6 +820,7 @@ def _reject_duplicates(names: list[str], *, what: str) -> None:
 
 __all__ = [
     "GATE_KINDS",
+    "MAX_GOVERNING_ISSUES",
     "REALISTIC_BUILDER_BUDGET",
     "REALISTIC_REVIEWER_BUDGET",
     "REQUIRED_REVIEWER_ROLES",

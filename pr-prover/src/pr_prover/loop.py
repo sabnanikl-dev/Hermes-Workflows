@@ -1027,7 +1027,9 @@ class ProverLoop:
         """
         comments = self.github.comments(self.config.repo, self.config.pr)
         reviews = self.github.reviews(self.config.repo, self.config.pr)
-        evidence = self.github.review_evidence(self.config.repo, self.config.pr, head)
+        evidence = self.github.review_evidence(
+            self.config.repo, self.config.pr, head, self.config.governing_issues
+        )
         self._packet_sequence += 1
         sequence = self._packet_sequence
         payload = build_packet(
@@ -1053,6 +1055,8 @@ class ProverLoop:
             base=pull.base_ref_name,
             head=head,
             sequence=sequence,
+            reviewer=reviewer.name,
+            role=reviewer.role,
         )
         self._event(
             f"reviewer {reviewer.name} handed a {packet.size}-byte frozen evidence packet "

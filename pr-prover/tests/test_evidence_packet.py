@@ -21,13 +21,31 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from _support import HEAD_A, HEAD_B, REVIEWER_LOGIN, reviewer_output
+from _support import (
+    GOVERNING_ISSUE,
+    GOVERNING_ISSUE_BODY,
+    HEAD_A,
+    HEAD_B,
+    PR_BODY,
+    REVIEWER_LOGIN,
+    reviewer_output,
+)
 from pr_prover.errors import EvidencePacketError
-from pr_prover.github import CheckRun, Comment, InlineComment, LinkedIssue, PullRequest, ReviewEvidence
+from pr_prover.github import (
+    CheckRun,
+    Comment,
+    GoverningIssue,
+    InlineComment,
+    LinkedIssue,
+    PullRequest,
+    ReviewEvidence,
+)
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN
 from pr_prover.packet import (
+    MAX_BODY_BYTES,
     MAX_PACKET_BYTES,
     PACKET_SCHEMA_VERSION,
+    REQUIRED_SURFACES,
     build_packet,
     packet_binding,
     read_packet,
@@ -38,7 +56,9 @@ from test_loop import LoopHarness
 REPO = "example/repo"
 
 
-def pull_request(*, number: int = 7, head: str = HEAD_A, base: str = "main") -> PullRequest:
+def pull_request(
+    *, number: int = 7, head: str = HEAD_A, base: str = "main", body: str = PR_BODY
+) -> PullRequest:
     return PullRequest(
         number=number,
         state="OPEN",
@@ -48,6 +68,17 @@ def pull_request(*, number: int = 7, head: str = HEAD_A, base: str = "main") -> 
         head_ref_name="feat/example",
         head_ref_oid=head,
         base_ref_name=base,
+        body=body,
+    )
+
+
+def governing(body: str = GOVERNING_ISSUE_BODY) -> ReviewEvidence:
+    """The ordinary shipped case: one configured contract, read whole."""
+    return ReviewEvidence(
+        governing_issues=(
+            GoverningIssue(number=1, title="mission", state="OPEN", body=body),
+        ),
+        governing_issues_complete=True,
     )
 
 
@@ -73,7 +104,7 @@ class PacketContentTests(unittest.TestCase):
             f"REPO={REPO} PR=7 BASE=main HEAD={HEAD_A} SEQUENCE=3",
         )
 
-    def test_a_packet_carries_the_five_surfaces_a_reviewer_needs(self) -> None:
+    def test_a_packet_carries_every_surface_a_reviewer_needs(self) -> None:
         payload = self.build(
             comments=(Comment(identifier="IC_1", author="someone", body="a note"),),
             reviews=(
@@ -98,9 +129,18 @@ class PacketContentTests(unittest.TestCase):
                 ),
                 check_runs=(CheckRun(name="tests", status="completed", conclusion="success"),),
                 linked_issues=(LinkedIssue(number=1, title="mission", state="OPEN"),),
+                governing_issues=(
+                    GoverningIssue(
+                        number=GOVERNING_ISSUE,
+                        title="mission",
+                        state="OPEN",
+                        body=GOVERNING_ISSUE_BODY,
+                    ),
+                ),
                 inline_comments_complete=True,
                 check_runs_complete=True,
                 linked_issues_complete=True,
+                governing_issues_complete=True,
                 reviews_complete=True,
             ),
         )
@@ -110,11 +150,14 @@ class PacketContentTests(unittest.TestCase):
             [
                 "check_runs",
                 "conversation_comments",
+                "governing_issues",
                 "inline_comments",
                 "linked_issues",
+                "pull_request_body",
                 "reviews",
             ],
         )
+        self.assertEqual(set(surfaces), set(REQUIRED_SURFACES))
         for name, surface in surfaces.items():
             with self.subTest(surface=name):
                 self.assertEqual(surface["count"], len(surface["items"]))
@@ -124,6 +167,60 @@ class PacketContentTests(unittest.TestCase):
         self.assertEqual(surfaces["inline_comments"]["items"][0]["path"], "src/thing.py")
         self.assertEqual(surfaces["check_runs"]["items"][0]["conclusion"], "success")
         self.assertEqual(surfaces["linked_issues"]["items"][0]["number"], 1)
+
+    def test_the_packet_carries_the_pr_body_and_the_governing_contract(self) -> None:
+        """PAPI90-FINAL-P1-002: the two documents the prompt says to read.
+
+        The lane is told to check the PR body for stale claims and to judge
+        scope against the issue's acceptance criteria. Before this it was handed
+        neither: the PR metadata had no body, and a PR using ``Refs #1`` closes
+        nothing, so ``linked_issues`` supplied no contract either.
+        """
+        payload = self.build(evidence=governing())
+        surfaces = payload["surfaces"]
+
+        stated = surfaces["pull_request_body"]
+        self.assertEqual(stated["count"], 1)
+        self.assertEqual(stated["items"][0]["body"], PR_BODY)
+        self.assertEqual(stated["items"][0]["number"], 7)
+        self.assertTrue(stated["complete"])
+
+        contract = surfaces["governing_issues"]
+        self.assertEqual(contract["count"], 1)
+        self.assertEqual(contract["items"][0]["number"], GOVERNING_ISSUE)
+        self.assertEqual(contract["items"][0]["body"], GOVERNING_ISSUE_BODY)
+        self.assertTrue(contract["complete"])
+        # ...and the contract is not the PR's claim about itself. Both are
+        # carried, separately, because they answer different questions.
+        self.assertIn("configuration", contract["read_as"])
+        self.assertEqual(surfaces["linked_issues"]["count"], 0)
+
+    def test_an_empty_pr_body_is_carried_as_the_fact_it_is(self) -> None:
+        """A PR that says nothing about itself is reviewable evidence."""
+        stated = self.build(pull=pull_request(body=""))["surfaces"]["pull_request_body"]
+        self.assertEqual(stated["count"], 1)
+        self.assertEqual(stated["items"][0]["body"], "")
+        self.assertTrue(stated["complete"])
+
+    def test_a_contract_too_long_to_carry_whole_says_it_was_clipped(self) -> None:
+        """Redaction clips, and a clipped contract is not the contract.
+
+        The body still travels — a truncated contract beats none — but the
+        surface stops claiming the reviewer holds all of it.
+        """
+        huge = "x" * (MAX_BODY_BYTES + 1)
+        surfaces = self.build(pull=pull_request(body=huge), evidence=governing(huge))["surfaces"]
+        self.assertFalse(surfaces["pull_request_body"]["complete"])
+        self.assertFalse(surfaces["governing_issues"]["complete"])
+
+    def test_a_contract_the_boundary_could_not_read_whole_is_not_complete(self) -> None:
+        incomplete = ReviewEvidence(
+            governing_issues=(
+                GoverningIssue(number=1, title="m", state="OPEN", body="partial"),
+            ),
+            governing_issues_complete=False,
+        )
+        self.assertFalse(self.build(evidence=incomplete)["surfaces"]["governing_issues"]["complete"])
 
     def test_a_surface_that_cannot_prove_it_read_to_the_end_says_so(self) -> None:
         """An unproven surface must not present itself as a whole one.
@@ -180,15 +277,34 @@ class PacketFileTests(unittest.TestCase):
             role="reviewer-a",
             comments=(),
             reviews=(),
-            evidence=ReviewEvidence(),
+            evidence=governing(),
         )
         payload.update(overrides)
         return write_packet(self.path, payload)
 
     def read(self, **overrides):
-        fields = {"repo": REPO, "pr": 7, "base": "main", "head": HEAD_A, "sequence": 1}
+        fields = {
+            "repo": REPO,
+            "pr": 7,
+            "base": "main",
+            "head": HEAD_A,
+            "sequence": 1,
+            "reviewer": "A",
+            "role": "reviewer-a",
+        }
         fields.update(overrides)
         return read_packet(self.path, **fields)
+
+    def landed(self, mutate) -> None:
+        """Write a valid packet, then edit the bytes a lane would be handed.
+
+        This is exactly how the reviewers reproduced the fail-open: the payload
+        the process assembled is not the file, and only the file is evidence.
+        """
+        self.write()
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        mutate(payload)
+        self.path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_a_written_packet_round_trips_through_its_own_validator(self) -> None:
         written = self.write()
@@ -293,6 +409,120 @@ class PacketFileTests(unittest.TestCase):
             self.read()
         self.assertIn("no GitHub surfaces", caught.exception.message)
 
+    # -- former red: bound, parseable, and still not evidence ------------------
+    #
+    # Every case below is one the reviewers wrote by hand: a file that keeps the
+    # canonical binding the adapter greps for, and the fields a structural
+    # reader indexes, while removing or corrupting the evidence itself. Each one
+    # used to be accepted, and two of them reached `merge-ready`.
+
+    def test_a_boolean_where_an_integer_belongs_is_not_that_integer(self) -> None:
+        """``True == 1`` in Python, and JSON ``true`` is not schema version 1."""
+        for field in ("schema_version", "sequence"):
+            with self.subTest(field=field):
+                self.landed(lambda payload, key=field: payload.__setitem__(key, True))
+                with self.assertRaises(EvidencePacketError):
+                    self.read()
+
+    def test_a_sequence_that_is_not_a_positive_integer_stops_the_lane(self) -> None:
+        for label, value in (("zero", 0), ("negative", -1), ("text", "1"), ("float", 1.0)):
+            with self.subTest(sequence=label):
+                self.landed(lambda payload, item=value: payload.__setitem__("sequence", item))
+                with self.assertRaises(EvidencePacketError):
+                    self.read(sequence=value if isinstance(value, int) else 1)
+
+    def test_a_packet_missing_a_required_surface_stops_the_lane(self) -> None:
+        """A surface a reviewer is told it has, and does not, reads as silence."""
+        for name in sorted(REQUIRED_SURFACES):
+            with self.subTest(surface=name):
+                self.landed(lambda payload, key=name: payload["surfaces"].pop(key))
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertEqual(caught.exception.evidence["missing_surfaces"], [name])
+
+    def test_a_surface_this_tool_does_not_write_stops_the_lane(self) -> None:
+        self.landed(lambda payload: payload["surfaces"].update({"telegrams": {}}))
+        with self.assertRaises(EvidencePacketError) as caught:
+            self.read()
+        self.assertEqual(caught.exception.evidence["unknown_surfaces"], ["telegrams"])
+
+    def test_a_surface_that_does_not_declare_its_own_shape_stops_the_lane(self) -> None:
+        cases = (
+            ("missing complete", lambda surface: surface.pop("complete")),
+            ("boolean-shaped complete", lambda surface: surface.update({"complete": "yes"})),
+            ("numeric complete", lambda surface: surface.update({"complete": 1})),
+            ("missing read_as", lambda surface: surface.pop("read_as")),
+            ("empty read_as", lambda surface: surface.update({"read_as": "   "})),
+            ("non-text read_as", lambda surface: surface.update({"read_as": 7})),
+            ("missing count", lambda surface: surface.pop("count")),
+            ("boolean count", lambda surface: surface.update({"count": True})),
+            ("negative count", lambda surface: surface.update({"count": -1})),
+            ("text count", lambda surface: surface.update({"count": "0"})),
+            ("missing items", lambda surface: surface.pop("items")),
+            ("items that are not a list", lambda surface: surface.update({"items": {}})),
+        )
+        for label, mutate in cases:
+            with self.subTest(surface=label):
+                self.landed(lambda payload, edit=mutate: edit(payload["surfaces"]["reviews"]))
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertEqual(caught.exception.evidence["surface"], "reviews")
+
+    def test_a_count_that_disagrees_with_its_own_items_stops_the_lane(self) -> None:
+        """One of the two numbers is wrong and the file cannot say which."""
+        self.landed(
+            lambda payload: payload["surfaces"]["conversation_comments"].update({"count": 4})
+        )
+        with self.assertRaises(EvidencePacketError) as caught:
+            self.read()
+        self.assertIn("counts items it does not carry", caught.exception.message)
+        self.assertEqual(caught.exception.evidence["items"], 0)
+
+    def test_a_packet_frozen_for_another_lane_stops_this_one(self) -> None:
+        """The sequence binds a lane; the packet also says which lane in words."""
+        for field, value in (("reviewer", "B"), ("role", "reviewer-b")):
+            with self.subTest(frozen_for=field):
+                self.landed(
+                    lambda payload, key=field, item=value: payload["frozen_for"].update({key: item})
+                )
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertIn("frozen for another lane", caught.exception.message)
+                self.assertEqual(caught.exception.evidence["field"], f"frozen_for.{field}")
+
+    def test_a_packet_that_does_not_say_which_lane_it_is_for_stops_the_lane(self) -> None:
+        for label, value in (("missing", None), ("not an object", "reviewer-a")):
+            with self.subTest(frozen_for=label):
+                self.landed(
+                    lambda payload, item=value: (
+                        payload.pop("frozen_for")
+                        if item is None
+                        else payload.__setitem__("frozen_for", item)
+                    )
+                )
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertIn("which lane", caught.exception.message)
+
+    def test_a_field_of_the_wrong_type_cannot_satisfy_the_binding(self) -> None:
+        """The adapter greps a string; a structural reader indexes fields."""
+        for field, value in (("repo", 7), ("head", None), ("base", ["main"]), ("pr", "7")):
+            with self.subTest(field=field):
+                self.landed(lambda payload, key=field, item=value: payload.__setitem__(key, item))
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertEqual(caught.exception.evidence["field"], field)
+
+    def test_a_valid_packet_still_round_trips_after_all_of_that(self) -> None:
+        """The strictness has to admit the packet this tool actually writes."""
+        self.write()
+        payload = self.read()
+        self.assertEqual(set(payload["surfaces"]), set(REQUIRED_SURFACES))
+        self.assertEqual(
+            payload["surfaces"]["governing_issues"]["items"][0]["body"], GOVERNING_ISSUE_BODY
+        )
+        self.assertEqual(payload["surfaces"]["pull_request_body"]["items"][0]["body"], PR_BODY)
+
     def test_a_full_size_artifact_reaches_the_packet_intact(self) -> None:
         """The auditor reconciles A's and B's artifacts and cannot fetch them.
 
@@ -314,10 +544,12 @@ class PacketFileTests(unittest.TestCase):
                 role="integration-auditor",
                 comments=(Comment(identifier="IC_1", author=REVIEWER_LOGIN, body=body),),
                 reviews=(),
-                evidence=ReviewEvidence(),
+                evidence=governing(),
             ),
         )
-        landed = self.read()["surfaces"]["conversation_comments"]["items"][0]["body"]
+        landed = self.read(reviewer="Auditor", role="integration-auditor")["surfaces"][
+            "conversation_comments"
+        ]["items"][0]["body"]
         self.assertEqual(landed, body)
         self.assertNotIn("characters elided", landed)
 
@@ -408,6 +640,93 @@ class PacketInTheLoopTests(LoopHarness):
             [],
             "no lane may run against a packet that is not bound to this head",
         )
+
+    def test_every_lane_is_handed_the_pr_body_and_the_governing_contract(self) -> None:
+        """PAPI90-FINAL-P1-002, at the loop seam the reviewers measured.
+
+        The lane's own prompt tells it to check the PR body for stale claims and
+        to judge scope against the issue. Both documents have to arrive through
+        the shipped path, for all three lanes, not just through ``build_packet``.
+        """
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        for packet, role in zip(
+            self.runner.evidence_packets,
+            ["reviewer-a", "reviewer-b", "integration-auditor"],
+            strict=True,
+        ):
+            with self.subTest(role=role):
+                stated = packet["surfaces"]["pull_request_body"]
+                self.assertEqual(stated["items"][0]["body"], PR_BODY)
+                self.assertTrue(stated["complete"])
+                contract = packet["surfaces"]["governing_issues"]
+                self.assertEqual(contract["items"][0]["number"], GOVERNING_ISSUE)
+                self.assertEqual(contract["items"][0]["body"], GOVERNING_ISSUE_BODY)
+                self.assertTrue(contract["complete"])
+        # ...and the numbers came from the configuration, not from the PR prose.
+        self.assertEqual(
+            self.github.governing_issues_asked_for, [(GOVERNING_ISSUE,)] * 3
+        )
+
+    def test_a_packet_with_no_governing_contract_cannot_earn_merge_ready(self) -> None:
+        """Former red at the loop level: no contract, and still a green run."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+        self.remote.governing_issues = []
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "evidence-packet")
+        self.assertEqual(
+            [call.argv[0] for call in self.runner.calls if call.argv[0].startswith("lane-")],
+            [],
+            "no lane may judge a change against a contract it was never handed",
+        )
+
+    def test_a_malformed_landed_packet_cannot_earn_merge_ready(self) -> None:
+        """Former red at the loop level, exactly as the reviewers reproduced it.
+
+        The packet writer's payload keeps the canonical repo/PR/base/head/lane
+        binding and loses the evidence schema. Every one of these returned
+        ``merge-ready`` with three transported review lanes.
+        """
+        cases = {
+            "missing-surfaces": lambda payload: payload["surfaces"].pop("reviews"),
+            "missing-completeness": lambda payload: payload["surfaces"]["reviews"].pop("complete"),
+            "count-mismatch": lambda payload: payload["surfaces"]["reviews"].update({"count": 9}),
+            "boolean-schema": lambda payload: payload.__setitem__("schema_version", True),
+            "no-contract": lambda payload: payload["surfaces"]["governing_issues"].update(
+                {"count": 0, "items": []}
+            ),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(packet=label):
+                self.setUp()
+                loop = self.build()
+                self.review_round(HEAD_A)
+
+                def landed(path, payload, edit=mutate):
+                    edit(payload)
+                    return write_packet(path, payload)
+
+                with patch("pr_prover.loop.write_packet", landed):
+                    result = loop.run()
+
+                self.assertEqual(result.outcome, NEEDS_KARAN)
+                self.assertEqual(result.reason, "evidence-packet")
+                self.assertEqual(
+                    [
+                        call.argv[0]
+                        for call in self.runner.calls
+                        if call.argv[0].startswith("lane-")
+                    ],
+                    [],
+                )
 
     def test_a_packet_that_could_not_be_written_stops_the_run(self) -> None:
         loop = self.build()

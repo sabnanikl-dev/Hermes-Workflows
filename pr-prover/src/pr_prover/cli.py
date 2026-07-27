@@ -75,6 +75,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"config ok: {config.repo}#{config.pr} "
             f"({len(config.gates)} gate(s), {len(config.reviewers)} reviewer lane(s): "
             + ", ".join(reviewer.role for reviewer in config.reviewers)
+            + "; governed by "
+            + ", ".join(f"#{number}" for number in config.governing_issues)
             + ")"
         )
         # Advisories are notes, not errors: a lane budget that is unrealistically

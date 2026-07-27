@@ -33,6 +33,7 @@ from pr_prover.findings import Finding, FindingLocation, FindingProvenance
 from pr_prover.github import (
     CheckRun,
     Comment,
+    GoverningIssue,
     InlineComment,
     LinkedIssue,
     PullRequest,
@@ -57,6 +58,12 @@ REVIEWER_LANES = (
     ("Auditor", "integration-auditor", "lane-reviewer-Auditor"),
 )
 RELAY_PROGRAM = "lane-relay"
+# The task contract a run is configured against, and the two bodies a
+# credential-free reviewer is handed in place of reading GitHub itself. They
+# carry distinctive text so a test can prove which document reached the lane.
+GOVERNING_ISSUE = 1
+GOVERNING_ISSUE_BODY = "ACCEPTANCE: the governing issue contract body"
+PR_BODY = "This change claims: the live pull request body"
 
 
 def reviewer_artifact(
@@ -177,6 +184,22 @@ class FakeRemote:
     inline_comments: list[InlineComment] = field(default_factory=list)
     check_runs: list[CheckRun] = field(default_factory=list)
     linked_issues: list[LinkedIssue] = field(default_factory=list)
+    # The change's own stated contract and the contract it is measured against.
+    # Both are ordinary here, because both are on the shipped path: every real
+    # PR has a body, and every configured run names a governing issue.
+    body: str = PR_BODY
+    governing_issues: list[GoverningIssue] = field(
+        default_factory=lambda: [
+            GoverningIssue(
+                number=GOVERNING_ISSUE,
+                title="mission contract",
+                state="OPEN",
+                body=GOVERNING_ISSUE_BODY,
+                url="https://example.invalid/issues/1",
+            )
+        ]
+    )
+    governing_issues_complete: bool = True
     # Commit -> its first parent. This is the only thing that makes "the new
     # head descends from the old one" a question the doubles can answer, so a
     # force-pushed replacement is expressible rather than indistinguishable
@@ -256,9 +279,11 @@ class FakeRemote:
             inline_comments=tuple(self.inline_comments),
             check_runs=tuple(self.check_runs),
             linked_issues=tuple(self.linked_issues),
+            governing_issues=tuple(self.governing_issues),
             inline_comments_complete=True,
             check_runs_complete=True,
             linked_issues_complete=True,
+            governing_issues_complete=self.governing_issues_complete,
             conversation_comments_complete=False,
             reviews_complete=True,
         )
@@ -273,6 +298,7 @@ class FakeRemote:
             head_ref_name=self.branch,
             head_ref_oid=self.head,
             base_ref_name=self.base,
+            body=self.body,
         )
 
 
@@ -286,6 +312,7 @@ class FakeGitHub:
         self.commit_calls = 0
         self.review_calls = 0
         self.review_evidence_calls = 0
+        self.governing_issues_asked_for: list[tuple[int, ...]] = []
 
     def pull_request(self, repo: str, number: int) -> PullRequest:
         self.pull_request_calls += 1
@@ -303,8 +330,11 @@ class FakeGitHub:
         self.review_calls += 1
         return tuple(self.remote.reviews)
 
-    def review_evidence(self, repo: str, number: int, head: str) -> ReviewEvidence:
+    def review_evidence(
+        self, repo: str, number: int, head: str, governing_issues: Sequence[int]
+    ) -> ReviewEvidence:
         self.review_evidence_calls += 1
+        self.governing_issues_asked_for.append(tuple(governing_issues))
         return self.remote.review_evidence()
 
 
@@ -662,6 +692,7 @@ def make_config(
     state_file: str | None = None,
     lock_file: str | None = None,
     reviewers: Sequence[Mapping[str, object]] | None = None,
+    governing_issues: Sequence[int] = (GOVERNING_ISSUE,),
 ) -> RunConfig:
     payload: dict[str, object] = {
         "schema_version": 2,
@@ -669,6 +700,7 @@ def make_config(
         "pr": 7,
         "branch": branch,
         "base": "main",
+        "governing_issues": list(governing_issues),
         "source_repo": str(source_repo),
         "worktree_root": str(tmp / "worktrees"),
         "state_file": state_file or str(tmp / "state.json"),

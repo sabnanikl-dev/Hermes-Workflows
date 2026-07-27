@@ -21,8 +21,16 @@ so where it exists the loop uses it alongside the artifact's own declaration.
 A fifth read, :meth:`GhCliGitHub.review_evidence`, exists for a different
 reason. The judging lanes run with no GitHub credential at all, so they cannot
 inspect the PR for themselves; this boundary reads the inline comments, the
-check runs for the exact head, and the issues the PR claims to close, and the
-loop freezes them into the packet the lane judges from.
+check runs for the exact head, the issues the PR claims to close, and the
+governing issues the run configuration names, and the loop freezes them into
+the packet the lane judges from. The PR's own body comes back with the first
+read, for the same reason: it is the change's stated contract, and the lane
+that must check it for stale claims has no way to fetch it.
+
+Which issue governs is a configuration question, never a parsing one. A PR body
+is untrusted prose — ``Refs #1`` closes nothing and ``Closes #999`` names
+whatever its author typed — so the contract a reviewer is held to arrives by
+number from the run config, not from the PR's own claims about itself.
 
 Completeness of the *whole* human-feedback surface — pagination guarantees,
 inline review threads, and their resolution state — is the deterministic
@@ -46,12 +54,22 @@ from .commands import CommandRunner
 from .errors import GitHubError
 from .redaction import evidence as redact_evidence
 
-_PR_FIELDS = "number,state,isDraft,title,url,headRefName,headRefOid,baseRefName"
+_PR_FIELDS = "number,state,isDraft,title,url,headRefName,headRefOid,baseRefName,body"
+# What one governing issue is read for. The body is the point: it is the task
+# contract a reviewer judges the change against, and a credential-free lane
+# cannot fetch it for itself.
+_ISSUE_FIELDS = "number,title,state,url,body"
 
 
 @dataclass(frozen=True)
 class PullRequest:
-    """The live PR state the run binds itself to."""
+    """The live PR state the run binds itself to.
+
+    ``body`` is the PR's own description — the change's stated contract, and the
+    surface a reviewer is told to check stale claims against. It is read here
+    rather than left to the lane because the judging lanes have no GitHub
+    credential. An empty body is data; a missing one is a malformed read.
+    """
 
     number: int
     state: str
@@ -61,6 +79,7 @@ class PullRequest:
     head_ref_name: str
     head_ref_oid: str
     base_ref_name: str
+    body: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,13 +146,34 @@ class LinkedIssue:
 
 
 @dataclass(frozen=True)
+class GoverningIssue:
+    """One issue the *run configuration* names as this PR's task contract.
+
+    This is deliberately not :class:`LinkedIssue`. A closing reference is a
+    property of the PR's own prose — a PR that says ``Refs #1`` closes nothing,
+    and one that says ``Closes #999`` names whatever its author typed. Neither
+    is authority. The governing issue is the one Hermes configured for this run,
+    read by number from trusted configuration, and its ``body`` is the contract
+    a reviewer holds the change to.
+    """
+
+    number: int
+    title: str
+    state: str
+    body: str
+    url: str = ""
+
+
+@dataclass(frozen=True)
 class ReviewEvidence:
     """The read-only PR surfaces a judging lane needs and readback does not.
 
     The loop already reads conversation comments and submitted reviews, because
     it has to read its own lanes' artifacts back. A reviewer that cannot reach
-    GitHub at all needs three more: what was said inline on the diff, what the
-    checks say about this exact commit, and which issues the PR claims to close.
+    GitHub at all needs four more: what was said inline on the diff, what the
+    checks say about this exact commit, which issues the PR claims to close, and
+    the bodies of the governing issues this run's configuration names as the
+    task contract.
 
     Each surface carries its own completeness flag rather than one for the whole
     object, because they are read three different ways and only some of those
@@ -153,9 +193,11 @@ class ReviewEvidence:
     inline_comments: tuple[InlineComment, ...] = ()
     check_runs: tuple[CheckRun, ...] = ()
     linked_issues: tuple[LinkedIssue, ...] = ()
+    governing_issues: tuple[GoverningIssue, ...] = ()
     inline_comments_complete: bool = False
     check_runs_complete: bool = False
     linked_issues_complete: bool = False
+    governing_issues_complete: bool = False
     conversation_comments_complete: bool = False
     reviews_complete: bool = False
 
@@ -171,7 +213,9 @@ class GitHubBoundary(Protocol):
 
     def reviews(self, repo: str, number: int) -> tuple[Comment, ...]: ...
 
-    def review_evidence(self, repo: str, number: int, head: str) -> ReviewEvidence: ...
+    def review_evidence(
+        self, repo: str, number: int, head: str, governing_issues: Sequence[int]
+    ) -> ReviewEvidence: ...
 
 
 class GhCliGitHub:
@@ -237,14 +281,21 @@ class GhCliGitHub:
         # the page the current head's artifact is on.
         return tuple(_review_from(item) for item in _flatten_pages(payload))
 
-    def review_evidence(self, repo: str, number: int, head: str) -> ReviewEvidence:
-        """The three surfaces a credential-free lane cannot read for itself.
+    def review_evidence(
+        self, repo: str, number: int, head: str, governing_issues: Sequence[int]
+    ) -> ReviewEvidence:
+        """The four surfaces a credential-free lane cannot read for itself.
 
         Inline comments and check runs go through the REST API with
         ``--paginate``; the check-run response also states how many the head
         has, so "every page arrived" is checkable rather than assumed. Closing
         issue references come from ``gh pr view``, which asks for one page, so
         completeness is only claimed when fewer came back than that page holds.
+
+        ``governing_issues`` are read one at a time, by the number the run's
+        trusted configuration gave. Each read is exact — the response has to be
+        the issue that was asked for — so this surface is complete when every
+        configured issue came back and no other way.
         """
         owner, _, name = repo.partition("/")
         inline = tuple(
@@ -289,13 +340,38 @@ class GhCliGitHub:
                 what="pull request closing issue references",
             )
         )
+        governing = tuple(
+            _governing_issue_from(
+                self._json(
+                    [
+                        self._gh,
+                        "issue",
+                        "view",
+                        str(issue_number),
+                        "--repo",
+                        repo,
+                        "--json",
+                        _ISSUE_FIELDS,
+                    ],
+                    what=f"governing issue #{issue_number}",
+                ),
+                expected=issue_number,
+            )
+            for issue_number in governing_issues
+        )
         return ReviewEvidence(
             inline_comments=inline,
             check_runs=checks,
             linked_issues=issues,
+            governing_issues=governing,
             inline_comments_complete=True,
             check_runs_complete=checks_complete,
             linked_issues_complete=issues_complete,
+            # Every configured issue was asked for by number and answered as
+            # that number, or the read above raised. There is no partial state
+            # to describe, and no way for "none were configured" to arrive here
+            # as a complete contract: the config requires at least one.
+            governing_issues_complete=len(governing) == len(governing_issues) > 0,
             # ``reviews`` is read with ``--paginate`` to the last page;
             # ``comments`` is one ``gh pr view`` read with no such guarantee,
             # and proving that surface complete is PAPI-97's obligation.
@@ -387,6 +463,17 @@ def _pull_request_from(payload: dict[str, Any], *, repo: str, number: int) -> Pu
             "pull request payload is missing isDraft",
             evidence={"repo": repo, "pr": number},
         )
+    # A PR with no description answers with an empty string, which is a real
+    # state a reviewer may need to fault. An absent or null field is a read that
+    # did not deliver the body, and a credential-free lane has no second chance
+    # at it, so it fails closed here rather than becoming a silent empty body.
+    body = payload.get("body")
+    if not isinstance(body, str):
+        raise GitHubError(
+            "pull request payload is missing its body; a reviewer is handed this "
+            "text as the change's stated contract and cannot read it for itself",
+            evidence={"repo": repo, "pr": number, "field": "body"},
+        )
     return PullRequest(
         number=number,
         state=text("state"),
@@ -396,6 +483,7 @@ def _pull_request_from(payload: dict[str, Any], *, repo: str, number: int) -> Pu
         head_ref_name=text("headRefName"),
         head_ref_oid=head_ref_oid,
         base_ref_name=text("baseRefName"),
+        body=body,
     )
 
 
@@ -576,12 +664,21 @@ _CLOSING_ISSUES_PAGE = 100
 
 
 def _linked_issues_from(payload: dict[str, Any]) -> tuple[tuple[LinkedIssue, ...], bool]:
-    """The issues this PR declares it closes, and whether that list is whole."""
+    """The issues this PR declares it closes, and whether that list is whole.
+
+    A PR that closes nothing answers with an explicit ``[]``. An absent or null
+    field is a different fact — the requested field did not come back — and it
+    is the one that must not be rounded up into a complete empty surface, or a
+    reviewer is handed "this PR closes nothing" as a proven statement about a
+    read that never happened.
+    """
     raw = payload.get("closingIssuesReferences")
-    if raw is None:
-        return (), True
     if not isinstance(raw, list):
-        raise GitHubError("closingIssuesReferences is not an array")
+        raise GitHubError(
+            "closingIssuesReferences is missing, null, or not an array; an absent "
+            "field is not a PR that provably closes nothing",
+            evidence={"found": "null" if raw is None else type(raw).__name__},
+        )
     issues: list[LinkedIssue] = []
     for item in raw:
         if not isinstance(item, dict):
@@ -600,11 +697,40 @@ def _linked_issues_from(payload: dict[str, Any]) -> tuple[tuple[LinkedIssue, ...
     return tuple(issues), len(issues) < _CLOSING_ISSUES_PAGE
 
 
+def _governing_issue_from(payload: dict[str, Any], *, expected: int) -> GoverningIssue:
+    """One configured governing issue, held to the number that was asked for.
+
+    The body is the contract, so a payload without one is not a thin issue: it
+    is a read that did not deliver the thing the reviewer is judged against.
+    """
+    number = payload.get("number")
+    if not isinstance(number, int) or isinstance(number, bool) or number != expected:
+        raise GitHubError(
+            "governing issue payload is for a different issue",
+            evidence={"expected": expected, "found": number if isinstance(number, int) else None},
+        )
+    body = payload.get("body")
+    if not isinstance(body, str):
+        raise GitHubError(
+            "governing issue payload has no body; the issue body is the task "
+            "contract a credential-free reviewer judges this change against",
+            evidence={"issue": expected, "field": "body"},
+        )
+    return GoverningIssue(
+        number=number,
+        title=str(payload.get("title") or ""),
+        state=str(payload.get("state") or ""),
+        body=body,
+        url=str(payload.get("url") or ""),
+    )
+
+
 __all__ = [
     "CheckRun",
     "Comment",
     "GhCliGitHub",
     "GitHubBoundary",
+    "GoverningIssue",
     "InlineComment",
     "LinkedIssue",
     "PullRequest",
