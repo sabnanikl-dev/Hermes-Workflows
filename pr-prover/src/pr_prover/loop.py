@@ -4,10 +4,14 @@ One pass is::
 
     inspect live PR  ->  bind exact headRefOid
     verify remote branch head matches that oid
-    fresh isolated worktree at the exact head
     baseline gates (browser/visual gates when the PR requires them)
-    exact-head reviewer A/B  ->  machine-readable verdicts
+    exact-head reviewer A/B/auditor  ->  machine-readable verdicts
     classify: blocking / non-blocking / false-positive / needs-karan
+
+with every one of those gate and reviewer lanes in a fresh isolated worktree of
+its own at the exact head, proved clean and on that SHA before and after it runs
+(:meth:`ProverLoop._lane_worktree`), so no lane can hand bytes to the lane that
+judges after it,
 
 and then either reports, or opens a bounded fix attempt::
 
@@ -62,11 +66,33 @@ remaining question in the same attempt worktree — is the head this attempt
 opened on still an ancestor of the head that landed — and stops the run when it
 is not, or when git cannot answer.
 
-**Comment identity.** The builder's fix comment is accepted only from the exact
+**Artifact identity.** The builder's fix comment is accepted only from the exact
 configured login, and only if GitHub's own comment id was not already present
 before the builder was invoked. The signature and the head SHA both become
 public the moment the real comment is posted, so neither can carry the proof on
-its own.
+its own. Each reviewer lane owes the same kind of proof: a published artifact,
+under its configured login, carrying its role and runtime on their own lines,
+declaring the same status and blocking count its marker did, and bound to this
+exact head — by GitHub's own review ``commit_id`` where there is one, and by the
+canonical body declaration in every case. When publication is relayed, the
+judging lane runs credential-free and the parent performs the transport, so
+preparing, publishing, and reading back are three separately reportable steps
+rather than one claim.
+
+**Owned artifacts, and everything else.** Every artifact this run watches appear
+and verifies is retained by id in the run state file. That is the whole
+definition of "this run published it": everything visible in a body is copyable
+once a real artifact exists, so shape proves nothing and a configured login
+proves nothing. Before a builder is launched, any comment or review this run
+cannot attribute to itself stops the run and asks Karan — deliberately blunt, in
+the direction that stops rather than proceeds, because a builder fixing against
+an unread human objection is the failure this exists to prevent.
+
+**Observability.** Every lane is launched through one path that inherits the
+operator's session, applies the lane's own named environment overlay, records
+elapsed time and quiet time while the lane runs, and reports how it ended. Quiet
+output is written down; it is never read as a hang, and only a lane's own
+configured budget ever ends one.
 
 Push and comment verification is also *durable*. The attempt is journaled as
 in-flight before the builder is invoked and cleared only once that verification
@@ -85,23 +111,28 @@ with the evidence preserved.
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .commands import CommandResult, CommandRunner, render_argv
-from .config import RunConfig
+from .commands import CommandResult, CommandRunner, Progress, render_argv
+from .config import LaneEnv, ReviewerConfig, RunConfig
 from .errors import (
     AmbiguousPush,
     BuilderRefusal,
     FailClosed,
     FailureRecord,
+    HumanFeedbackPresent,
     LaneFailure,
     PrProverError,
     ReadbackMismatch,
+    ReviewerRelayError,
     ScopeContamination,
     StaleHead,
     StateError,
@@ -118,9 +149,18 @@ from .findings import (
     default_adjudicator,
     utc_now,
 )
-from .github import GitHubBoundary, PullRequest
+from .github import Comment, GitHubBoundary, PullRequest
+from .packet import EvidencePacket, build_packet, read_packet, write_packet
 from .redaction import evidence as redact_evidence
 from .redaction import sanitize
+from .reviewers import (
+    artifact_matches,
+    artifact_path,
+    credential_free as credential_free_env,
+    credential_free_config_dir,
+    expected_block,
+    read_prepared,
+)
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
     BuilderReport,
@@ -155,6 +195,49 @@ class GateOutcome:
     output: str
 
 
+@dataclass(frozen=True)
+class LaneObservation:
+    """How one lane's process actually ended, kept whatever its verdict said.
+
+    ``quiet_seconds`` is here to be read, not acted on: a long quiet stretch
+    followed by a clean exit is a normal trusted-agent run, and the loop records
+    it so a later "was it hung?" question has an answer instead of an inference.
+    """
+
+    lane: str
+    state: str
+    returncode: int
+    duration: float
+    quiet_seconds: float
+
+
+@dataclass(frozen=True)
+class ArtifactTransport:
+    """One artifact's journey from a lane to GitHub, step by distinguishable step.
+
+    Transport success and implementation verdict are different claims, and a
+    report that blurs them lets "the reviewer artifact reached the PR" read as
+    "the reviewer passed". So the three steps are recorded separately: the lane
+    *prepared* something valid, the relay (or the lane itself) *published* it,
+    and GitHub itself *shows* it under the configured identity for this exact
+    head. Only the last of those is evidence; the first two are what a lane and
+    a transport said about themselves.
+    """
+
+    lane: str
+    role: str
+    head: str
+    identity: str
+    prepared: bool = False
+    published: bool = False
+    read_back: bool = False
+    identifier: str = ""
+
+    @property
+    def complete(self) -> bool:
+        return self.read_back
+
+
 @dataclass
 class RunResult:
     """The terminal report for one run, tied to the final exact head."""
@@ -178,6 +261,12 @@ class RunResult:
     classification_head: str | None = None
     verdicts: tuple[ReviewerVerdict, ...] = ()
     gates: tuple[GateOutcome, ...] = ()
+    # How each lane's process ended, and how each artifact actually reached
+    # GitHub. Kept beside the verdicts rather than folded into them: a lane that
+    # ran cleanly and an artifact that landed are transport facts, and the
+    # verdict is what the review concluded.
+    lanes: tuple[LaneObservation, ...] = ()
+    transport: tuple[ArtifactTransport, ...] = ()
     events: tuple[str, ...] = ()
     evidence: dict[str, Any] = field(default_factory=dict)
     retained_paths: tuple[str, ...] = ()
@@ -215,9 +304,15 @@ class ProverLoop:
         self._state: RunState | None = None
         self._events: list[str] = []
         self._gates: list[GateOutcome] = []
+        self._lanes: list[LaneObservation] = []
+        self._transport: list[ArtifactTransport] = []
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
         self._failures: list[FailureRecord] = []
         self._retained: list[str] = []
+        # Strictly increasing across the whole run, so a frozen evidence packet
+        # is bound to the one lane it was written for and no lane can be handed
+        # another's — including across a second fix cycle on a re-proved head.
+        self._packet_sequence = 0
         # The head the live PR was last actually observed on. ``state.head`` is
         # the head this run bound its work to; the two agree until GitHub moves
         # underneath the run, and a fail-closed report has to be able to tell
@@ -348,6 +443,11 @@ class ProverLoop:
             # A fix attempt is about to build on this head. Prove it is still the
             # live one before spending an attempt on it.
             self._assert_live_state(pull, before="open a fix attempt")
+            # And prove nobody is waiting on an answer this run cannot see.
+            # Before ``begin_attempt`` on purpose: a run that stops here has
+            # spent no attempt, journalled no in-flight phase, and left nothing
+            # for the next run to reconcile.
+            self._assert_no_unowned_feedback(head)
             attempt = state.begin_attempt()
             # Journaled before the builder can run, cleared only once the push
             # and the fix comment are verified: an interruption anywhere in
@@ -467,45 +567,53 @@ class ProverLoop:
         self._gates = []
         self._verdicts = ()
         self._failures = []
-        worktree = self.worktrees.create(f"pr{pull.number}-{head[:12]}-inspect", head)
-        try:
-            findings = list(self._run_gates(pull, head, worktree))
-            if findings:
-                self._event(
-                    f"{len(findings)} baseline gate failure(s); reviewers not launched on {head}"
-                )
-            else:
-                verdicts = self._run_reviewers(pull, head, worktree)
-                self._verdicts = verdicts
-                findings.extend(item for verdict in verdicts for item in verdict.findings)
-        except Exception:
-            self._retain(worktree, why="evaluation failed")
-            raise
-        self.worktrees.remove(worktree)
+        self._transport = []
+        findings = list(self._run_gates(pull, head))
+        if findings:
+            self._event(
+                f"{len(findings)} baseline gate failure(s); reviewers not launched on {head}"
+            )
+        else:
+            verdicts = self._run_reviewers(pull, head)
+            self._verdicts = verdicts
+            findings.extend(item for verdict in verdicts for item in verdict.findings)
         return classify(findings, adjudicator=self.adjudicator, clock=self.clock)
 
-    def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
+    def _run_gates(self, pull: PullRequest, head: str) -> list[Finding]:
         findings: list[Finding] = []
-        for gate in self.config.gates:
+        for index, gate in enumerate(self.config.gates, start=1):
             if gate.kind == "visual" and not self.config.visual_qa_required:
                 self._event(f"visual gate {gate.name!r} skipped: this PR does not require visual QA")
                 continue
-            argv = render_argv(
-                gate.argv,
-                self._values(pull, head, worktree),
-                what=f"gate {gate.name!r}",
-            )
-            result = self.runner.run(argv, cwd=worktree, timeout=gate.timeout)
-            output = redact_evidence(_combined(result))
-            self._gates.append(
-                GateOutcome(
-                    name=gate.name,
-                    kind=gate.kind,
-                    returncode=result.returncode,
-                    passed=result.ok,
-                    output=output,
+            lane = f"gate {gate.name}"
+            with self._lane_worktree(
+                f"pr{pull.number}-{head[:12]}-gate{index}-{_slug(gate.name)}", head, lane=lane
+            ) as worktree:
+                argv = render_argv(
+                    gate.argv,
+                    self._values(pull, head, worktree),
+                    what=f"gate {gate.name!r}",
                 )
-            )
+                result = self._run_lane(
+                    argv,
+                    lane=lane,
+                    cwd=worktree,
+                    timeout=gate.timeout,
+                    env=gate.env,
+                )
+                # Recorded before the worktree is verified and removed, so a
+                # gate that both failed and left its checkout dirty reports what
+                # it said as well as what it left behind.
+                output = redact_evidence(_combined(result))
+                self._gates.append(
+                    GateOutcome(
+                        name=gate.name,
+                        kind=gate.kind,
+                        returncode=result.returncode,
+                        passed=result.ok,
+                        output=output,
+                    )
+                )
             if result.ok:
                 self._event(f"gate {gate.name!r} passed on {head}")
                 continue
@@ -553,18 +661,75 @@ class ProverLoop:
             )
         return findings
 
-    def _run_reviewers(
-        self, pull: PullRequest, head: str, worktree: Path
-    ) -> tuple[ReviewerVerdict, ...]:
+    def _run_reviewers(self, pull: PullRequest, head: str) -> tuple[ReviewerVerdict, ...]:
+        """Run the ordered acceptance lifecycle against one exact head.
+
+        The lanes run in configured order, which the configuration pins to
+        Reviewer A, Reviewer B, Integration Auditor — the auditor reconciles two
+        artifacts that must already exist when it starts, so the order is part
+        of what is being proved rather than an operator convention.
+
+        Each lane is fresh: its own disposable worktree at the verified head,
+        proved clean and at that exact SHA before it is launched and again after
+        it returns, a new prepared-artifact path cleared before launch, and a
+        snapshot of the artifact ids already on the PR taken before the lane can
+        post anything. Nothing carries over from the previous lane or the
+        previous cycle — including bytes: a file Reviewer A leaves in its
+        checkout is not in the checkout Reviewer B or the auditor judges.
+        """
         verdicts: list[ReviewerVerdict] = []
         for reviewer in self.config.reviewers:
-            argv = render_argv(
-                reviewer.argv,
-                self._values(pull, head, worktree, extra={"reviewer": reviewer.name}),
-                what=f"reviewer {reviewer.name!r}",
+            verdicts.append(self._run_reviewer(reviewer, pull, head))
+        return tuple(verdicts)
+
+    def _run_reviewer(
+        self, reviewer: ReviewerConfig, pull: PullRequest, head: str
+    ) -> ReviewerVerdict:
+        relayed = reviewer.relay is not None
+        # Where a credential-free lane leaves its finished artifact. Outside
+        # every repository, and cleared before the lane can be launched.
+        prepared_path = artifact_path(self._scratch_dir(), reviewer=reviewer.name, head=head)
+        # A relayed lane cannot reach GitHub at all, so ``gh``'s configuration
+        # search is pointed at somewhere empty this run owns.
+        gh_config = (
+            credential_free_config_dir(self._scratch_dir(), reviewer=reviewer.name)
+            if relayed
+            else None
+        )
+        lane = f"reviewer {reviewer.name}"
+        # This reviewer's own checkout of the exact head, which no other lane
+        # ever sees. The relay shares it rather than taking a second one: it
+        # publishes a file that already lives outside every repository, so it
+        # needs no checkout of its own, and holding this one until the relay is
+        # done keeps ``{worktree}`` meaning the same directory for both halves
+        # of one lane.
+        with self._lane_worktree(
+            f"pr{pull.number}-{head[:12]}-{_slug(reviewer.role)}", head, lane=lane
+        ) as worktree:
+            # The last thing before the lane is launched: one read of the PR's
+            # published surfaces, frozen to a file for a lane that cannot read
+            # them itself, and kept as the ids that were already there.
+            packet, known = self._freeze_evidence(reviewer, pull, head)
+            values = self._values(
+                pull,
+                head,
+                worktree,
+                extra={
+                    "reviewer": reviewer.name,
+                    "role": reviewer.role,
+                    "artifact_file": str(prepared_path),
+                    "evidence_packet": str(packet.path),
+                },
             )
-            lane = f"reviewer {reviewer.name}"
-            result = self.runner.run(argv, cwd=worktree, timeout=reviewer.timeout)
+            argv = render_argv(reviewer.argv, values, what=f"reviewer {reviewer.name!r}")
+            result = self._run_lane(
+                argv,
+                lane=lane,
+                cwd=worktree,
+                timeout=reviewer.timeout,
+                env=reviewer.env,
+                credential_free=gh_config,
+            )
             self._reject_timed_out(result, lane=lane, head=head)
             verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
             # "pass" is the only verdict that lets the PR through this lane, so
@@ -573,13 +738,446 @@ class ProverLoop:
             self._require_success_for_clean(
                 result, lane=lane, status=verdict.status, clean="pass", head=head
             )
-            verdicts.append(verdict)
-            self._event(
-                f"reviewer {reviewer.name} returned {verdict.status} with "
-                f"{len(verdict.blocking)} blocking finding(s) on {head} "
-                f"(exit {result.returncode})"
+            blocking = len(verdict.blocking)
+            # Opened before the transport starts and advanced step by step, so a
+            # stop part-way through still reports how far this artifact actually
+            # got: "prepared but never published" and "published but never read
+            # back" are different diagnoses, and a bare readback failure names
+            # neither.
+            self._transport.append(
+                ArtifactTransport(
+                    lane=lane, role=reviewer.role, head=head, identity=reviewer.artifact_author
+                )
             )
-        return tuple(verdicts)
+            if relayed:
+                attributable = self._relay_artifact(
+                    reviewer,
+                    head,
+                    prepared_path,
+                    values,
+                    cwd=worktree,
+                    status=verdict.status,
+                    blocking=blocking,
+                )
+            else:
+                # A self-publishing lane prepares and publishes in one step this
+                # loop cannot see between; only the readback below is evidence,
+                # and the pre-launch snapshot is the newest one there can be.
+                self._mark_transport(prepared=True, published=True)
+                attributable = known
+        self._read_back_reviewer(
+            reviewer,
+            head,
+            attributable,
+            launched=known,
+            status=verdict.status,
+            blocking=blocking,
+        )
+        self._event(
+            f"reviewer {reviewer.name} returned {verdict.status} with "
+            f"{blocking} blocking finding(s) on {head} (exit {result.returncode})"
+        )
+        return verdict
+
+    def _relay_artifact(
+        self,
+        reviewer: ReviewerConfig,
+        head: str,
+        prepared: Path,
+        values: Mapping[str, str],
+        *,
+        cwd: Path,
+        status: str,
+        blocking: int,
+    ) -> frozenset[str]:
+        """Publish a credential-free reviewer's prepared artifact, once it validates.
+
+        This is the whole transport half of the lifecycle. The file the lane
+        wrote is held to this reviewer's signature, role line, runtime, declared
+        status and blocking count, and this exact head before the configured
+        relay command is allowed to post it. An artifact that would fail
+        readback therefore never reaches GitHub at all, and a relay that cannot
+        publish stops the run rather than leaving the next step to discover an
+        absence it cannot explain.
+
+        What is returned is the artifact-id snapshot taken *immediately before*
+        the relay ran, and it is the set readback attributes against. The
+        pre-launch snapshot cannot do that job: it answers "did this id exist
+        before the lane started", which a valid artifact posted by the lane
+        itself also satisfies. Only an id that appeared in the window this relay
+        owns is evidence that this relay published — so a reviewer-side post,
+        however well-formed and however genuinely under the configured login,
+        can never stand in for transport that never happened.
+        """
+        relay = reviewer.relay
+        if relay is None:  # pragma: no cover - the caller only relays what has one
+            # Everything currently published, so nothing is attributable. The
+            # conservative answer is the right one for a branch that should not
+            # be reachable: an empty set would credit whatever happens to be on
+            # the PR to a transport that never ran.
+            return self._artifact_identities()
+        artifact = read_prepared(
+            prepared,
+            reviewer=reviewer.name,
+            role=reviewer.role,
+            signature=reviewer.artifact_signature,
+            head=head,
+            status=status,
+            blocking=blocking,
+        )
+        self._mark_transport(prepared=True)
+        self._event(
+            f"reviewer {reviewer.name} prepared a {artifact.size}-byte artifact for {head} "
+            f"as {artifact.claim.runtime} with no GitHub credential in its lane"
+        )
+        lane = f"relay {reviewer.name}"
+        argv = render_argv(relay.argv, values, what=f"reviewer {reviewer.name!r} relay")
+        # Taken here, after the reviewer has exited and before the relay is
+        # launched, so the only ids that can be credited to this transport are
+        # the ones that appear inside the relay's own window.
+        pre_relay = self._artifact_identities()
+        result = self._run_lane(argv, lane=lane, cwd=cwd, timeout=relay.timeout, env=relay.env)
+        self._reject_timed_out(result, lane=lane, head=head)
+        if not result.ok:
+            raise ReviewerRelayError(
+                f"the relay for reviewer {reviewer.name} did not publish its prepared artifact",
+                evidence={
+                    "reviewer": reviewer.name,
+                    "head": head,
+                    "artifact_file": str(prepared),
+                    "returncode": result.returncode,
+                    "output": redact_evidence(_combined(result), limit=2000),
+                },
+            )
+        self._mark_transport(published=True)
+        self._event(
+            f"reviewer {reviewer.name} artifact relayed for {head} as {reviewer.artifact_author}"
+        )
+        return pre_relay
+
+    def _read_back_reviewer(
+        self,
+        reviewer: ReviewerConfig,
+        head: str,
+        attributable: frozenset[str],
+        *,
+        launched: frozenset[str],
+        status: str,
+        blocking: int,
+    ) -> None:
+        """Find the artifact this run's own transport published, or stop.
+
+        A lane's stdout is only what a process said about itself, and a relay's
+        exit status only what the transport said about itself; the artifact
+        Karan and the next reviewer act on is the one on the PR. So it must be
+        new since the moment transport began, published under the configured
+        login, carry this lane's role and runtime on their own lines, declare
+        the same status and blocking count the lane's marker did, and be bound
+        to this exact head — by GitHub's own ``commit_id`` where a review has
+        one, and by the canonical declaration in every case.
+
+        ``attributable`` is that moment: for a relayed lane it is the snapshot
+        taken immediately before the relay ran, and for a self-publishing lane
+        the snapshot taken before it was launched. ``launched`` is always the
+        pre-launch one, and the difference between the two is diagnostic — a
+        credential-free lane that somehow published for itself shows up as a
+        count in the evidence rather than as a silently accepted artifact.
+
+        The id of whatever satisfies all of that is then retained. It is the one
+        part of a published artifact this run proved it caused: everything in
+        the body is copyable the moment a real artifact exists.
+        """
+        published = self._artifacts()
+        fresh = [item for item in published if item.identifier not in attributable]
+        lane_published = len(attributable - launched)
+        for artifact in fresh:
+            if not artifact_matches(
+                artifact,
+                author=reviewer.artifact_author,
+                signature=reviewer.artifact_signature,
+                role=reviewer.role,
+                head=head,
+                status=status,
+                blocking=blocking,
+            ):
+                continue
+            self._event(
+                f"reviewer {reviewer.name} {artifact.kind} {artifact.identifier} "
+                f"read back for {head} as ROLE={reviewer.role}"
+            )
+            self._retain_artifact(artifact, lane=f"reviewer {reviewer.name}")
+            self._mark_transport(read_back=True, identifier=artifact.identifier)
+            return
+        raise ReadbackMismatch(
+            f"reviewer {reviewer.name} published no artifact carrying its configured "
+            "author, signature, role, runtime, verdict, and this exact head together",
+            evidence={
+                "reviewer": reviewer.name,
+                "role": reviewer.role,
+                "head": head,
+                "expected_author": reviewer.artifact_author,
+                "expected_signature": reviewer.artifact_signature,
+                "expected_block": expected_block(
+                    role=reviewer.role, head=head, status=status, blocking=blocking
+                ),
+                "artifacts_seen": len(published),
+                "artifacts_since_transport_began": len(fresh),
+                # Nonzero means something posted to the PR while a lane that has
+                # no GitHub credential was running. Whatever it was, it is not
+                # this run's transport, and naming it is how a missing relay post
+                # stops looking like a readback puzzle.
+                "artifacts_published_before_transport": lane_published,
+            },
+        )
+
+    # -- one disposable checkout per lane ----------------------------------
+    @contextmanager
+    def _lane_worktree(self, label: str, head: str, *, lane: str) -> Iterator[Path]:
+        """One exact-head checkout, owned by exactly one gate or reviewer lane.
+
+        M9 says each lane runs in a fresh run-owned worktree at a verified head,
+        and that is only true if the lanes do not share one. Sharing is not a
+        theoretical problem here: the acceptance lifecycle is deliberately
+        sequential, so anything Reviewer A writes into a shared checkout — a
+        cache, a generated file, an accidental edit — is sitting there when
+        Reviewer B and then the Integration Auditor form the judgement that
+        decides ``merge-ready``, while all three artifacts still declare the
+        committed head. Those are non-head bytes earning an exact-head verdict.
+
+        So each lane gets its own path, and the path is held to the same two
+        facts before the lane is launched and after it returns: nothing
+        uncommitted or untracked is in it, and it is still sitting on exactly
+        the SHA this run is bound to. The "before" check is what makes the
+        freshness claim evidence rather than an assumption about ``git worktree
+        add``; the "after" check is what turns a lane that wrote into the tree it
+        was judging into a deterministic stop instead of a silent influence on
+        the next verdict. A lane that fails either keeps its worktree for
+        inspection, exactly as a failed attempt does.
+        """
+        worktree = self.worktrees.create(label, head)
+        try:
+            self._assert_lane_worktree(worktree, head=head, lane=lane, when="before")
+            yield worktree
+            self._assert_lane_worktree(worktree, head=head, lane=lane, when="after")
+        except Exception:
+            self._retain(worktree, why=f"{lane} failed")
+            raise
+        self.worktrees.remove(worktree)
+
+    def _assert_lane_worktree(
+        self, worktree: Path, *, head: str, lane: str, when: str
+    ) -> None:
+        """This lane's checkout is clean and is exactly the head it claims."""
+        result = self.runner.run(
+            ["git", "-C", str(worktree), "status", "--porcelain"], timeout=120.0
+        )
+        if not result.ok:
+            raise ScopeContamination(
+                f"could not confirm the {lane} worktree is clean {when} the lane ran",
+                evidence={
+                    "lane": lane,
+                    "when": when,
+                    "worktree": str(worktree),
+                    "returncode": result.returncode,
+                    "stderr": redact_evidence(result.stderr, limit=1000),
+                },
+            )
+        if result.stdout.strip():
+            raise ScopeContamination(
+                f"the {lane} worktree holds uncommitted or untracked changes {when} the lane ran",
+                evidence={
+                    "lane": lane,
+                    "when": when,
+                    "head": head,
+                    "worktree": str(worktree),
+                    "git_status": redact_evidence(result.stdout, limit=2000),
+                },
+            )
+        local = self._local_head(worktree)
+        if local != head:
+            raise StaleHead(
+                f"the {lane} worktree is not sitting on the head this run is bound to",
+                evidence={
+                    "lane": lane,
+                    "when": when,
+                    "bound_head": head,
+                    "local_head": local,
+                    "worktree": str(worktree),
+                },
+            )
+
+    # -- frozen evidence for a lane that cannot read GitHub ----------------
+    def _freeze_evidence(
+        self, reviewer: ReviewerConfig, pull: PullRequest, head: str
+    ) -> tuple[EvidencePacket, frozenset[str]]:
+        """Freeze what this lane may read, and what it must not be credited for.
+
+        One read of the PR's published surfaces answers both questions at one
+        instant: it is the evidence a lane with no GitHub credential judges
+        from, and it is the set of artifact ids that already existed before that
+        lane was launched. Reading them separately would let a packet describe a
+        PR the snapshot disagrees with.
+
+        The packet is written and then read back from disk and held to its
+        binding, for the same reason every other claim here is re-read rather
+        than assumed: what the lane is handed is the file, not the payload this
+        process assembled. A packet that did not land, landed empty, or is the
+        one an earlier cycle left at that path stops the lane before it forms a
+        confident review of the wrong head.
+
+        The configured governing issue numbers travel into both halves of that
+        round trip — the same value that was just handed to GitHub — so the
+        contract a lane is measured against is held to the run's configuration
+        rather than to whichever issue records reached the file.
+        """
+        comments = self.github.comments(self.config.repo, self.config.pr)
+        reviews = self.github.reviews(self.config.repo, self.config.pr)
+        evidence = self.github.review_evidence(
+            self.config.repo, self.config.pr, head, self.config.governing_issues
+        )
+        self._packet_sequence += 1
+        sequence = self._packet_sequence
+        payload = build_packet(
+            pull=pull,
+            repo=self.config.repo,
+            head=head,
+            sequence=sequence,
+            reviewer=reviewer.name,
+            role=reviewer.role,
+            comments=comments,
+            reviews=reviews,
+            evidence=evidence,
+            governing_issues=self.config.governing_issues,
+        )
+        path = (
+            self._scratch_dir()
+            / f"evidence-{_slug(reviewer.name)}-{head[:12]}-{sequence}.packet.json"
+        )
+        packet = write_packet(path, payload)
+        read_packet(
+            path,
+            repo=self.config.repo,
+            pr=pull.number,
+            base=pull.base_ref_name,
+            head=head,
+            sequence=sequence,
+            reviewer=reviewer.name,
+            role=reviewer.role,
+            governing_issues=self.config.governing_issues,
+        )
+        self._event(
+            f"reviewer {reviewer.name} handed a {packet.size}-byte frozen evidence packet "
+            f"for {head} (sha256 {packet.digest[:12]}, sequence {sequence})"
+        )
+        return packet, frozenset(item.identifier for item in (*comments, *reviews))
+
+    # -- run-owned artifacts ----------------------------------------------
+    def _artifacts(self) -> tuple[Comment, ...]:
+        """Every published comment and review on the PR, as untrusted evidence."""
+        return (
+            *self.github.comments(self.config.repo, self.config.pr),
+            *self.github.reviews(self.config.repo, self.config.pr),
+        )
+
+    def _artifact_identities(self) -> frozenset[str]:
+        return frozenset(artifact.identifier for artifact in self._artifacts())
+
+    def _retain_artifact(self, artifact: Comment, *, lane: str) -> None:
+        """Keep one verified artifact id as this run's own evidence, durably.
+
+        Retained in the state file rather than only in memory, because a second
+        fix cycle still has to recognise what the first cycle published. What is
+        kept is the id and nothing else: it is the single part of a published
+        artifact this run proved it caused, since everything visible in the body
+        becomes copyable the moment a real artifact is posted.
+        """
+        state = self._state
+        if state is None:  # pragma: no cover - a lane only runs inside a locked run
+            return
+        if state.remember_artifact(artifact.identifier):
+            self._event(
+                f"{lane} artifact {artifact.identifier} retained as this run's own publication"
+            )
+
+    def _mark_transport(self, **changes: Any) -> None:
+        """Advance the artifact-transport record this lane is currently filling in."""
+        if not self._transport:  # pragma: no cover - defensive
+            return
+        current = self._transport[-1]
+        self._transport[-1] = ArtifactTransport(
+            lane=current.lane,
+            role=current.role,
+            head=current.head,
+            identity=current.identity,
+            prepared=bool(changes.get("prepared", current.prepared)),
+            published=bool(changes.get("published", current.published)),
+            read_back=bool(changes.get("read_back", current.read_back)),
+            identifier=str(changes.get("identifier", current.identifier)),
+        )
+
+    # -- launching a trusted lane -----------------------------------------
+    def _run_lane(
+        self,
+        argv: Sequence[str],
+        *,
+        lane: str,
+        cwd: Path,
+        timeout: float | None,
+        env: LaneEnv,
+        credential_free: Path | None = None,
+    ) -> CommandResult:
+        """Launch one lane and keep its observable state.
+
+        The environment is inherited and then adjusted by the lane's own named
+        overlay, so the trusted agent keeps the session it authenticates with.
+        Passing ``credential_free`` — the fresh empty ``gh`` configuration
+        directory this lane owns — additionally strips the GitHub credential
+        variables by name and points ``gh``'s configuration search at that
+        directory: the lane audits and prepares an artifact, and its relay
+        publishes. It is one parameter rather than a flag and a path so that
+        asking for a credential-free lane without having somewhere empty to
+        point it at is not expressible. While it runs, progress is recorded;
+        when it ends, so is how it ended. Silence is written down, never
+        converted into a failure.
+
+        The budget passed here is the budget enforced: a lane with none named
+        runs to its own completion, which is what ``unbounded`` in the run log
+        means.
+        """
+        self._event(f"{lane} launched: {argv[0]} (budget {_budget(timeout)})")
+        resolved = env.apply(os.environ)
+        if credential_free is not None:
+            resolved = credential_free_env(
+                resolved, base=os.environ, config_dir=credential_free
+            )
+        result = self.runner.run(
+            argv,
+            cwd=cwd,
+            env=resolved,
+            timeout=timeout,
+            progress=lambda update: self._observe_progress(lane, update),
+        )
+        self._lanes.append(
+            LaneObservation(
+                lane=lane,
+                state=result.state,
+                returncode=result.returncode,
+                duration=result.duration,
+                quiet_seconds=result.quiet_seconds,
+            )
+        )
+        self._event(
+            f"{lane} {result.state} after {result.duration:.0f}s "
+            f"(exit {result.returncode}, quiet {result.quiet_seconds:.0f}s)"
+        )
+        return result
+
+    def _observe_progress(self, lane: str, update: Progress) -> None:
+        """Record that a quiet lane is still alive. Never a reason to end one."""
+        self._event(
+            f"{lane} still running at {update.elapsed:.0f}s "
+            f"({update.output_bytes} bytes of output, quiet {update.quiet_seconds:.0f}s)"
+        )
 
     # -- lane result agreement --------------------------------------------
     def _reject_timed_out(self, result: CommandResult, *, lane: str, head: str) -> None:
@@ -692,6 +1290,86 @@ class ProverLoop:
             raise
         self.worktrees.remove(worktree)
 
+    def _assert_no_unowned_feedback(self, head: str) -> None:
+        """Refuse to launch a builder while the PR carries feedback this run did not write.
+
+        Two notebooks' worth of review converged on the same failure mode: a
+        builder fixing against an incomplete world model of what humans have
+        asked for. A run that has proved gates and reviewers green has proved
+        nothing about the conversation, and "no automated blocker" is not the
+        same claim as "nobody objected".
+
+        So the rule here is deliberately the blunt one, and deliberately in the
+        direction that stops rather than proceeds: every published comment and
+        review whose id this run did not itself watch appear and verify is
+        treated as human feedback, and its presence stops the run before the
+        builder is launched. No prose is interpreted, no login is trusted for
+        being configured, and no resolution state is read.
+
+        What that costs is precision, and the cost is priced. A comment left by
+        a previous run, or an old approving review, stops this one too — the run
+        reports ``needs-karan`` with the ids it could not attribute, and a human
+        decides. Making that precise is the deterministic-reconciliation slice's
+        whole subject: complete surfaces, positive ownership under a shared
+        login, native review and thread resolution, and a finite acknowledgement
+        contract. Until those land, being wrong in this direction means asking
+        Karan too often; being wrong in the other means a builder pushing over
+        an unread "do not merge".
+
+        The check is also not a merge gate. It guards the fix lane only, so a
+        run that reports ``merge-ready`` or ``blocked`` on this head still
+        reports it, and Karan still reads the conversation before merging.
+        """
+        state = self._state
+        artifacts = self._artifacts()
+        unowned = [
+            item
+            for item in artifacts
+            if not (state is not None and state.owns_artifact(item.identifier))
+        ]
+        if not unowned:
+            self._event(
+                f"no unowned PR feedback before the builder launches on {head} "
+                f"({len(artifacts)} artifact(s), all published by this run)"
+            )
+            return
+        raise HumanFeedbackPresent(
+            "the pull request carries feedback this run cannot attribute to one of its "
+            "own lanes; a builder is not launched against an unreconciled conversation",
+            evidence={
+                "head": head,
+                "expected": (
+                    "every comment and review on the PR published by this run's own "
+                    "reviewer or builder lanes and verified at publication"
+                ),
+                "actual": (
+                    f"{len(unowned)} of {len(artifacts)} artifact(s) were not published "
+                    "by this run"
+                ),
+                "unowned": [
+                    {
+                        "artifact_id": item.identifier,
+                        "kind": item.kind,
+                        "author": redact_evidence(item.author, limit=200),
+                        "url": redact_evidence(item.url, limit=300),
+                    }
+                    for item in unowned[:_OBSERVED_CANDIDATES]
+                ],
+                "unowned_not_described": max(0, len(unowned) - _OBSERVED_CANDIDATES),
+                "resolution": (
+                    "read the conversation, decide what it asks for, and either fold it "
+                    "into the ledger by hand or clear it before running again"
+                ),
+                "scope_note": (
+                    "this stop is deliberately conservative and reads only the "
+                    "conversation comments and submitted reviews; complete surface "
+                    "coverage, ownership under a shared publishing login, native "
+                    "review/thread resolution, and acknowledgement semantics are owed "
+                    "by the deterministic human-feedback reconciliation slice"
+                ),
+            },
+        )
+
     def _invoke_builder(
         self,
         state: RunState,
@@ -723,11 +1401,25 @@ class ProverLoop:
             ),
             what="builder",
         )
-        result = self.runner.run(argv, cwd=worktree, timeout=self.config.builder.timeout)
+        # Every builder invocation is a fresh process with a fresh context. The
+        # loop has no resume path and no conversation to hand back: cycle 2 is
+        # launched exactly the way cycle 1 was, re-grounded on the live PR and
+        # on a blocker file written for *this* cycle, and everything that has to
+        # survive between cycles — the attempt number, the reruns spent, the
+        # bound head, the artifacts this run owns — travels through the run
+        # state file instead. A builder carrying a failed cycle's reasoning into
+        # the next one degrades exactly when the last cycle matters most.
+        lane = f"builder ({mode})"
+        result = self._run_lane(
+            argv,
+            lane=lane,
+            cwd=worktree,
+            timeout=self.config.builder.timeout,
+            env=self.config.builder.env,
+        )
         # The builder lane carries the same rule as the reviewer lanes: a
         # timeout is never a verdict, and only the clean claim ("success", the
         # one that leads to push verification) requires a successful process.
-        lane = f"builder ({mode})"
         self._reject_timed_out(result, lane=lane, head=head)
         report = parse_builder_report(
             _combined(result),
@@ -896,13 +1588,13 @@ class ProverLoop:
         )
 
     def _local_head(self, worktree: Path) -> str:
-        """Read ``git rev-parse HEAD`` inside this exact attempt worktree."""
+        """Read ``git rev-parse HEAD`` inside this exact run-owned worktree."""
         result = self.runner.run(
             ["git", "-C", str(worktree), "rev-parse", "HEAD"], timeout=120.0
         )
         if not result.ok:
             raise WorktreeError(
-                "could not read the attempt worktree's local HEAD",
+                "could not read the worktree's local HEAD",
                 evidence={
                     "worktree": str(worktree),
                     "returncode": result.returncode,
@@ -912,7 +1604,7 @@ class ProverLoop:
         local = result.stdout.strip().lower()
         if not _is_full_sha(local):
             raise WorktreeError(
-                "the attempt worktree's local HEAD is not a full 40-hex SHA",
+                "the worktree's local HEAD is not a full 40-hex SHA",
                 evidence={
                     "worktree": str(worktree),
                     "rev_parse": redact_evidence(result.stdout, limit=200),
@@ -970,6 +1662,10 @@ class ProverLoop:
             head_present = head in comment.body
             if author_matches and signature_present and head_present:
                 self._event(f"builder fix comment {comment.identifier} read back for {head}")
+                # This run watched that id appear and just verified it, so it is
+                # this run's own publication rather than feedback the next fix
+                # cycle would have to stop on.
+                self._retain_artifact(comment, lane="builder")
                 return
             if len(observed) < _OBSERVED_CANDIDATES:
                 observed.append(
@@ -1145,6 +1841,8 @@ class ProverLoop:
             classification_head=pull.head_ref_oid,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
+            lanes=tuple(self._lanes),
+            transport=tuple(self._transport),
             events=tuple(self._events),
             retained_paths=tuple(self._retained),
             failures=tuple(self._failures),
@@ -1203,6 +1901,8 @@ class ProverLoop:
             classification_head=bound_head if classification else None,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
+            lanes=tuple(self._lanes),
+            transport=tuple(self._transport),
             events=tuple(self._events),
             evidence=exc.as_dict(),
             retained_paths=tuple(self._retained),
@@ -1233,8 +1933,37 @@ def _is_full_sha(value: str) -> bool:
     return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
 
 
+def _slug(value: str) -> str:
+    """A configured name as a directory-safe worktree label fragment.
+
+    Gate names may contain spaces, so they cannot be pasted into a path the
+    worktree provider will accept. Uniqueness does not rest on this: the callers
+    prefix an index or a required role, both of which are already unique.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-").lower() or "lane"
+
+
 def _marker_count(stream: str) -> int:
     return sum(1 for line in stream.splitlines() if line.lstrip().upper().startswith("DONE:"))
 
 
-__all__ = ["BLOCKED", "MERGE_READY", "NEEDS_KARAN", "GateOutcome", "ProverLoop", "RunResult"]
+def _budget(timeout: float | None) -> str:
+    """How a lane's budget reads in the run log.
+
+    ``unbounded`` is said out loud rather than left blank, because the one thing
+    an operator must be able to tell from the log is whether anything at all
+    will end that lane.
+    """
+    return "unbounded" if timeout is None else f"{timeout:.0f}s"
+
+
+__all__ = [
+    "BLOCKED",
+    "MERGE_READY",
+    "NEEDS_KARAN",
+    "ArtifactTransport",
+    "GateOutcome",
+    "LaneObservation",
+    "ProverLoop",
+    "RunResult",
+]

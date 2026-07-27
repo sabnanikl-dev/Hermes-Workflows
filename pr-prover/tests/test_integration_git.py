@@ -99,6 +99,30 @@ class RealGitTests(unittest.TestCase):
         self.provider.remove(worktree)
         self.assertFalse(worktree.exists())
 
+    def test_a_lane_checkout_really_is_clean_and_on_the_bound_head(self) -> None:
+        """The two facts the loop asserts around every lane, against real git.
+
+        ``_assert_lane_worktree`` runs exactly these two commands before and
+        after each gate and reviewer lane. The doubles agree with themselves
+        about what they answer; this proves the answers are the ones real ``git``
+        gives for a fresh detached worktree, and that a file a lane leaves behind
+        is what ``--porcelain`` reports.
+        """
+        worktree = self.provider.create("reviewer-a", self.head)
+
+        self.assertEqual(git("status", "--porcelain", cwd=worktree), "")
+        self.assertEqual(git("rev-parse", "HEAD", cwd=worktree), self.head)
+
+        (worktree / "reviewer-a-scratch.md").write_text("A generated this\n", encoding="utf-8")
+        self.assertIn("reviewer-a-scratch.md", git("status", "--porcelain", cwd=worktree))
+
+        # The next lane's checkout is a different directory that never held it.
+        other = self.provider.create("reviewer-b", self.head)
+        self.assertNotEqual(other, worktree)
+        self.assertFalse((other / "reviewer-a-scratch.md").exists())
+        self.assertEqual(git("status", "--porcelain", cwd=other), "")
+        self.assertEqual(git("rev-parse", "HEAD", cwd=other), self.head)
+
     def test_two_attempts_can_hold_the_same_head_at_once(self) -> None:
         first = self.provider.create("attempt1", self.head)
         second = self.provider.create("attempt2", self.head)

@@ -111,7 +111,7 @@ CORE_MODULES = (
 # Proof-map rows whose status must stay qualified on this head. Anything else
 # must read exactly "shipped". Flattening the column in either direction — the
 # demonstrated "mark every row shipped" mutation, or a blanket "owed" — fails.
-QUALIFIED_INVARIANTS = ("M2", "M4", "M5", "M6", "M7", "M8", "M10", "M13")
+QUALIFIED_INVARIANTS = ("M2", "M5", "M6", "M7", "M13")
 
 # The exact conflicting spellings already found in these references, pinned so
 # they cannot come back. The router and ``MISSION.md`` own the A → B →
@@ -514,22 +514,40 @@ class RepoContractTests(unittest.TestCase):
                         f"{identifier} defers work without naming who owes it",
                     )
 
-    def test_m13_separates_shipped_redaction_from_owed_transport_and_authority(self) -> None:
-        """Reports redact recursively today; transport status and merge authority do not exist yet."""
+    def test_m13_separates_shipped_transport_reporting_from_owed_merge_authority(self) -> None:
+        """Transport is reported now; explicit merge-authority reporting still is not."""
         status, seams = self.proof_map()["M13"]
         self.assertIn("redaction", status.lower())
-        for owed in ("transport", "merge-authority", "PAPI-90", "PAPI-97"):
-            with self.subTest(owed=owed):
-                self.assertIn(owed, status)
-        self.assertRegex(seams, r"no transport-status or merge-authority field")
+        self.assertIn("transport", status)
+        self.assertIn("merge-authority", status)
+        self.assertIn("PAPI-97", status)
+        self.assertNotIn("PAPI-90", status, "PAPI-90's half of M13 has landed")
+        self.assertRegex(seams, r"no merge-authority field")
         report = (PR_PROVER / "src" / "pr_prover" / "report.py").read_text(encoding="utf-8")
-        for absent in ("transport_status", "merge_authority", "readback_status"):
+        # The half that shipped is present...
+        for present in ("transport", "transport_complete"):
+            with self.subTest(field=present):
+                self.assertIn(present, report)
+        # ...and the half that has not must not appear to be.
+        for absent in ("merge_authority", "karan_approved"):
             with self.subTest(field=absent):
                 self.assertNotIn(
                     absent,
                     report,
                     "report.py grew the field M13 declares owed; update the proof map",
                 )
+
+    def test_the_proof_map_rows_this_slice_ships_name_their_new_seams(self) -> None:
+        """A row that moved to shipped has to say what proves it."""
+        rows = self.proof_map()
+        for identifier, expected in (
+            ("M4", "reviewers.py"),
+            ("M8", "config.py"),
+            ("M10", "report.py"),
+            ("M12", "claude-builder.sh"),
+        ):
+            with self.subTest(invariant=identifier):
+                self.assertIn(expected, rows[identifier][1])
 
     def test_the_contracts_are_reachable_from_the_readmes(self) -> None:
         root = (REPO / "README.md").read_text(encoding="utf-8")

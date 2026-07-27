@@ -24,11 +24,13 @@ inspect live PR → bind exact headRefOid → verify remote head
 The executable is **PAPI-88** of the [control-surface contract](https://github.com/sabnanikl-dev/Hermes-Workflows/issues/1);
 the repo-native contract and the slim
 [`autonomous-pr-prover`](../Karan-skills/software-development/autonomous-pr-prover/SKILL.md)
-router that sends Hermes here are **PAPI-92**. The hardened launcher and
-credential scoping (PAPI-90), deterministic human-feedback reconciliation
-(PAPI-97), and the final integration proof (PAPI-93) are still pending; see the
-proof map in [`MISSION.md`](MISSION.md) for exactly which invariants are shipped
-and which are owed.
+router that sends Hermes here are **PAPI-92**; finding provenance and the
+structured failure records are **PAPI-99**; the trusted execution adapters,
+reviewer artifact lifecycle, and GitHub readback below are **PAPI-90**.
+Deterministic human-feedback reconciliation (PAPI-97) and the final integration
+proof (PAPI-93) are still pending; see the proof map in
+[`MISSION.md`](MISSION.md) for exactly which invariants are shipped and which
+are owed.
 
 ## Run it
 
@@ -42,13 +44,28 @@ pr-prover/bin/pr-prover reset        --config /path/to/run.json [--force]
 Exit codes are the outcome: `0` merge-ready, `1` blocked, `2` needs-Karan
 (including every fail-closed stop), `64` usage or configuration error.
 
-Start from [`examples/run.example.json`](examples/run.example.json). It shows the
-two-lane minimum the tool enforces; a merge-readiness run adds the Integration
-Auditor as a third reviewer lane, in the order [`MISSION.md`](MISSION.md)
-requires. Until PAPI-90 lands that ordering check, the operator writing the
-config is what holds it.
+Start from [`examples/run.example.json`](examples/run.example.json). It shows
+the acceptance lifecycle the tool enforces — `reviewer-a`, `reviewer-b`,
+`integration-auditor`, in that order — wired to the two adapters this repository
+ships.
 
 ## Configuration
+
+`schema_version` is **`2`**. Version 1 described a different, incompatible file:
+its `reviewers` were a free list of lanes, with no required `role`,
+`artifact_author`, or `artifact_signature` and no fixed three-role lifecycle. One
+version number cannot truthfully denote both shapes, so the discriminator was
+bumped rather than left in place over new semantics. A v1 file is refused with
+the ordered upgrade steps printed as a structured `invalid-config` record —
+there is no migration layer, because the edit is mechanical and a migration would
+be more machinery than the break is worth. The state journal keeps its own schema
+version, which is independent of this one.
+
+Every path field — `source_repo`, `worktree_root`, `state_file`, `lock_file` —
+is validated before it is resolved. A string that is valid JSON but not a usable
+path (an embedded NUL is the reachable case) is an `invalid-config` record and
+exit 64, not a `ValueError` traceback, and the record names the field rather than
+echoing the value back.
 
 Every child command is an **argv array**. Templates substitute only these
 tokens, and an unknown token fails the run rather than rendering literally:
@@ -57,12 +74,47 @@ tokens, and an unknown token fails the run rather than rendering literally:
 |---|---|---|
 | `{repo}` `{owner}` `{name}` `{pr}` | all lanes | from config |
 | `{branch}` `{base}` `{head}` | all lanes | from the **live** PR, never from config alone |
-| `{worktree}` | all lanes | the fresh worktree this lane runs in |
-| `{reviewer}` | reviewer lanes | the lane name |
+| `{worktree}` | all lanes | this lane's own fresh worktree, at the exact head |
+| `{reviewer}` `{role}` | reviewer lanes | the lane name, and the mission role it runs as |
+| `{artifact_file}` | reviewer lanes and their relay | where this lane prepares its artifact, under the OS temp directory |
+| `{evidence_packet}` | reviewer lanes | the frozen read-only PR evidence this lane judges from, under the OS temp directory |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
 
 `builder.comment_author` is **required** and must be the exact GitHub login the
-builder comments under. See [Fix-comment readback](#fix-comment-readback).
+builder comments under. See [Fix-comment readback](#fix-comment-readback). Each
+reviewer's `artifact_author` is required for the same reason — see
+[The reviewer artifact lifecycle](#the-reviewer-artifact-lifecycle).
+
+`governing_issues` is **required** and must name at least one issue number. It is
+the task contract: the reviewers are handed those issue bodies in their frozen
+packet, because a lane judging shrunken scope or acceptance criteria needs the
+document those are written in. It lives here, and not in anything parsed out of
+the pull request, because a PR body is untrusted prose — a PR that says
+`Refs #1` closes nothing, and one that says `Closes #999` names whatever its
+author typed. Which contract a change is measured against is not a question the
+change gets to answer.
+
+`env` and `env_unset` are a small **named overlay** on the environment a lane
+inherits, never a replacement for it. The trusted agents run as the operator's
+own user and authenticate through the normal OAuth/keychain session, so there is
+no `env -i`, no synthetic `HOME`, and no generated sandbox policy anywhere in
+this tool: `HOME`, `USER`, `LOGNAME`, and `SHELL` cannot be set or cleared by a
+lane, and a value that looks like a credential is refused outright. Tokens
+belong in the keychain and in `gh`'s own auth, not in a config file that ends up
+in evidence.
+
+A **relayed reviewer lane** gets one further adjustment, and it is deliberately
+narrow. Removing `GH_TOKEN` and friends by name is necessary and is not
+sufficient: an operator who is logged in normally has a stored `gh` session, and
+`gh` resolves it through `GH_CONFIG_DIR`, then `$XDG_CONFIG_HOME/gh`, then
+`$HOME/.config/gh`. So the lane's `GH_CONFIG_DIR` is pointed at a fresh, empty
+directory this run owns, one per lane. The search stops there, finds no host,
+and consults no keyring — `gh` only reaches for stored credentials for hosts its
+resolved configuration already knows. `HOME` is *not* retargeted, because that
+is where the trusted agent's own OAuth session lives and synthesizing one is
+both forbidden by the mission and a way to break Codex in the same stroke as
+`gh`. The denial is scoped to `gh` and to the judging half only: the relay
+inherits its own session untouched and publishes exactly as before.
 
 `state_file` and `lock_file` must resolve **outside** `source_repo`, and a path
 equal to or nested inside the clone is a configuration error. The run writes both
@@ -71,15 +123,283 @@ an attempt worktree is clean, so a control file living in that clone would
 contaminate the very tree being judged. Siblings and any other outside path are
 unaffected; `worktree_root` is held to the same rule where worktrees are created.
 
-The gate, reviewer, and builder commands themselves are supplied by the
-operator — the example's `./scripts/*-lane.sh` names are placeholders. PAPI-90
-replaces them with the hardened, credential-scoped launcher; until then the only
-seam this slice needs is that every lane is an argv array and every lane's
-verdict is machine-readable.
-
 Gates take `"kind": "baseline"` (default) or `"kind": "visual"`. Visual gates
 run only when `visual_qa_required` is `true`; setting that flag without a visual
 gate is a configuration error, so browser/visual QA is never silently skipped.
+
+`check-config` also prints **advisories**: a lane with no timeout, or a builder
+budget too short for a real fix cycle. They are notes rather than errors, because
+a repository with a two-minute suite may genuinely know better — but a trusted
+agent cut off mid-verification looks exactly like a hang, and that is not a thing
+to discover for the first time at minute forty of a live run.
+
+## The acceptance lifecycle is configuration
+
+`reviewers` is not a free list of lanes. It must be exactly
+
+```text
+reviewer-a  →  reviewer-b  →  integration-auditor
+```
+
+in that order. The loop runs the lanes as configured, and the auditor's whole
+job is to reconcile two artifacts that must already exist when it starts — so a
+missing auditor, a duplicated role, or an auditor-first order is a configuration
+error rather than a run that quietly proves less than it claims. Two lanes
+sharing a role are refused for a second reason: each could satisfy the other's
+artifact readback, which is exactly the independence the lanes exist for.
+
+## The shipped adapters
+
+Two are repository-owned, and the example config wires both:
+
+- [`scripts/codex-reviewer.sh`](scripts/codex-reviewer.sh) runs one Codex
+  reviewer against one exact head in a disposable worktree, with **no GitHub
+  credential and no reachable `gh` login**, and writes its finished artifact to
+  `{artifact_file}`. It refuses to run if a token variable is set, if
+  `GH_CONFIG_DIR` is unset or still holds a `gh` hosts file, or if the packet at
+  `{evidence_packet}` is missing, empty, bound to another repo, PR, base, or
+  head, or carrying none of the task contract its prompt sends the reviewer to
+  read — each of those is the lifecycle being misconfigured, and running anyway
+  would hide it. Its prompt points at the packet rather than at live `gh`, and
+  is deliberately **adversarial**: the reviewer's
+  job on a fixed head is to try to *kill* the change — bad-faith passes,
+  weakened or deleted coverage, gamed thresholds, shrunken scope, stale
+  evidence, unproven invariants — not to check that it looks correct. A reviewer
+  that sets out to confirm shares the builder's framing and its blind spot.
+- [`scripts/claude-builder.sh`](scripts/claude-builder.sh) runs the trusted
+  Claude builder in that cycle's own worktree. It is **pointer-first**: it names
+  the blockers file, `AGENTS.md`, `MISSION.md`, and the live PR rather than
+  copying them, so the prompt cannot drift away from the sources. Tools are
+  task-scoped — enough to read, edit, verify, commit, push, and comment, and
+  nothing that grants merge, deploy, release, or account authority — and an
+  empty MCP config is passed with `--strict-mcp-config`, because optional MCP
+  servers are the usual cause of a non-interactive launch hanging on unrelated
+  tool startup.
+
+Neither adapter is a security boundary. Both are ordinary hygiene for launching
+a trusted agent reliably, and both are covered by
+[`tests/test_adapters.py`](tests/test_adapters.py), which runs them for real
+against stub binaries — a double cannot catch a mistyped flag or a guard that
+never fires.
+
+Gates remain the operator's own commands.
+
+## Lanes are launched, watched, and ended
+
+Every lane goes through one path, and it holds four properties a lane's own
+output cannot establish:
+
+- **The session is inherited, never rebuilt.** `env=None` means the child gets
+  the real environment, so the normal OAuth/keychain session keeps working.
+- **The reported budget is the enforced budget.** A lane configured with no
+  timeout gets no deadline and the run log says `unbounded`; there is no hidden
+  default underneath it. Only a lane's own budget ever ends it.
+- **Silence is not a hang.** Elapsed time, bytes produced, and how long a lane
+  has been quiet are recorded while it runs and reported when it ends. A builder
+  can buffer its stdout for twenty minutes; that is written down, never acted on.
+- **A lane is a process tree.** Each child starts in its own process group, and
+  that group is ended on *every* path out of the runner — the ordinary exit-zero
+  one as much as the timeout. A builder that backgrounds a test suite, prints a
+  clean marker, and exits politely would otherwise keep mutating its worktree
+  after the loop has recorded the lane as stopped, which is a false success
+  rather than a slow one. Before `run` returns, the group is proved empty.
+
+## The reviewer artifact lifecycle
+
+A reviewer is trusted to judge one head. It is not handed a GitHub credential to
+publish with, because the identity a reviewer publishes under is not the
+identity its lane happens to run as. So the artifact takes one explicit route,
+and each step is separately checkable:
+
+```text
+frozen evidence packet → credential-free audit
+  → prepared artifact under the OS temp directory
+  → trusted relay command publishing under the reviewer identity
+  → GitHub readback of what actually landed
+```
+
+### The frozen evidence packet
+
+A lane with no way to reach GitHub cannot inspect the PR, so the parent reads it
+and freezes what it read to `{evidence_packet}` — a JSON file outside every
+repository, written before the lane launches and cleared with the rest of the
+scratch directory afterwards. It carries exactly these surfaces:
+
+| Surface | What it is |
+|---|---|
+| `pull_request_body` | the live PR description — the change's own stated contract |
+| `governing_issues` | the body of each issue `governing_issues` names: the task contract |
+| `conversation_comments` | the PR conversation |
+| `reviews` | submitted reviews, with their `commit_id`s |
+| `inline_comments` | what was said inline on the diff |
+| `check_runs` | the checks GitHub recorded for this exact commit |
+| `linked_issues` | the issues the PR itself *claims* to close |
+
+The `base..head` diff and the commit history are *not* in it: the lane has a real
+checkout and reads those with `git`.
+
+The first two are why the rest are worth having. The reviewer prompt tells a lane
+to check the PR body for stale claims and to judge scope against the issue's
+acceptance criteria; a lane handed neither can complete both kill switches
+without ever seeing their source. They are also the two the PR cannot supply for
+itself: `linked_issues` is what the PR *says* about which issues it closes, which
+is evidence about the PR rather than authority over it, and a PR using `Refs #1`
+closes nothing at all.
+
+Each surface says how it was read and whether that read reached the end. An
+incomplete surface is not an error — the conversation-comment read carries no
+pagination guarantee yet, and proving it does is PAPI-97's obligation (M5) — but
+it is stated, so a reviewer cannot mistake a first page for a whole PR. The two
+contract surfaces are the exception: they are not reads that may honestly come
+back empty, so an empty or clipped one stops the lane rather than being handed
+over as evidence.
+
+The packet binds itself with one canonical line:
+
+```text
+REPO=<owner/name> PR=<number> BASE=<ref> HEAD=<40-hex sha> SEQUENCE=<n>
+```
+
+`SEQUENCE` is per-run and strictly increasing, so a packet belongs to one lane
+and no lane can be handed another's — the number and the lane's own name and
+role are both written into the file and both checked. The loop writes the packet
+and then reads it back and holds it to all of that, for the same reason it reads
+its artifacts back from GitHub: what a lane is handed is the file on disk, not
+the payload the process assembled. The adapter checks the binding line and the
+two contract surfaces again from its own arguments. A packet that did not land,
+landed empty, or was left at that path by an earlier cycle stops the lane
+**before** it is launched, rather than producing a confident review of the wrong
+head.
+
+Binding is necessary and not sufficient, so the shape is validated too. Every
+required surface must be present, with a boolean `complete`, a non-empty
+`read_as`, a non-negative integer `count`, a list of `items`, and a count that
+equals how many there are; `schema_version` and `SEQUENCE` must be actual
+integers, because Python reads `true` as `1` and a JSON boolean would otherwise
+satisfy both. A file that keeps the binding and loses the evidence is the one
+failure a reviewer cannot detect from the inside: every one of those surfaces
+would simply read as *nothing to see here*.
+
+The envelope is not the evidence either, so the two contract surfaces are held to
+their records as well. `pull_request_body` must be exactly one record, for this
+PR's number, with a `body` that is text — an empty description is a fact about
+the PR and stays valid, but a missing or `null` one is a lane checking for stale
+claims against nothing. `governing_issues` must carry exactly the issues the run
+configured, in that order, each with a body that is text: the packet writes those
+numbers down as `governing_issue_numbers`, and the loop passes the same
+configured tuple it handed GitHub into the readback, so a contract record for
+`#999` on a run measured against `#1` stops the lane instead of quietly becoming
+the acceptance criteria it is judged by.
+
+Everything inside is untrusted evidence. The whole payload goes through the same
+recursive redaction the report and the frozen blocker file do, with the clip set
+to the largest artifact this tool will relay — the Integration Auditor's job is
+to reconcile the artifacts Reviewer A and Reviewer B published, and it must not
+be handed truncated copies of them.
+
+Every artifact must carry, each on a line of its own:
+
+```text
+ROLE=<the lane's configured role>
+RUNTIME=<the model or runtime it actually ran as>
+HEAD=<the full 40-hex lowercase commit reviewed>
+STATUS=pass|fail
+BLOCKING=<number of blocking findings>
+KILL-SWITCH: <what it tried in order to kill the change, and what that found>
+```
+
+plus the configured signature. Whole lines only, and each key exactly once.
+Prose never counts: scope paragraphs and command transcripts legitimately quote
+a SHA, so an artifact could satisfy a substring test while stating on its own
+line that it reviewed something else. `STATUS` and `BLOCKING` must also match
+the lane's own marker — the marker is what the loop classifies from and the
+artifact is what Karan reads, and two stories about one head is not a formatting
+slip. `KILL-SWITCH:` is the adversarial mandate made checkable: at least one
+line saying what was attempted, so "I found no problem" is a different statement
+from "I did not look".
+
+The prepared file is held to all of that **before** the relay may publish it, so
+an artifact that would fail readback never reaches the PR at all. Then the post
+itself must be from the configured login and bound to this head — by GitHub's
+own review `commit_id` where there is one, *and* by the canonical declaration in
+every case.
+
+### Which post counts as this run's transport
+
+The remaining question is *which* matching post. "New since the lane launched"
+is the wrong test, and the difference matters: a valid artifact posted by the
+judging lane itself — right login, right head, every declaration correct — is
+new since the lane launched too, and crediting it would let a relay that
+published nothing produce complete transport. That is not hypothetical; it is
+what a reachable stored `gh` session bought before the config-directory denial
+above existed.
+
+So the run snapshots the PR's artifact ids **twice**: once before the lane is
+launched, and again after the lane exits and immediately before the relay is
+launched. Attribution runs off the second one. Only an id that appeared inside
+the relay's own window can be this run's transport, and a lane-side post — even
+a genuine one — falls outside it and is never credited. If the relay then
+publishes nothing, the run fails closed with `readback-mismatch`, and the
+evidence names how many artifacts arrived while the credential-free lane was
+running, so a missing relay post reads as what it is rather than as an
+unexplained readback puzzle.
+
+A lane without a `relay` publishes for itself. There is no relay window, so its
+pre-launch snapshot is the newest one there can be and attribution uses that. It
+is read back the same way; only the transport differs.
+
+The report's `transport_complete` is a claim about that whole lifecycle, not
+about whichever records happen to exist: three records, the required roles in the
+required order, each read back on GitHub, and all of them bound to the one head
+the ledger they support was produced against. An empty ledger — a gate that
+blocked before any reviewer launched, a stop before transport began — is not
+complete, and neither is a finished Reviewer A record with nothing after it. Per
+record, the `transport` list says exactly how far that one got. None of this is a
+verdict: three failing reviews whose artifacts all landed are complete transport
+and a blocked head.
+
+## What this run owns, and what it does not
+
+Every artifact the loop watches appear and verifies is retained **by GitHub's
+own id**, in the run state file. That is the whole definition of "this run
+published it", and the reason is that everything visible in a body becomes
+copyable the moment a real artifact exists — the signature, the role line, the
+head declaration — while a configured login proves nothing either, because the
+account is shared with a human.
+
+Before a builder is launched, any comment or review the run cannot attribute to
+itself stops the run and asks Karan. No prose is interpreted, no login is
+trusted for being configured, and no resolution state is read. A builder fixing
+against an unread human objection is the failure this prevents, and being wrong
+in this direction costs an unnecessary question while being wrong in the other
+costs a push over a "do not merge".
+
+The bluntness is priced deliberately. An old approving review stops the fix lane
+too. Making it precise — complete surfaces, positive ownership under a shared
+login, native review and thread resolution, and a finite acknowledgement
+contract — is PAPI-97's subject, and this check reads only the conversation
+comments and submitted reviews until then.
+
+The stop guards the **fix lane only**. A run still reports `merge-ready`,
+`blocked`, or `needs-Karan` on the head it measured: refusing to answer is not
+the same as answering carefully, and the report is what Karan reads before
+deciding.
+
+## Fix cycles start fresh
+
+Each cycle launches the builder as a new process with a new prompt and a new
+blocker file. There is no resume path and no conversation handed back: cycle two
+is re-grounded on the live PR and on the ledger frozen for *that* cycle, because
+a builder carrying a failed cycle's reasoning into the next one degrades exactly
+when the last cycle matters most. Everything that has to survive between cycles
+— the attempt number, the corrective rerun spent, the bound head, the artifacts
+this run owns — travels through the run state file instead.
+
+The blocker file carries the same
+[structured failure records](#failures-are-the-builders-next-instruction) the
+report renders, one per blocker: what failed, the evidence, the bounded
+remediation, and the escalation condition. The builder remediates what those
+records name as in-bounds and stops otherwise.
 
 ## Lane contracts
 
@@ -274,6 +594,12 @@ state, not something to repair. And because a finding is evidence about one
 exact commit, binding the run to a new head drops the old head's findings rather
 than carrying them forward.
 
+The one key a head change deliberately does *not* drop is the list of artifact
+ids this run owns. A finding is evidence about one commit, but an artifact this
+run published for an earlier head is still not human feedback — and cycle two
+has to recognise what cycle one posted, which is impossible to rediscover from a
+body anybody could copy.
+
 ### The lock is released by identity, not by pathname
 
 A lock path that is removed — by `reset --force`, say — and then acquired again
@@ -342,8 +668,8 @@ reported; the save failure is noted in the run log rather than replacing it.
 
 `invalid-config` · `invalid-command` · `lock-contention` · `unexpected-state` ·
 `malformed-verdict` · `lane-failure` · `stale-head` · `ambiguous-push` ·
-`readback-mismatch` · `scope-contamination` · `builder-refusal` ·
-`github-error` · `worktree-error`
+`readback-mismatch` · `relay-failure` · `evidence-packet` · `human-feedback` ·
+`scope-contamination` · `builder-refusal` · `github-error` · `worktree-error`
 
 Each carries evidence, and the worktree plus scratch directory are retained so
 the failure can be inspected. Each also reaches a failure record — what failed,
@@ -373,8 +699,21 @@ bounded with explicit markers.
 - Every attempt gets a fresh worktree, detached at one verified SHA. An existing
   path is refused rather than reused, and worktrees this run did not create
   cannot be removed.
-- The frozen blocker set is written under the OS temp directory, never inside a
-  repository, so a builder's inputs cannot contaminate the diff.
+- **So does every gate and every reviewer lane, one each.** The acceptance
+  lifecycle is sequential, so a shared checkout would put whatever Reviewer A
+  left behind in front of Reviewer B and then the Integration Auditor — the two
+  lanes whose verdicts decide `merge-ready` — while all three artifacts still
+  declared the committed head. Each lane's own checkout is proved clean and
+  sitting on exactly the bound SHA both before it is launched and after it
+  returns; a lane that wrote into the tree it was judging stops the run as
+  `scope-contamination` and keeps its worktree for inspection, and a successful
+  lane's worktree is removed. A relay shares its reviewer's checkout rather than
+  taking one of its own: it publishes a file that already lives outside every
+  repository.
+- The frozen blocker set, each reviewer's prepared artifact, each lane's frozen
+  evidence packet, and each relayed lane's empty `gh` configuration directory are
+  all written under the OS temp directory, never inside a repository, so a
+  lane's inputs and outputs cannot contaminate the diff it is judging.
 - The state file and the lockfile must live outside the operational clone, so
   this run's own bookkeeping can never show up as a change to the tree it is
   judging.
@@ -389,10 +728,20 @@ python3 -m compileall -q pr-prover/src pr-prover/tests
 git diff --check origin/main...HEAD
 ```
 
-The suite needs no network and never calls `gh`. Almost all of it runs against
-deterministic doubles, including every `git` call the loop makes. The one
-exception is `tests/test_integration_git.py`, which deliberately runs real
-`git`: it creates a throwaway bare repository and clone under the OS temp
-directory and drives `SourceRepo`/`WorktreeProvider` through them, because a
-double cannot catch a wrong refspec or a bad `rev-parse` argument. It touches
-nothing outside that temp directory, and skips itself when `git` is absent.
+The suite needs no network and never calls `gh`, and it never runs a real Claude
+or Codex. Almost all of it runs against deterministic doubles, including every
+`git` call the loop makes. Three files deliberately do not:
+
+- `tests/test_integration_git.py` runs real `git` against a throwaway bare
+  repository and clone under the OS temp directory, because a double cannot
+  catch a wrong refspec or a bad `rev-parse` argument;
+- `tests/test_trusted_agents.py` drives the real `SubprocessRunner` against
+  small shell children, because "silence is not a hang", "the reported budget is
+  the enforced budget", and "the process tree ends with the lane" are claims
+  about `subprocess` behaviour that a double would simply agree with;
+- `tests/test_adapters.py` runs the two shipped adapter scripts against stub
+  `codex`/`claude` binaries on a temporary `PATH`, because a double cannot catch
+  a mistyped flag, a shell quoting bug, or a guard that never fires.
+
+All three touch nothing outside their temp directories, and each skips itself
+when what it needs (`git`, a POSIX shell) is absent.

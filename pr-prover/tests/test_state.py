@@ -53,6 +53,7 @@ class StateFileHarness(unittest.TestCase):
             "phase": PHASE_IDLE,
             "attempt_head": None,
             "classification": None,
+            "verified_artifacts": [],
         }
         payload.update(overrides)
         return payload
@@ -106,6 +107,7 @@ class StateFileTests(StateFileHarness):
                 "phase",
                 "attempt_head",
                 "classification",
+                "verified_artifacts",
             },
         )
 
@@ -258,6 +260,7 @@ class SchemaContractTests(StateFileHarness):
         "phase",
         "attempt_head",
         "classification",
+        "verified_artifacts",
     )
 
     def test_the_writer_produces_exactly_the_required_key_set(self) -> None:

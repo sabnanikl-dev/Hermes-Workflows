@@ -18,6 +18,15 @@ distinction: an unknown head is printed as unknown, and a classification carried
 into the report is marked historical or unverified unless the head it was
 produced against is the head that was observed.
 
+Three claims are kept apart rather than blended into one impression of health.
+**Transport** says an artifact reached GitHub under the configured identity and
+can be read back — it says nothing about what the review concluded. The
+**implementation verdict** is the reviewer statuses and the classification
+buckets. **Exact-head readiness** is the outcome at the top, tied to the head
+the live PR was observed on. A run can have complete transport, a failing
+verdict, and no readiness at all, and the report has to be able to say so.
+Deciding to merge remains Karan's, on evidence, and no field here is permission.
+
 Two things are rendered rather than summarized. A ``needs-Karan`` escalation
 prints each finding's provenance inline — who found it, on which head, at which
 surface, and the verbatim excerpt — so the decision does not require re-reading
@@ -33,6 +42,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from .config import REQUIRED_REVIEWER_ROLES
 from .findings import provenance_lines
 from .loop import NEEDS_KARAN, RunResult
 from .redaction import sanitize
@@ -69,6 +79,38 @@ def as_dict(result: RunResult) -> dict[str, Any]:
             }
             for verdict in result.verdicts
         ],
+        # How each lane's process ended. Separate from the verdicts on purpose:
+        # "the lane ran for 40 minutes and exited 0" and "the reviewer passed"
+        # are two different facts, and a quiet stretch belongs to the first.
+        "lanes": [
+            {
+                "lane": lane.lane,
+                "state": lane.state,
+                "returncode": lane.returncode,
+                "duration_seconds": round(lane.duration, 1),
+                "quiet_seconds": round(lane.quiet_seconds, 1),
+            }
+            for lane in result.lanes
+        ],
+        # Whether each artifact actually reached GitHub, step by step, under the
+        # identity it was supposed to. This is transport, not judgement: a
+        # complete transport says the evidence is on the PR and readable, and
+        # says nothing at all about whether the review passed.
+        "transport": [
+            {
+                "lane": item.lane,
+                "role": item.role,
+                "head": item.head,
+                "identity": item.identity,
+                "prepared": item.prepared,
+                "published": item.published,
+                "read_back": item.read_back,
+                "artifact_id": item.identifier,
+                "complete": item.complete,
+            }
+            for item in result.transport
+        ],
+        "transport_complete": _transport_is_complete(result),
         "classification": result.classification.as_dict() if result.classification else None,
         "classification_head": result.classification_head,
         # Whether the ledger above is evidence about the head the live PR was
@@ -85,6 +127,43 @@ def as_dict(result: RunResult) -> dict[str, Any]:
     if result.evidence:
         payload["fail_closed"] = result.evidence
     return sanitize(payload)
+
+
+def _transport_is_complete(result: RunResult) -> bool:
+    """Did the whole required artifact lifecycle reach GitHub on one exact head?
+
+    ``all(item.complete for item in result.transport)`` was vacuously true for an
+    empty ledger, so a gate that blocked before any reviewer launched, and a stop
+    before transport began, both published a positive claim that zero of the
+    three required artifacts had landed. A truncated-but-complete prefix — one
+    finished Reviewer A record and nothing else — said the same thing.
+
+    The field is a claim about the lifecycle, not about whichever records happen
+    to exist, so it is measured against the lifecycle: the required three roles,
+    in the required order, each read back on GitHub, and all of them bound to the
+    one head the ledger they support was produced against. Anything short of that
+    is incomplete, and the per-record list above is where a reader sees exactly
+    how far each one got.
+
+    This says nothing about the verdicts. Three failing reviews whose artifacts
+    all landed are complete transport and a blocked head, which is the separation
+    the field exists to preserve.
+    """
+    transport = result.transport
+    if len(transport) != len(REQUIRED_REVIEWER_ROLES):
+        return False
+    if tuple(item.role for item in transport) != REQUIRED_REVIEWER_ROLES:
+        return False
+    if not all(item.complete for item in transport):
+        return False
+    heads = {item.head for item in transport}
+    if len(heads) != 1 or not heads.pop():
+        return False
+    # The lanes ran against the head the classification is bound to; a ledger
+    # with no head at all cannot have a complete exact-head transport behind it.
+    return result.classification_head is not None and all(
+        item.head == result.classification_head for item in transport
+    )
 
 
 def _classification_head_is_current(result: RunResult) -> bool:
@@ -137,6 +216,36 @@ def to_markdown(result: RunResult) -> str:
             lines.append(
                 f"- Reviewer {verdict['reviewer']}: {verdict['status']}, "
                 f"{verdict['blocking']} blocking on `{verdict['head']}`"
+            )
+
+    if payload["transport"]:
+        lines += ["", "### Artifact transport (not a verdict)"]
+        for item in payload["transport"]:
+            reached = (
+                f"read back on GitHub as `{item['artifact_id']}`"
+                if item["read_back"]
+                else "published, not read back"
+                if item["published"]
+                else "prepared, not published"
+                if item["prepared"]
+                else "not prepared"
+            )
+            lines.append(
+                f"- `{item['lane']}` (ROLE={item['role']}) as `{item['identity']}`: "
+                f"{reached}, on `{item['head']}`"
+            )
+        lines.append(
+            "- transport says the evidence reached the PR under the configured identity; "
+            "what the review concluded is in the verdicts and the classification above, "
+            "and whether this head is merge-ready is the outcome at the top"
+        )
+
+    if payload["lanes"]:
+        lines += ["", "### Lanes"]
+        for lane in payload["lanes"]:
+            lines.append(
+                f"- `{lane['lane']}`: {lane['state']} after {lane['duration_seconds']}s "
+                f"(exit {lane['returncode']}, quiet {lane['quiet_seconds']}s)"
             )
 
     if payload["classification"] is not None:

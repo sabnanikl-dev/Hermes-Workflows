@@ -11,10 +11,11 @@ from pathlib import Path
 from _support import BUILDER_LOGIN, HEAD_A, make_finding, make_source_repo
 from pr_prover import cli, redaction
 from pr_prover.commands import CommandResult
-from pr_prover.config import RunConfig
+from pr_prover.config import _V1_UPGRADE_STEPS as V1_UPGRADE_STEPS
+from pr_prover.config import MAX_GOVERNING_ISSUES, SCHEMA_VERSION, RunConfig
 from pr_prover.errors import CommandContractError, ConfigError, GitHubError, StateError
 from pr_prover.findings import Finding, classify
-from pr_prover.github import GhCliGitHub
+from pr_prover.github import _PR_FIELDS, GhCliGitHub
 
 
 def finding(identifier: str, severity: str = "blocking", source: str = "reviewer:A") -> Finding:
@@ -88,6 +89,7 @@ class GhBoundaryTests(unittest.TestCase):
             "headRefName": "feat/example",
             "headRefOid": HEAD_A,
             "baseRefName": "main",
+            "body": "the change's own stated contract",
         }
         body.update(overrides)
         return json.dumps(body)
@@ -96,6 +98,28 @@ class GhBoundaryTests(unittest.TestCase):
         pull = self.boundary(self.payload()).pull_request("example/repo", 7)
         self.assertEqual(pull.head_ref_oid, HEAD_A)
         self.assertTrue(pull.is_draft)
+        self.assertEqual(pull.body, "the change's own stated contract")
+
+    def test_the_pr_body_is_read_because_the_reviewer_cannot_read_it(self) -> None:
+        """The body is the contract a reviewer checks stale claims against.
+
+        A relayed lane has no credential and no second chance at this text, so
+        an absent or null field is a read that did not deliver it — not a PR
+        that has nothing to say about itself.
+        """
+        self.assertIn("body", _PR_FIELDS.split(","))
+        empty = self.boundary(self.payload(body="")).pull_request("example/repo", 7)
+        self.assertEqual(empty.body, "")
+        for label, value in (("missing", None), ("null", None), ("not text", 12)):
+            with self.subTest(body=label):
+                body = json.loads(self.payload())
+                if label == "missing":
+                    del body["body"]
+                else:
+                    body["body"] = value
+                with self.assertRaises(GitHubError) as caught:
+                    self.boundary(json.dumps(body)).pull_request("example/repo", 7)
+                self.assertIn("missing its body", caught.exception.message)
 
     def test_gh_is_invoked_as_an_argv_array_with_the_json_fields(self) -> None:
         seen: list[tuple[str, ...]] = []
@@ -174,6 +198,185 @@ class GhBoundaryTests(unittest.TestCase):
     def test_an_empty_commit_list_fails_closed(self) -> None:
         with self.assertRaises(GitHubError):
             self.boundary(json.dumps({"commits": []})).commits("example/repo", 7)
+
+
+class GhReviewEvidenceTests(unittest.TestCase):
+    """The surfaces read only so a credential-free lane can be handed them.
+
+    A reviewer that cannot reach GitHub reads whatever this returns and nothing
+    else, so a first page silently presented as a whole surface is not a cosmetic
+    problem: it is a reviewer concluding there is no feedback because it was
+    handed none.
+    """
+
+    INLINE = [
+        {
+            "id": 11,
+            "user": {"login": "karanagent1"},
+            "body": "this line",
+            "path": "src/thing.py",
+            "line": 12,
+            "commit_id": HEAD_A.upper(),
+            "html_url": "https://example.invalid/c/11",
+        }
+    ]
+    CHECKS = {
+        "total_count": 1,
+        "check_runs": [
+            {"name": "tests", "status": "completed", "conclusion": "success"}
+        ],
+    }
+    ISSUES = {
+        "closingIssuesReferences": [
+            {"number": 1, "title": "mission", "state": "OPEN", "url": "https://example.invalid/1"}
+        ]
+    }
+    GOVERNING = {
+        "number": 1,
+        "title": "mission contract",
+        "state": "OPEN",
+        "url": "https://example.invalid/issues/1",
+        "body": "ACCEPTANCE: the contract this change is measured against",
+    }
+
+    def boundary(self, *, inline=None, checks=None, issues=None, governing=None) -> GhCliGitHub:
+        """A runner that answers each of the four reads with its own payload."""
+        pages = {
+            "comments?": json.dumps([self.INLINE if inline is None else inline]),
+            "check-runs?": json.dumps([self.CHECKS if checks is None else checks]),
+            "closingIssuesReferences": json.dumps(self.ISSUES if issues is None else issues),
+            "gh issue view": json.dumps(self.GOVERNING if governing is None else governing),
+        }
+        self.seen: list[tuple[str, ...]] = []
+
+        class Scripted:
+            def run(inner, argv, *, cwd=None, env=None, timeout=None):
+                self.seen.append(tuple(argv))
+                joined = " ".join(argv)
+                for marker, payload in pages.items():
+                    if marker in joined:
+                        return CommandResult(
+                            argv=tuple(argv), returncode=0, stdout=payload, stderr=""
+                        )
+                raise AssertionError(f"unexpected gh call: {list(argv)}")
+
+        return GhCliGitHub(Scripted())
+
+    def read(self, boundary: GhCliGitHub, *, governing_issues=(1,)):
+        return boundary.review_evidence("example/repo", 7, HEAD_A, governing_issues)
+
+    def test_the_four_surfaces_are_read_and_carried(self) -> None:
+        evidence = self.read(self.boundary())
+
+        self.assertEqual(evidence.inline_comments[0].identifier, "inline:11")
+        self.assertEqual(evidence.inline_comments[0].path, "src/thing.py")
+        self.assertEqual(evidence.inline_comments[0].line, 12)
+        # Lower-cased like every other head binding this tool compares.
+        self.assertEqual(evidence.inline_comments[0].commit_id, HEAD_A)
+        self.assertEqual(evidence.check_runs[0].conclusion, "success")
+        self.assertEqual(evidence.linked_issues[0].number, 1)
+        self.assertEqual(evidence.governing_issues[0].number, 1)
+        self.assertIn("ACCEPTANCE", evidence.governing_issues[0].body)
+
+    def test_the_governing_issue_is_asked_for_by_configured_number(self) -> None:
+        """Authority comes from the run config, never from the PR's own prose."""
+        self.read(self.boundary(), governing_issues=(1,))
+        issue_reads = [argv for argv in self.seen if argv[1:3] == ("issue", "view")]
+        self.assertEqual(len(issue_reads), 1)
+        self.assertEqual(issue_reads[0][:6], ("gh", "issue", "view", "1", "--repo", "example/repo"))
+        self.assertIn("body", issue_reads[0][-1].split(","))
+
+    def test_a_governing_issue_without_a_body_fails_closed(self) -> None:
+        """A contract read that delivered no contract is not a thin issue."""
+        for label, payload in (
+            ("no body", {"number": 1, "title": "x", "state": "OPEN"}),
+            ("null body", {"number": 1, "body": None}),
+            ("another issue", {"number": 2, "body": "wrong contract"}),
+        ):
+            with self.subTest(payload=label):
+                with self.assertRaises(GitHubError):
+                    self.read(self.boundary(governing=payload))
+
+    def test_each_read_that_can_prove_completeness_claims_it(self) -> None:
+        evidence = self.read(self.boundary())
+
+        self.assertTrue(evidence.inline_comments_complete)
+        self.assertTrue(evidence.check_runs_complete)
+        self.assertTrue(evidence.linked_issues_complete)
+        self.assertTrue(evidence.governing_issues_complete)
+        self.assertTrue(evidence.reviews_complete)
+        # ...and the one that cannot does not. M5 is owed by PAPI-97.
+        self.assertFalse(evidence.conversation_comments_complete)
+
+    def test_no_configured_governing_issue_is_not_a_complete_contract(self) -> None:
+        """Config refuses this, and the boundary does not paper over it either."""
+        evidence = self.read(self.boundary(), governing_issues=())
+        self.assertEqual(evidence.governing_issues, ())
+        self.assertFalse(evidence.governing_issues_complete)
+
+    def test_the_paginated_reads_ask_gh_to_paginate(self) -> None:
+        self.read(self.boundary())
+        paginated = [argv for argv in self.seen if "--paginate" in argv]
+        self.assertEqual(len(paginated), 2)
+        for argv in paginated:
+            self.assertIn("--slurp", argv)
+        self.assertTrue(any(HEAD_A in part for argv in paginated for part in argv))
+
+    def test_fewer_check_runs_than_github_counted_is_not_complete(self) -> None:
+        """The one surface that states its own total, held to it."""
+        evidence = self.read(
+            self.boundary(checks={"total_count": 3, "check_runs": self.CHECKS["check_runs"]})
+        )
+        self.assertEqual(len(evidence.check_runs), 1)
+        self.assertFalse(evidence.check_runs_complete)
+
+    def test_a_head_with_no_checks_is_complete_rather_than_unknown(self) -> None:
+        evidence = self.read(self.boundary(checks={"total_count": 0, "check_runs": []}))
+        self.assertEqual(evidence.check_runs, ())
+        self.assertTrue(evidence.check_runs_complete)
+
+    def test_a_full_page_of_closing_issues_cannot_claim_completeness(self) -> None:
+        """A full page and a truncated one are the same response."""
+        issues = {
+            "closingIssuesReferences": [
+                {"number": index + 1, "title": "x", "state": "OPEN"} for index in range(100)
+            ]
+        }
+        evidence = self.read(self.boundary(issues=issues))
+        self.assertEqual(len(evidence.linked_issues), 100)
+        self.assertFalse(evidence.linked_issues_complete)
+
+    def test_a_pr_that_closes_nothing_says_so_with_an_empty_array(self) -> None:
+        """Present-and-empty is a fact; absent is a read that did not happen.
+
+        This PR's own ``Refs #1`` closes nothing, so the empty array is the
+        ordinary shipped answer — and it must stay distinguishable from a
+        response that never carried the requested field at all.
+        """
+        evidence = self.read(self.boundary(issues={"closingIssuesReferences": []}))
+        self.assertEqual(evidence.linked_issues, ())
+        self.assertTrue(evidence.linked_issues_complete)
+
+    def test_absent_or_null_closing_references_are_not_a_complete_empty_read(self) -> None:
+        """Former red: both used to arrive as an empty, *complete* surface."""
+        for label, issues in (("absent", {}), ("null", {"closingIssuesReferences": None})):
+            with self.subTest(payload=label):
+                with self.assertRaises(GitHubError) as caught:
+                    self.read(self.boundary(issues=issues))
+                self.assertIn("closingIssuesReferences", caught.exception.message)
+
+    def test_an_unusable_payload_fails_closed_rather_than_reading_as_empty(self) -> None:
+        for label, kwargs in (
+            ("inline comment with no author", {"inline": [{"id": 1, "body": "x"}]}),
+            ("inline comment with no id", {"inline": [{"user": {"login": "a"}, "body": "x"}]}),
+            ("check-run page that is not an object", {"checks": ["nope"]}),
+            ("check-run page with no check_runs", {"checks": {"total_count": 0}}),
+            ("closing reference with no number", {"issues": {"closingIssuesReferences": [{}]}}),
+            ("closing references that are not an array", {"issues": {"closingIssuesReferences": 3}}),
+        ):
+            with self.subTest(payload=label):
+                with self.assertRaises(GitHubError):
+                    self.read(self.boundary(**kwargs))
 
 
 class RedactionTests(unittest.TestCase):
@@ -352,17 +555,19 @@ class ConfigTests(unittest.TestCase):
 
     def payload(self, **overrides: object) -> dict:
         body: dict = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "repo": "example/repo",
             "pr": 7,
+            "governing_issues": [1],
             "source_repo": str(self.clone),
             "worktree_root": "worktrees",
             "state_file": "state.json",
             "lock_file": "run.lock",
             "gates": [{"name": "tests", "argv": ["make", "test"]}],
             "reviewers": [
-                {"name": "A", "argv": ["reviewer-a", "{head}"]},
-                {"name": "B", "argv": ["reviewer-b", "{head}"]},
+                self.reviewer("A", "reviewer-a"),
+                self.reviewer("B", "reviewer-b"),
+                self.reviewer("Auditor", "integration-auditor"),
             ],
             "builder": {
                 "argv": ["builder", "{blockers_file}"],
@@ -373,6 +578,19 @@ class ConfigTests(unittest.TestCase):
         body.update(overrides)
         return body
 
+    @staticmethod
+    def reviewer(name: str, role: str, **overrides: object) -> dict:
+        """One self-publishing reviewer lane, which is the smallest valid shape."""
+        lane: dict = {
+            "name": name,
+            "role": role,
+            "argv": [f"reviewer-{name.lower()}", "{head}", "{role}"],
+            "artifact_author": "the-reviewer-login",
+            "artifact_signature": "Reviewed by: CodexReviewer",
+        }
+        lane.update(overrides)
+        return lane
+
     def load(self, **overrides: object) -> RunConfig:
         return RunConfig.from_mapping(self.payload(**overrides), base_dir=self.tmp)
 
@@ -381,6 +599,146 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.state_file, self.tmp / "state.json")
         self.assertEqual(config.owner, "example")
         self.assertEqual(config.name, "repo")
+
+    # -- the versioned break --------------------------------------------------
+    def test_the_shipped_schema_version_is_two(self) -> None:
+        """PAPI90-B-P1-003: the discriminator names the shape it describes.
+
+        This head made the old shape invalid — reviewers gained a required role,
+        artifact author, and artifact signature, and the lifecycle became three
+        exact ordered roles — while still accepting only version 1. One number
+        cannot truthfully denote two incompatible files.
+        """
+        self.assertEqual(SCHEMA_VERSION, 2)
+        self.assertEqual(self.load().source, None)
+
+    def test_a_schema_v1_config_is_refused_with_the_upgrade_steps(self) -> None:
+        with self.assertRaises(ConfigError) as caught:
+            self.load(schema_version=1)
+
+        error = caught.exception
+        self.assertEqual(error.reason, "invalid-config")
+        self.assertEqual(error.evidence["found"], 1)
+        self.assertEqual(error.evidence["expected"], 2)
+        self.assertEqual(error.evidence["upgrade"], list(V1_UPGRADE_STEPS))
+        self.assertIn("schema_version 1 is no longer supported", error.message)
+        self.assertIn("set 'schema_version' to 2", error.message)
+
+    def test_the_v1_refusal_is_deterministic(self) -> None:
+        """Same input, same words: this text is read by a builder, not a human."""
+        messages = set()
+        for _ in range(3):
+            with self.assertRaises(ConfigError) as caught:
+                self.load(schema_version=1)
+            messages.add(json.dumps(caught.exception.as_dict(), sort_keys=True))
+        self.assertEqual(len(messages), 1)
+
+    def test_an_unknown_future_version_gets_the_generic_refusal(self) -> None:
+        for version in (0, 3, "2", None, True):
+            with self.subTest(version=version):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(schema_version=version)
+                self.assertEqual(caught.exception.reason, "invalid-config")
+                self.assertNotIn("upgrade", caught.exception.evidence)
+
+    def test_the_shipped_example_declares_the_supported_version(self) -> None:
+        example = Path(__file__).resolve().parents[1] / "examples" / "run.example.json"
+        payload = json.loads(example.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], SCHEMA_VERSION)
+
+    def test_the_state_journal_version_is_independent_of_the_config_one(self) -> None:
+        """Bumping one must not be read as bumping the other."""
+        from pr_prover.state import SCHEMA_VERSION as STATE_SCHEMA_VERSION
+
+        self.assertEqual(STATE_SCHEMA_VERSION, 4)
+        self.assertNotEqual(STATE_SCHEMA_VERSION, SCHEMA_VERSION)
+
+    # -- every configured path field, over the whole range of bad values ----
+    PATH_FIELDS = ("source_repo", "worktree_root", "state_file", "lock_file")
+
+    def test_a_nul_containing_path_is_a_structured_config_error(self) -> None:
+        """RA-P1-003: valid JSON that ``Path.resolve`` refuses is still config.
+
+        ``"bad\\u0000path"`` parses as JSON and reaches ``Path.resolve``, which
+        raises a bare ``ValueError`` the CLI does not catch. Every path field is
+        checked, because one translated field would only move the traceback.
+        """
+        for key in self.PATH_FIELDS:
+            with self.subTest(field=key):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(**{key: "bad\x00path"})
+                self.assertEqual(caught.exception.reason, "invalid-config")
+                self.assertEqual(caught.exception.evidence, {"key": key})
+                self.assertIn(key, caught.exception.message)
+
+    def test_a_rejected_path_is_never_echoed_back(self) -> None:
+        """The value is operator text; the field name is what needs fixing."""
+        hostile = "/tmp/ghp_0123456789abcdefghijABCDEFGHIJ0123\x00/x"
+        for key in self.PATH_FIELDS:
+            with self.subTest(field=key):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(**{key: hostile})
+                rendered = json.dumps(caught.exception.as_dict())
+                self.assertNotIn("ghp_", rendered)
+                self.assertNotIn("\\u0000", rendered)
+
+    def test_every_other_unusable_path_value_is_the_same_structured_stop(self) -> None:
+        for key in self.PATH_FIELDS:
+            for label, value in (
+                ("missing", None),
+                ("empty", ""),
+                ("wrong type", 7),
+                ("a list", ["/tmp"]),
+                ("null", None),
+            ):
+                with self.subTest(field=key, value=label):
+                    with self.assertRaises(ConfigError) as caught:
+                        self.load(**{key: value})
+                    self.assertEqual(caught.exception.reason, "invalid-config")
+                    self.assertIn(key, caught.exception.message)
+
+    # -- the task contract ----------------------------------------------------
+    def test_the_governing_issues_are_configured_not_parsed_from_the_pr(self) -> None:
+        """Which contract a change is measured against is Hermes's call.
+
+        A PR body is untrusted prose — this repository's own PAPI-90 PR says
+        ``Refs #1`` and closes nothing — so the reviewer's contract arrives by
+        number from this file and cannot be moved by what the PR claims.
+        """
+        self.assertEqual(self.load().governing_issues, (1,))
+        self.assertEqual(self.load(governing_issues=[1, 84]).governing_issues, (1, 84))
+
+    def test_a_run_with_no_governing_issue_fails_closed(self) -> None:
+        for label, value in (
+            ("null", None),
+            ("empty", []),
+            ("a bare number", 1),
+            ("a string", "1"),
+        ):
+            with self.subTest(governing_issues=label):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(governing_issues=value)
+                self.assertIn("governing_issues", caught.exception.message)
+
+    def test_an_unusable_governing_issue_number_fails_closed(self) -> None:
+        for label, value in (
+            ("a boolean", [True]),
+            ("zero", [0]),
+            ("negative", [-3]),
+            ("text", ["1"]),
+            ("a float", [1.5]),
+        ):
+            with self.subTest(governing_issues=label):
+                with self.assertRaises(ConfigError):
+                    self.load(governing_issues=value)
+
+    def test_a_repeated_or_unbounded_governing_issue_list_fails_closed(self) -> None:
+        with self.assertRaises(ConfigError) as repeated:
+            self.load(governing_issues=[1, 1])
+        self.assertIn("same issue twice", repeated.exception.message)
+        with self.assertRaises(ConfigError) as many:
+            self.load(governing_issues=list(range(1, MAX_GOVERNING_ISSUES + 2)))
+        self.assertEqual(many.exception.evidence["limit"], MAX_GOVERNING_ISSUES)
 
     def test_an_unknown_key_fails_closed(self) -> None:
         with self.assertRaises(ConfigError) as caught:
@@ -394,13 +752,167 @@ class ConfigTests(unittest.TestCase):
 
     def test_one_reviewer_lane_is_not_enough(self) -> None:
         with self.assertRaises(ConfigError):
-            self.load(reviewers=[{"name": "A", "argv": ["reviewer-a"]}])
+            self.load(reviewers=[self.reviewer("A", "reviewer-a")])
 
     def test_duplicate_lane_names_fail_closed(self) -> None:
         with self.assertRaises(ConfigError):
             self.load(
-                reviewers=[{"name": "A", "argv": ["a"]}, {"name": "A", "argv": ["b"]}]
+                reviewers=[
+                    self.reviewer("A", "reviewer-a"),
+                    self.reviewer("A", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
             )
+
+    def test_the_acceptance_lifecycle_must_be_the_three_required_roles_in_order(self) -> None:
+        """The auditor reconciles two artifacts, so it cannot be missing or first."""
+        for roles in (
+            ("reviewer-a", "reviewer-b"),
+            ("integration-auditor", "reviewer-a", "reviewer-b"),
+            ("reviewer-b", "reviewer-a", "integration-auditor"),
+            ("reviewer-a", "reviewer-b", "reviewer-c"),
+        ):
+            with self.subTest(roles=roles):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(
+                        reviewers=[
+                            self.reviewer(f"L{index}", role)
+                            for index, role in enumerate(roles)
+                        ]
+                    )
+                self.assertEqual(
+                    caught.exception.evidence["required_roles"],
+                    ["reviewer-a", "reviewer-b", "integration-auditor"],
+                )
+
+    def test_two_lanes_sharing_a_role_fail_closed(self) -> None:
+        """Either lane could satisfy the other's readback, which ends independence."""
+        with self.assertRaises(ConfigError):
+            self.load(
+                reviewers=[
+                    self.reviewer("A", "reviewer-a"),
+                    self.reviewer("B", "reviewer-a"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+
+    def test_a_reviewer_without_a_pinned_artifact_author_fails_closed(self) -> None:
+        lane = self.reviewer("A", "reviewer-a")
+        del lane["artifact_author"]
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    lane,
+                    self.reviewer("B", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+        self.assertIn("artifact_author", caught.exception.message)
+
+    def test_a_relay_lane_must_receive_the_artifact_file_on_both_sides(self) -> None:
+        """Neither half of the handoff can be left holding nothing."""
+        no_write = self.reviewer(
+            "A",
+            "reviewer-a",
+            relay={"argv": ["gh", "pr", "comment", "--body-file", "{artifact_file}"]},
+        )
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    no_write,
+                    self.reviewer("B", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+        self.assertIn("nowhere to prepare", caught.exception.message)
+
+        no_post = self.reviewer(
+            "A",
+            "reviewer-a",
+            argv=["reviewer-a", "{head}", "--artifact-file", "{artifact_file}"],
+            relay={"argv": ["gh", "pr", "comment"]},
+        )
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    no_post,
+                    self.reviewer("B", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+        self.assertIn("no prepared artifact to publish", caught.exception.message)
+
+    def test_a_relayed_lane_may_not_be_handed_a_github_credential(self) -> None:
+        """The relay publishes; naming a token for the judging lane contradicts that."""
+        lane = self.reviewer(
+            "A",
+            "reviewer-a",
+            argv=["reviewer-a", "{head}", "--artifact-file", "{artifact_file}"],
+            relay={"argv": ["gh", "pr", "comment", "--body-file", "{artifact_file}"]},
+            env={"GH_TOKEN": "provided-elsewhere"},
+        )
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    lane,
+                    self.reviewer("B", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+        self.assertIn("without a GitHub credential", caught.exception.message)
+
+    def test_a_lane_may_not_retarget_the_session_the_agents_authenticate_through(
+        self,
+    ) -> None:
+        """No synthetic HOME: the trusted lanes need the real OAuth/keychain session."""
+        for variable in ("HOME", "USER", "LOGNAME", "SHELL"):
+            with self.subTest(variable=variable):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(
+                        builder={
+                            "argv": ["builder", "{blockers_file}"],
+                            "signature": "Fixed by: Claude Code",
+                            "comment_author": BUILDER_LOGIN,
+                            "env": {variable: "/tmp/synthetic"},
+                        }
+                    )
+                self.assertIn(variable, caught.exception.message)
+                with self.assertRaises(ConfigError):
+                    self.load(
+                        builder={
+                            "argv": ["builder", "{blockers_file}"],
+                            "signature": "Fixed by: Claude Code",
+                            "comment_author": BUILDER_LOGIN,
+                            "env_unset": [variable],
+                        }
+                    )
+
+    def test_a_credential_shaped_env_value_fails_closed(self) -> None:
+        """Tokens live in the keychain and in gh's auth, not in run evidence."""
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                builder={
+                    "argv": ["builder", "{blockers_file}"],
+                    "signature": "Fixed by: Claude Code",
+                    "comment_author": BUILDER_LOGIN,
+                    "env": {"SOME_TOKEN": "ghp_examplevaluethatlookslikeacredential"},
+                }
+            )
+        self.assertIn("credential", caught.exception.message)
+
+    def test_an_unbounded_or_unrealistic_budget_is_advised_not_refused(self) -> None:
+        """Advisories are notes: a repo with a two-minute suite may know better."""
+        config = self.load(
+            builder={
+                "argv": ["builder", "{blockers_file}"],
+                "signature": "Fixed by: Claude Code",
+                "comment_author": BUILDER_LOGIN,
+                "timeout": 60,
+            }
+        )
+        notes = " ".join(config.advisories())
+        self.assertIn("builder timeout is 60s", notes)
+        self.assertIn("has no timeout", notes)
 
     def test_required_visual_qa_without_a_visual_gate_fails_closed(self) -> None:
         with self.assertRaises(ConfigError) as caught:
@@ -528,17 +1040,28 @@ class CliTests(unittest.TestCase):
         self.config_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": SCHEMA_VERSION,
                     "repo": "example/repo",
                     "pr": 7,
+                    "governing_issues": [1],
                     "source_repo": str(self.clone),
                     "worktree_root": str(self.tmp / "worktrees"),
                     "state_file": str(self.tmp / "state.json"),
                     "lock_file": str(self.tmp / "run.lock"),
                     "gates": [],
                     "reviewers": [
-                        {"name": "A", "argv": ["reviewer-a", "{head}"]},
-                        {"name": "B", "argv": ["reviewer-b", "{head}"]},
+                        {
+                            "name": name,
+                            "role": role,
+                            "argv": [f"reviewer-{role}", "{head}", "{role}"],
+                            "artifact_author": "the-reviewer-login",
+                            "artifact_signature": "Reviewed by: CodexReviewer",
+                        }
+                        for name, role in (
+                            ("A", "reviewer-a"),
+                            ("B", "reviewer-b"),
+                            ("Auditor", "integration-auditor"),
+                        )
                     ],
                     "builder": {
                 "argv": ["builder", "{blockers_file}"],
@@ -552,6 +1075,47 @@ class CliTests(unittest.TestCase):
 
     def test_check_config_accepts_a_valid_config(self) -> None:
         self.assertEqual(self.cli(["check-config", "--config", str(self.config_path)]), 0)
+
+    def test_check_config_accepts_the_shipped_example_and_names_the_lifecycle(self) -> None:
+        """The repository-required gate, run against the config it is run against.
+
+        ``pr-prover/bin/pr-prover check-config --config
+        pr-prover/examples/run.example.json`` is one of the checks every change
+        to this tool must pass. This drives the same entry point over the same
+        file, so the gate is exercised by the suite rather than only by whoever
+        remembers to type it.
+        """
+        example = Path(__file__).resolve().parents[1] / "examples" / "run.example.json"
+        payload = json.loads(example.read_text(encoding="utf-8"))
+        # The one field that cannot be checked in place: the example names an
+        # absolute clone path that only exists on an operator's machine.
+        payload["source_repo"] = str(self.clone)
+        local = self.tmp / "example.json"
+        local.write_text(json.dumps(payload), encoding="utf-8")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["check-config", "--config", str(local)])
+
+        self.assertEqual(code, 0)
+        printed = buffer.getvalue()
+        self.assertIn("config ok:", printed)
+        self.assertIn("reviewer-a, reviewer-b, integration-auditor", printed)
+        # The contract the lanes will be held to is part of what was validated.
+        self.assertIn("governed by #1", printed)
+
+    def test_check_config_prints_budget_advisories_without_failing(self) -> None:
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        payload["builder"]["timeout"] = 30
+        short = self.tmp / "short.json"
+        short.write_text(json.dumps(payload), encoding="utf-8")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["check-config", "--config", str(short)])
+
+        self.assertEqual(code, 0, "an advisory is a note, not a rejection")
+        self.assertIn("note: builder timeout is 30s", buffer.getvalue())
 
     def test_check_config_rejects_a_bad_config(self) -> None:
         bad = self.tmp / "bad.json"

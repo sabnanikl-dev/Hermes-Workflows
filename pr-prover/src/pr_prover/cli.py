@@ -73,8 +73,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "check-config":
         print(
             f"config ok: {config.repo}#{config.pr} "
-            f"({len(config.gates)} gate(s), {len(config.reviewers)} reviewer lane(s))"
+            f"({len(config.gates)} gate(s), {len(config.reviewers)} reviewer lane(s): "
+            + ", ".join(reviewer.role for reviewer in config.reviewers)
+            + "; governed by "
+            + ", ".join(f"#{number}" for number in config.governing_issues)
+            + ")"
         )
+        # Advisories are notes, not errors: a lane budget that is unrealistically
+        # short or absent produces a run that looks like a hang or never ends,
+        # and neither is something to discover for the first time at minute
+        # forty of a real fix cycle. They are printed rather than enforced
+        # because a repository with a two-minute suite may genuinely know better.
+        for note in config.advisories():
+            print(f"note: {note}")
         return 0
 
     if args.command == "reset":

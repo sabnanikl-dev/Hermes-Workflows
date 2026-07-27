@@ -101,6 +101,31 @@ class ReadbackMismatch(FailClosed):
     reason = "readback-mismatch"
 
 
+class ReviewerRelayError(FailClosed):
+    """A reviewer's artifact could not be prepared or published under its identity."""
+
+    reason = "relay-failure"
+
+
+class EvidencePacketError(FailClosed):
+    """The frozen evidence a credential-free reviewer judges from is unusable.
+
+    Distinct from :class:`ReviewerRelayError` because it stops the lane at the
+    other end of the lifecycle: the packet is what a lane with no GitHub
+    credential reads *before* it reviews, so an empty, malformed, or
+    wrongly-bound one means the review would have been formed against the wrong
+    head — or against nothing — rather than that transport failed.
+    """
+
+    reason = "evidence-packet"
+
+
+class HumanFeedbackPresent(FailClosed):
+    """The PR carries feedback this run cannot attribute to one of its own lanes."""
+
+    reason = "human-feedback"
+
+
 class ScopeContamination(FailClosed):
     """Work appeared outside the frozen blocker set or the attempt worktree is dirty."""
 
@@ -147,6 +172,9 @@ FAILURE_CLASSES = (
     StaleHead.reason,
     AmbiguousPush.reason,
     ReadbackMismatch.reason,
+    ReviewerRelayError.reason,
+    EvidencePacketError.reason,
+    HumanFeedbackPresent.reason,
     ScopeContamination.reason,
     BuilderRefusal.reason,
     GitHubError.reason,
@@ -261,6 +289,29 @@ _PLAYBOOK: dict[str, _Playbook] = {
         escalation=(
             "the comment cannot be posted under the configured identity, or a comment already "
             "matched before this attempt ran"
+        ),
+    ),
+    ReviewerRelayError.reason: _Playbook(
+        remediation=_STOP_ONLY,
+        escalation=(
+            "always: a reviewer artifact is the reviewer lane's own output and the relay's "
+            "own transport, and the builder never writes, edits, or republishes one"
+        ),
+    ),
+    EvidencePacketError.reason: _Playbook(
+        remediation=_STOP_ONLY,
+        escalation=(
+            "always: the frozen packet is this run's own read of GitHub, so a lane that cannot "
+            "get one bound to the current head has nothing to review and the builder has "
+            "nothing to fix about it"
+        ),
+    ),
+    HumanFeedbackPresent.reason: _Playbook(
+        remediation=_STOP_ONLY,
+        escalation=(
+            "always: feedback this run cannot attribute to one of its own lanes is a human "
+            "asking for something, and a builder must not fix against a PR conversation "
+            "nobody has reconciled"
         ),
     ),
     ScopeContamination.reason: _Playbook(
@@ -424,14 +475,17 @@ __all__ = [
     "BuilderRefusal",
     "CommandContractError",
     "ConfigError",
+    "EvidencePacketError",
     "FailClosed",
     "FailureRecord",
     "GitHubError",
+    "HumanFeedbackPresent",
     "LaneFailure",
     "LockContention",
     "MalformedVerdict",
     "PrProverError",
     "ReadbackMismatch",
+    "ReviewerRelayError",
     "ScopeContamination",
     "StaleHead",
     "StateError",
