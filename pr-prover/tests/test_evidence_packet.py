@@ -513,6 +513,205 @@ class PacketFileTests(unittest.TestCase):
                     self.read()
                 self.assertEqual(caught.exception.evidence["field"], field)
 
+    # -- former red: the envelope is right and the contract inside it is not ---
+    #
+    # Everything above proves the surfaces are shaped like surfaces. These prove
+    # the two contract surfaces carry the documents the reviewer prompt names.
+    # Each case keeps the binding, the required surfaces, the completeness flags
+    # and the counts — and hands the lane a PR body it does not have, a contract
+    # body that is missing or ``null``, or a contract for another issue entirely.
+
+    def test_a_pull_request_body_record_without_body_text_stops_the_lane(self) -> None:
+        """The prompt tells the lane to check this document for stale claims."""
+        cases = (
+            ("missing body field", lambda record: record.pop("body")),
+            ("null body", lambda record: record.update({"body": None})),
+            ("non-text body", lambda record: record.update({"body": 7})),
+            ("body that is a list", lambda record: record.update({"body": ["text"]})),
+        )
+        for label, mutate in cases:
+            with self.subTest(pull_request_body=label):
+                self.landed(
+                    lambda payload, edit=mutate: edit(
+                        payload["surfaces"]["pull_request_body"]["items"][0]
+                    )
+                )
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertIn("carries no description text", caught.exception.message)
+                self.assertEqual(caught.exception.evidence["surface"], "pull_request_body")
+
+    def test_a_pull_request_body_belonging_to_another_pr_stops_the_lane(self) -> None:
+        """A body is only the change's stated contract if it is this change's."""
+        for label, value in (("another PR", 8), ("boolean", True), ("text", "7"), ("absent", None)):
+            with self.subTest(number=label):
+                self.landed(
+                    lambda payload, item=value: payload["surfaces"]["pull_request_body"]["items"][
+                        0
+                    ].update({"number": item})
+                )
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertIn("not this pull request's", caught.exception.message)
+                self.assertEqual(caught.exception.evidence["expected"], 7)
+
+    def test_more_than_one_pull_request_body_is_not_the_pull_request_body(self) -> None:
+        """Two descriptions is one of them being the wrong one, silently."""
+        self.landed(
+            lambda payload: payload["surfaces"]["pull_request_body"].update(
+                {
+                    "count": 2,
+                    "items": [
+                        {"number": 7, "title": "example", "body": PR_BODY},
+                        {"number": 7, "title": "example", "body": "and also this"},
+                    ],
+                }
+            )
+        )
+        with self.assertRaises(EvidencePacketError) as caught:
+            self.read()
+        self.assertIn("exactly one pull request body", caught.exception.message)
+
+    def test_a_pull_request_body_record_that_is_not_an_object_stops_the_lane(self) -> None:
+        self.landed(
+            lambda payload: payload["surfaces"]["pull_request_body"].update({"items": [PR_BODY]})
+        )
+        with self.assertRaises(EvidencePacketError) as caught:
+            self.read()
+        self.assertIn("is not a record", caught.exception.message)
+
+    def test_a_governing_issue_without_a_contract_body_stops_the_lane(self) -> None:
+        """A contract with no text is not a shorter contract; it is none."""
+        cases = (
+            ("missing body field", lambda record: record.pop("body")),
+            ("null body", lambda record: record.update({"body": None})),
+            ("non-text body", lambda record: record.update({"body": 1})),
+        )
+        for label, mutate in cases:
+            with self.subTest(governing_issue=label):
+                self.landed(
+                    lambda payload, edit=mutate: edit(
+                        payload["surfaces"]["governing_issues"]["items"][0]
+                    )
+                )
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertIn("carries no contract body", caught.exception.message)
+                self.assertEqual(caught.exception.evidence["issue"], GOVERNING_ISSUE)
+
+    def test_a_contract_for_an_issue_this_run_does_not_name_stops_the_lane(self) -> None:
+        """Substitution is the case a well-formed envelope cannot show.
+
+        The packet declares the issues the run configured. A record for #999
+        keeps every count and flag intact while measuring the change against a
+        document nobody chose, so the records are held to the declared numbers.
+        """
+        self.landed(
+            lambda payload: payload["surfaces"]["governing_issues"]["items"][0].update(
+                {"number": 999}
+            )
+        )
+        with self.assertRaises(EvidencePacketError) as caught:
+            self.read()
+        self.assertIn("does not carry the governing issues", caught.exception.message)
+        self.assertEqual(caught.exception.evidence["expected"], [GOVERNING_ISSUE])
+        self.assertEqual(caught.exception.evidence["found"], [999])
+
+    def test_a_governing_issue_number_that_is_not_one_stops_the_lane(self) -> None:
+        for label, value in (("boolean", True), ("zero", 0), ("negative", -1), ("text", "1")):
+            with self.subTest(number=label):
+                self.landed(
+                    lambda payload, item=value: payload["surfaces"]["governing_issues"]["items"][
+                        0
+                    ].update({"number": item})
+                )
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertIn("no usable issue number", caught.exception.message)
+
+    def test_a_governing_record_that_is_not_an_object_stops_the_lane(self) -> None:
+        self.landed(
+            lambda payload: payload["surfaces"]["governing_issues"].update(
+                {"items": [GOVERNING_ISSUE_BODY]}
+            )
+        )
+        with self.assertRaises(EvidencePacketError) as caught:
+            self.read()
+        self.assertIn("governing issue is not a record", caught.exception.message)
+
+    def test_a_duplicated_or_reordered_contract_is_not_the_configured_one(self) -> None:
+        """Order and multiplicity are part of what the configuration said."""
+        both = [
+            {"number": 1, "title": "mission", "state": "OPEN", "body": GOVERNING_ISSUE_BODY},
+            {"number": 1, "title": "mission", "state": "OPEN", "body": GOVERNING_ISSUE_BODY},
+        ]
+        self.landed(
+            lambda payload: payload["surfaces"]["governing_issues"].update(
+                {"count": 2, "items": both}
+            )
+        )
+        with self.assertRaises(EvidencePacketError) as caught:
+            self.read()
+        self.assertIn("does not carry the governing issues", caught.exception.message)
+
+    def test_the_reader_holds_the_contract_to_the_numbers_the_caller_configured(self) -> None:
+        """The loop passes the same tuple it handed GitHub; both must agree.
+
+        Without this the packet is only self-consistent: a writer that named
+        #999 in both places would be believed. The run's configuration is the
+        authority, so it is what the records are measured against.
+        """
+        self.write()
+        self.assertEqual(
+            self.read(governing_issues=(GOVERNING_ISSUE,))["surfaces"]["governing_issues"][
+                "items"
+            ][0]["number"],
+            GOVERNING_ISSUE,
+        )
+        for label, configured in (("another issue", (2,)), ("one too many", (1, 2))):
+            with self.subTest(configured=label):
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read(governing_issues=configured)
+                self.assertIn("this run did not configure", caught.exception.message)
+                self.assertEqual(caught.exception.evidence["configured"], list(configured))
+
+    def test_a_packet_that_does_not_name_its_governing_issues_stops_the_lane(self) -> None:
+        cases = (
+            ("missing", lambda payload: payload.pop("governing_issue_numbers")),
+            ("empty", lambda payload: payload.__setitem__("governing_issue_numbers", [])),
+            ("not a list", lambda payload: payload.__setitem__("governing_issue_numbers", 1)),
+            ("boolean", lambda payload: payload.__setitem__("governing_issue_numbers", [True])),
+            ("zero", lambda payload: payload.__setitem__("governing_issue_numbers", [0])),
+            ("text", lambda payload: payload.__setitem__("governing_issue_numbers", ["1"])),
+            ("duplicated", lambda payload: payload.__setitem__("governing_issue_numbers", [1, 1])),
+        )
+        for label, mutate in cases:
+            with self.subTest(governing_issue_numbers=label):
+                self.landed(mutate)
+                with self.assertRaises(EvidencePacketError) as caught:
+                    self.read()
+                self.assertIn("does not name the governing issues", caught.exception.message)
+
+    def test_a_pr_that_says_nothing_about_itself_still_reaches_the_lane(self) -> None:
+        """The strictness must not turn an honest empty description into a stop."""
+        write_packet(
+            self.path,
+            build_packet(
+                pull=pull_request(body=""),
+                repo=REPO,
+                head=HEAD_A,
+                sequence=1,
+                reviewer="A",
+                role="reviewer-a",
+                comments=(),
+                reviews=(),
+                evidence=governing(),
+                governing_issues=(GOVERNING_ISSUE,),
+            ),
+        )
+        payload = self.read(governing_issues=(GOVERNING_ISSUE,))
+        self.assertEqual(payload["surfaces"]["pull_request_body"]["items"][0]["body"], "")
+
     def test_a_valid_packet_still_round_trips_after_all_of_that(self) -> None:
         """The strictness has to admit the packet this tool actually writes."""
         self.write()
@@ -727,6 +926,83 @@ class PacketInTheLoopTests(LoopHarness):
                     ],
                     [],
                 )
+
+    def test_a_landed_packet_with_a_hollow_contract_cannot_earn_merge_ready(self) -> None:
+        """Former red at the loop level: the envelope held and the contract did not.
+
+        These are the four the reviewer reproduced by hand. Every surface keeps
+        its completeness flag, its count, and a matching list of items — and the
+        lane would have been handed a PR body with no text, a governing issue
+        with no contract body or a ``null`` one, or the contract for issue #999
+        while this run is measured against #1. All four reached ``merge-ready``
+        with three review lanes launched.
+        """
+        cases = {
+            "missing-pr-body-field": lambda payload: payload["surfaces"]["pull_request_body"][
+                "items"
+            ][0].pop("body"),
+            "missing-governing-body-field": lambda payload: payload["surfaces"][
+                "governing_issues"
+            ]["items"][0].pop("body"),
+            "null-governing-body": lambda payload: payload["surfaces"]["governing_issues"][
+                "items"
+            ][0].update({"body": None}),
+            "substituted-governing-number": lambda payload: payload["surfaces"][
+                "governing_issues"
+            ]["items"][0].update({"number": 999}),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(packet=label):
+                self.setUp()
+                loop = self.build()
+                self.review_round(HEAD_A)
+
+                def landed(path, payload, edit=mutate):
+                    edit(payload)
+                    return write_packet(path, payload)
+
+                with patch("pr_prover.loop.write_packet", landed):
+                    result = loop.run()
+
+                self.assertEqual(result.outcome, NEEDS_KARAN)
+                self.assertEqual(result.reason, "evidence-packet")
+                self.assertEqual(
+                    [
+                        call.argv[0]
+                        for call in self.runner.calls
+                        if call.argv[0].startswith("lane-")
+                    ],
+                    [],
+                    "no lane may judge a change against a contract it was not handed",
+                )
+                self.assertEqual(result.transport, ())
+
+    def test_a_contract_read_for_an_issue_this_run_did_not_configure_stops_it(self) -> None:
+        """The substitution case through the shipped value flow, unpatched.
+
+        The configuration names issue #1; the boundary comes back describing
+        #999. Nothing about that packet is malformed — it is simply a contract
+        this run did not choose, which is exactly what a lane cannot detect from
+        the inside, so the configured numbers travel into the readback and the
+        run stops before any lane is launched.
+        """
+        loop = self.build()
+        self.review_round(HEAD_A)
+        self.remote.governing_issues = [
+            GoverningIssue(
+                number=999, title="someone else's mission", state="OPEN", body="ACCEPTANCE: other"
+            )
+        ]
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "evidence-packet")
+        self.assertEqual(self.github.governing_issues_asked_for, [(GOVERNING_ISSUE,)])
+        self.assertEqual(
+            [call.argv[0] for call in self.runner.calls if call.argv[0].startswith("lane-")],
+            [],
+        )
 
     def test_a_packet_that_could_not_be_written_stops_the_run(self) -> None:
         loop = self.build()

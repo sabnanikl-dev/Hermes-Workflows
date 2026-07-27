@@ -280,6 +280,17 @@ satisfy both. A file that keeps the binding and loses the evidence is the one
 failure a reviewer cannot detect from the inside: every one of those surfaces
 would simply read as *nothing to see here*.
 
+The envelope is not the evidence either, so the two contract surfaces are held to
+their records as well. `pull_request_body` must be exactly one record, for this
+PR's number, with a `body` that is text — an empty description is a fact about
+the PR and stays valid, but a missing or `null` one is a lane checking for stale
+claims against nothing. `governing_issues` must carry exactly the issues the run
+configured, in that order, each with a body that is text: the packet writes those
+numbers down as `governing_issue_numbers`, and the loop passes the same
+configured tuple it handed GitHub into the readback, so a contract record for
+`#999` on a run measured against `#1` stops the lane instead of quietly becoming
+the acceptance criteria it is judged by.
+
 Everything inside is untrusted evidence. The whole payload goes through the same
 recursive redaction the report and the frozen blocker file do, with the clip set
 to the largest artifact this tool will relay — the Integration Auditor's job is

@@ -1024,6 +1024,11 @@ class ProverLoop:
         process assembled. A packet that did not land, landed empty, or is the
         one an earlier cycle left at that path stops the lane before it forms a
         confident review of the wrong head.
+
+        The configured governing issue numbers travel into both halves of that
+        round trip — the same value that was just handed to GitHub — so the
+        contract a lane is measured against is held to the run's configuration
+        rather than to whichever issue records reached the file.
         """
         comments = self.github.comments(self.config.repo, self.config.pr)
         reviews = self.github.reviews(self.config.repo, self.config.pr)
@@ -1042,6 +1047,7 @@ class ProverLoop:
             comments=comments,
             reviews=reviews,
             evidence=evidence,
+            governing_issues=self.config.governing_issues,
         )
         path = (
             self._scratch_dir()
@@ -1057,6 +1063,7 @@ class ProverLoop:
             sequence=sequence,
             reviewer=reviewer.name,
             role=reviewer.role,
+            governing_issues=self.config.governing_issues,
         )
         self._event(
             f"reviewer {reviewer.name} handed a {packet.size}-byte frozen evidence packet "

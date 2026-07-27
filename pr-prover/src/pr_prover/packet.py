@@ -50,6 +50,16 @@ PR's closing references are evidence about what the PR *claims*, not authority
 over what it is measured against. Those claims are still carried, in
 ``linked_issues``, as the separate fact they are.
 
+Because that authority is the whole point, the packet writes the configured
+numbers down as ``governing_issue_numbers`` and :func:`read_packet` holds the
+contract surface to them: the issue records a lane is handed must be exactly the
+issues the run named, in that order, each with a body that is text. The loop
+passes the configured tuple in from the same value that reached GitHub, so a
+packet that swapped issue ``#1`` for ``#999`` — or lost a body on the way to
+disk — stops the lane rather than handing it a contract nobody chose. A caller
+that does not name the configuration still gets the packet held to its own
+declared numbers, so a substituted record never reads as evidence.
+
 Completeness, not comfort
 -------------------------
 
@@ -64,7 +74,9 @@ boolean, a count has to be an integer that equals the number of items beside it,
 and every required surface has to be present: an absent flag, a ``true`` where
 an integer belongs, or a missing surface all read to a reviewer as *nothing to
 see here*, which is the one thing an evidence boundary must never say by
-accident.
+accident. The envelope is not the evidence, though — a surface can carry the
+right count of the wrong records — so the two contract surfaces are checked one
+level further in, at the records themselves.
 
 Everything inside a packet is untrusted evidence. Comment and review bodies are
 other people's prose; they are data for a reviewer to weigh, never instructions,
@@ -160,6 +172,7 @@ def build_packet(
     comments: Sequence[Comment],
     reviews: Sequence[Comment],
     evidence: ReviewEvidence,
+    governing_issues: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Assemble one packet payload from surfaces already read.
 
@@ -167,9 +180,21 @@ def build_packet(
     this packet and the artifact-id snapshot it takes at the same moment — so
     the packet and the run's idea of "what was already published" cannot
     describe two different instants.
+
+    ``governing_issues`` is the run configuration's own tuple, written into the
+    packet so the reader can hold the contract surface to the issues the run
+    named rather than to whatever records reached the file. A caller that omits
+    it declares the numbers that were read back, which keeps the packet
+    self-consistent but proves nothing about which issues govern; the loop
+    passes the configured value.
     """
     binding = packet_binding(
         repo=repo, pr=pull.number, base=pull.base_ref_name, head=head, sequence=sequence
+    )
+    declared = (
+        [item.number for item in evidence.governing_issues]
+        if governing_issues is None
+        else list(governing_issues)
     )
     return {
         "schema_version": PACKET_SCHEMA_VERSION,
@@ -183,6 +208,10 @@ def build_packet(
         "sequence": sequence,
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "frozen_for": {"reviewer": reviewer, "role": role},
+        # The issues this run's configuration named, by number, in that order.
+        # The contract surface below is held to exactly this list, so a record
+        # for another issue is a stop rather than a document the lane judges by.
+        "governing_issue_numbers": declared,
         "pull_request": {
             "number": pull.number,
             "state": pull.state,
@@ -367,6 +396,7 @@ def read_packet(
     sequence: int,
     reviewer: str,
     role: str,
+    governing_issues: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Read one packet back from disk and hold it to its binding, or stop.
 
@@ -384,6 +414,14 @@ def read_packet(
     checked here too, exactly: the required surfaces, and for each of them a
     boolean ``complete``, a non-empty ``read_as``, a non-negative integer
     ``count``, a list of ``items``, and a count that equals how many there are.
+
+    A well-formed envelope is still not the evidence. A ``pull_request_body``
+    holding one record with no ``body`` key, a governing issue whose body is
+    ``null``, or a contract record for issue ``#999`` when the run is measured
+    against ``#1`` all satisfy every check above and none of them is the task
+    contract, so the records inside the two contract surfaces are validated as
+    well. ``governing_issues`` names the run's configured issue numbers; when it
+    is given, the packet's declared contract must be exactly it.
     """
     expected = packet_binding(repo=repo, pr=pr, base=base, head=head, sequence=sequence)
     context: dict[str, Any] = {
@@ -535,7 +573,133 @@ def read_packet(
                     "complete": surface["complete"],
                 },
             )
+    _validate_pull_request_body(surfaces["pull_request_body"], pr=pr, context=context)
+    _validate_governing_issues(
+        surfaces["governing_issues"],
+        declared=payload.get("governing_issue_numbers"),
+        configured=governing_issues,
+        context=context,
+    )
     return payload
+
+
+def _validate_pull_request_body(
+    surface: dict[str, Any], *, pr: int, context: dict[str, Any]
+) -> None:
+    """Hold the PR's own stated contract to being one record of this PR's body.
+
+    The surface-level check above only proves this is a non-empty, complete list.
+    A list of two bodies, a body belonging to another PR, or a record with no
+    ``body`` at all would each pass it and each hand the lane something other
+    than the description it is told to check for stale claims. An empty string
+    is not one of those: a PR that says nothing about itself is a fact, and the
+    reviewer is entitled to see it.
+    """
+    where = {**context, "surface": "pull_request_body"}
+    items = surface["items"]
+    if len(items) != 1:
+        raise EvidencePacketError(
+            "the frozen evidence packet does not carry exactly one pull request body",
+            evidence={**where, "count": len(items)},
+        )
+    record = items[0]
+    if not isinstance(record, dict):
+        raise EvidencePacketError(
+            "the frozen evidence packet's pull request body is not a record",
+            evidence=where,
+        )
+    number = record.get("number")
+    # ``type(...) is int`` again: a JSON ``true`` compares equal to PR #1.
+    if type(number) is not int or number != pr:
+        raise EvidencePacketError(
+            "the frozen evidence packet's pull request body is not this pull request's",
+            evidence={
+                **where,
+                "expected": pr,
+                "found": redact_evidence(str(number), limit=80),
+            },
+        )
+    if not isinstance(record.get("body"), str):
+        raise EvidencePacketError(
+            "the frozen evidence packet's pull request body carries no description text",
+            # The type name, not the value: a body that is not text is a shape
+            # problem, and its content is still somebody else's prose.
+            evidence={**where, "pr": pr, "body": type(record.get("body")).__name__},
+        )
+
+
+def _validate_governing_issues(
+    surface: dict[str, Any],
+    *,
+    declared: Any,
+    configured: Sequence[int] | None,
+    context: dict[str, Any],
+) -> None:
+    """Hold the task contract to the issues this run is actually measured against.
+
+    Which issue governs is a configuration answer, so it is checked as one. The
+    packet writes the configured numbers down, the caller passes the same value
+    that reached GitHub, and the records have to be exactly those issues in that
+    order with bodies that are text. A record for another issue is not a quieter
+    contract, and a ``null`` body is not a shorter one: either would leave a lane
+    judging scope and acceptance criteria against a document nobody chose.
+    """
+    where = {**context, "surface": "governing_issues"}
+    expected = _issue_numbers(
+        declared,
+        context=where,
+        message=(
+            "the frozen evidence packet does not name the governing issues its contract "
+            "surface must carry"
+        ),
+    )
+    if configured is not None and expected != tuple(configured):
+        raise EvidencePacketError(
+            "the frozen evidence packet names governing issues this run did not configure",
+            evidence={
+                **where,
+                "configured": list(configured),
+                "found": list(expected),
+            },
+        )
+    carried: list[int] = []
+    for index, record in enumerate(surface["items"]):
+        at = {**where, "index": index}
+        if not isinstance(record, dict):
+            raise EvidencePacketError(
+                "the frozen evidence packet's governing issue is not a record", evidence=at
+            )
+        number = record.get("number")
+        if type(number) is not int or number < 1:
+            raise EvidencePacketError(
+                "the frozen evidence packet's governing issue has no usable issue number",
+                evidence={**at, "number": redact_evidence(str(number), limit=80)},
+            )
+        if not isinstance(record.get("body"), str):
+            raise EvidencePacketError(
+                "the frozen evidence packet's governing issue carries no contract body",
+                evidence={**at, "issue": number, "body": type(record.get("body")).__name__},
+            )
+        carried.append(number)
+    if tuple(carried) != expected:
+        raise EvidencePacketError(
+            "the frozen evidence packet does not carry the governing issues this run is "
+            "measured against",
+            evidence={**where, "expected": list(expected), "found": carried},
+        )
+
+
+def _issue_numbers(value: Any, *, context: dict[str, Any], message: str) -> tuple[int, ...]:
+    """One non-empty ordered tuple of distinct positive issue numbers, or a stop."""
+    seen = {"governing_issue_numbers": redact_evidence(str(value), limit=200)}
+    if not isinstance(value, list) or not value:
+        raise EvidencePacketError(message, evidence={**context, **seen})
+    numbers: list[int] = []
+    for index, number in enumerate(value):
+        if type(number) is not int or number < 1 or number in numbers:
+            raise EvidencePacketError(message, evidence={**context, "index": index, **seen})
+        numbers.append(number)
+    return tuple(numbers)
 
 
 def _validate_surface(surface: Any, *, name: str, context: dict[str, Any]) -> None:
