@@ -121,16 +121,18 @@ class GhBoundaryTests(unittest.TestCase):
                     self.boundary(json.dumps(body)).pull_request("example/repo", 7)
                 self.assertIn("missing its body", caught.exception.message)
 
-    def test_gh_is_invoked_as_an_argv_array_with_the_json_fields(self) -> None:
+    def test_gh_is_invoked_as_an_argv_array_that_pages_the_conversation(self) -> None:
+        """A single unpaginated read cannot say what it left out, so it is not used."""
         seen: list[tuple[str, ...]] = []
 
         class Recorder:
             def run(self, argv, *, cwd=None, env=None, timeout=None):
                 seen.append(tuple(argv))
-                return CommandResult(argv=tuple(argv), returncode=0, stdout=json.dumps({"comments": []}), stderr="")
+                return CommandResult(argv=tuple(argv), returncode=0, stdout="[[]]", stderr="")
 
         GhCliGitHub(Recorder()).comments("example/repo", 7)
-        self.assertEqual(seen[0][:6], ("gh", "pr", "view", "7", "--repo", "example/repo"))
+        self.assertEqual(seen[0][:3], ("gh", "api", "--paginate"))
+        self.assertIn("repos/example/repo/issues/7/comments?per_page=100", seen[0])
 
     def test_a_short_head_ref_oid_fails_closed(self) -> None:
         with self.assertRaises(GitHubError):
@@ -164,24 +166,49 @@ class GhBoundaryTests(unittest.TestCase):
             GhCliGitHub(Failing()).pull_request("example/repo", 7)
         self.assertNotIn("ghp_abcdefghij", caught.exception.evidence["stderr"])
 
-    def test_comments_carry_their_author_and_stable_id(self) -> None:
+    def test_comments_carry_their_author_stable_id_and_timestamp(self) -> None:
         payload = json.dumps(
-            {"comments": [{"id": "IC_kwDO123", "author": {"login": "karanagent1"}, "body": "hi"}]}
+            [
+                [
+                    {
+                        "id": 123,
+                        "user": {"login": "karanagent1"},
+                        "body": "hi",
+                        "created_at": "2026-07-27T10:00:00Z",
+                        "html_url": "https://example.invalid/c/123",
+                    }
+                ]
+            ]
         )
         comments = self.boundary(payload).comments("example/repo", 7)
         self.assertEqual(comments[0].author, "karanagent1")
-        self.assertEqual(comments[0].identifier, "IC_kwDO123")
+        self.assertEqual(comments[0].identifier, "123")
+        self.assertEqual(comments[0].created_at, "2026-07-27T10:00:00Z")
+        self.assertEqual(comments[0].url, "https://example.invalid/c/123")
 
     def test_a_comment_without_a_stable_id_fails_closed(self) -> None:
         """Without an id there is no way to tell a comment from a copy of it."""
-        payload = json.dumps({"comments": [{"author": {"login": "karanagent1"}, "body": "hi"}]})
+        payload = json.dumps([[{"user": {"login": "karanagent1"}, "body": "hi"}]])
         with self.assertRaises(GitHubError):
             self.boundary(payload).comments("example/repo", 7)
 
     def test_a_comment_without_an_author_fails_closed(self) -> None:
-        payload = json.dumps({"comments": [{"id": "IC_kwDO123", "body": "hi"}]})
+        payload = json.dumps([[{"id": 123, "body": "hi"}]])
         with self.assertRaises(GitHubError):
             self.boundary(payload).comments("example/repo", 7)
+
+    def test_a_comment_timestamp_of_the_wrong_type_fails_closed(self) -> None:
+        """Ordering evidence this parser does not understand is not ordering."""
+        payload = json.dumps(
+            [[{"id": 123, "user": {"login": "karan"}, "body": "hi", "created_at": 17}]]
+        )
+        with self.assertRaises(GitHubError):
+            self.boundary(payload).comments("example/repo", 7)
+
+    def test_a_comment_with_no_timestamp_is_read_as_unknown_ordering(self) -> None:
+        """Absent is data — it reaches the chronology check, which fails closed."""
+        payload = json.dumps([[{"id": 123, "user": {"login": "karan"}, "body": "hi"}]])
+        self.assertEqual(self.boundary(payload).comments("example/repo", 7)[0].created_at, "")
 
     def test_the_commit_list_is_bound_to_full_shas_in_order(self) -> None:
         """PAPI88-LOCAL-HEAD: the commit list is one of the views a push must match."""
@@ -305,8 +332,9 @@ class GhReviewEvidenceTests(unittest.TestCase):
         self.assertTrue(evidence.linked_issues_complete)
         self.assertTrue(evidence.governing_issues_complete)
         self.assertTrue(evidence.reviews_complete)
-        # ...and the one that cannot does not. M5 is owed by PAPI-97.
-        self.assertFalse(evidence.conversation_comments_complete)
+        # M5: the conversation surface pages to the end too, now that a run's
+        # merge-ready claim depends on having read all of it.
+        self.assertTrue(evidence.conversation_comments_complete)
 
     def test_no_configured_governing_issue_is_not_a_complete_contract(self) -> None:
         """Config refuses this, and the boundary does not paper over it either."""
@@ -650,7 +678,7 @@ class ConfigTests(unittest.TestCase):
         """Bumping one must not be read as bumping the other."""
         from pr_prover.state import SCHEMA_VERSION as STATE_SCHEMA_VERSION
 
-        self.assertEqual(STATE_SCHEMA_VERSION, 4)
+        self.assertEqual(STATE_SCHEMA_VERSION, 5)
         self.assertNotEqual(STATE_SCHEMA_VERSION, SCHEMA_VERSION)
 
     # -- every configured path field, over the whole range of bad values ----

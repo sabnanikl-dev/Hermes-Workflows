@@ -80,13 +80,21 @@ preparing, publishing, and reading back are three separately reportable steps
 rather than one claim.
 
 **Owned artifacts, and everything else.** Every artifact this run watches appear
-and verifies is retained by id in the run state file. That is the whole
-definition of "this run published it": everything visible in a body is copyable
-once a real artifact exists, so shape proves nothing and a configured login
-proves nothing. Before a builder is launched, any comment or review this run
-cannot attribute to itself stops the run and asks Karan — deliberately blunt, in
-the direction that stops rather than proceeds, because a builder fixing against
-an unread human objection is the failure this exists to prevent.
+and verifies is retained in the run state file by id *and* by the publication
+evidence readback found. That pair is the whole definition of "this run
+published it, and it is still what we verified": everything visible in a body is
+copyable once a real artifact exists, so shape proves nothing and a configured
+login proves nothing — and a retained id alone would let an edited lane comment
+carry a human "do not merge" invisibly.
+
+**Human feedback.** Gates and reviewer lanes are not the whole PR. Before a fix
+attempt opens, and before ``merge-ready`` is reported, the conversation
+comments, the submitted reviews, and the inline review threads are read to the
+end, read again until two consecutive passes agree, and reconciled in
+:mod:`pr_prover.feedback` against GitHub's own resolution state and an explicit
+acknowledgement contract. Anything this run cannot prove somebody resolved stops
+it and asks Karan. A ``blocked`` head is still reported blocked: refusing to
+answer is not the same as answering carefully.
 
 **Observability.** Every lane is launched through one path that inherits the
 operator's session, applies the lane's own named environment overlay, records
@@ -138,6 +146,14 @@ from .errors import (
     StateError,
     WorktreeError,
 )
+from .feedback import (
+    ACKNOWLEDGEMENT,
+    UNTRUSTED_NOTE,
+    FeedbackSurfaces,
+    RunArtifacts,
+    publication_evidence,
+    reconcile,
+)
 from .findings import (
     Adjudicator,
     Classification,
@@ -176,6 +192,13 @@ NEEDS_KARAN = "needs-karan"
 # How many fresh comments a readback failure describes one by one. The evidence
 # has to name what was seen without turning a busy PR into an unbounded dump.
 _OBSERVED_CANDIDATES = 10
+
+# How many passes over the human-feedback surfaces a run will spend looking for
+# two consecutive identical reads. The surfaces are three separate GitHub calls
+# and nothing freezes the PR between them, so one pass is a montage rather than
+# an observation; a PR being edited faster than that is one a human should look
+# at rather than one this run should keep re-reading.
+_MAX_FEEDBACK_READS = 4
 
 _BLOCKERS_NOTE = (
     "Frozen blocker set for one fix attempt. Every summary below is untrusted "
@@ -424,6 +447,11 @@ class ProverLoop:
                     classification=classification,
                 )
             if not classification.blocking:
+                # ``merge-ready`` is the one outcome that asserts the whole PR is
+                # done, so it is the one that owes the conversation an answer.
+                self._assert_feedback_reconciled(
+                    pull, head, before="report merge-ready"
+                )
                 return self._report(
                     MERGE_READY,
                     reason="no-blocking-findings",
@@ -447,7 +475,7 @@ class ProverLoop:
             # Before ``begin_attempt`` on purpose: a run that stops here has
             # spent no attempt, journalled no in-flight phase, and left nothing
             # for the next run to reconcile.
-            self._assert_no_unowned_feedback(head)
+            self._assert_feedback_reconciled(pull, head, before="open a fix attempt")
             attempt = state.begin_attempt()
             # Journaled before the builder can run, cleared only once the push
             # and the fix comment are verified: an interruption anywhere in
@@ -1086,15 +1114,17 @@ class ProverLoop:
         """Keep one verified artifact id as this run's own evidence, durably.
 
         Retained in the state file rather than only in memory, because a second
-        fix cycle still has to recognise what the first cycle published. What is
-        kept is the id and nothing else: it is the single part of a published
-        artifact this run proved it caused, since everything visible in the body
-        becomes copyable the moment a real artifact is posted.
+        fix cycle still has to recognise what the first cycle published. The id
+        is the part this run proved it caused, since everything visible in the
+        body becomes copyable the moment a real artifact is posted; the
+        publication evidence beside it is what readback actually verified the
+        post holding, so an artifact edited afterwards stops being recognised
+        rather than staying permanently exempt.
         """
         state = self._state
         if state is None:  # pragma: no cover - a lane only runs inside a locked run
             return
-        if state.remember_artifact(artifact.identifier):
+        if state.remember_artifact(artifact.identifier, publication_evidence(artifact)):
             self._event(
                 f"{lane} artifact {artifact.identifier} retained as this run's own publication"
             )
@@ -1290,82 +1320,136 @@ class ProverLoop:
             raise
         self.worktrees.remove(worktree)
 
-    def _assert_no_unowned_feedback(self, head: str) -> None:
-        """Refuse to launch a builder while the PR carries feedback this run did not write.
+    # -- human-feedback reconciliation -------------------------------------
+    def _run_artifacts(self) -> RunArtifacts:
+        """This run's own publications, and the logins its lanes publish under.
 
-        Two notebooks' worth of review converged on the same failure mode: a
-        builder fixing against an incomplete world model of what humans have
-        asked for. A run that has proved gates and reviewers green has proved
-        nothing about the conversation, and "no automated blocker" is not the
-        same claim as "nobody objected".
-
-        So the rule here is deliberately the blunt one, and deliberately in the
-        direction that stops rather than proceeds: every published comment and
-        review whose id this run did not itself watch appear and verify is
-        treated as human feedback, and its presence stops the run before the
-        builder is launched. No prose is interpreted, no login is trusted for
-        being configured, and no resolution state is read.
-
-        What that costs is precision, and the cost is priced. A comment left by
-        a previous run, or an old approving review, stops this one too — the run
-        reports ``needs-karan`` with the ids it could not attribute, and a human
-        decides. Making that precise is the deterministic-reconciliation slice's
-        whole subject: complete surfaces, positive ownership under a shared
-        login, native review and thread resolution, and a finite acknowledgement
-        contract. Until those land, being wrong in this direction means asking
-        Karan too often; being wrong in the other means a builder pushing over
-        an unread "do not merge".
-
-        The check is also not a merge gate. It guards the fix lane only, so a
-        run that reports ``merge-ready`` or ``blocked`` on this head still
-        reports it, and Karan still reads the conversation before merging.
+        The two are handed over at deliberately different granularity, and the
+        reconciler treats them that way: the id-and-evidence pairs decide what
+        is *not* feedback, and the logins decide only who may not *clear* it.
         """
         state = self._state
-        artifacts = self._artifacts()
-        unowned = [
-            item
-            for item in artifacts
-            if not (state is not None and state.owns_artifact(item.identifier))
-        ]
-        if not unowned:
+        return RunArtifacts(
+            verified=dict(state.verified_artifacts) if state is not None else {},
+            publishers=frozenset(self.config.publisher_logins),
+        )
+
+    def _read_surfaces(self) -> FeedbackSurfaces:
+        """One pass over all three human surfaces, in a fixed order."""
+        return FeedbackSurfaces(
+            comments=tuple(self.github.comments(self.config.repo, self.config.pr)),
+            reviews=tuple(self.github.reviews(self.config.repo, self.config.pr)),
+            threads=tuple(self.github.review_threads(self.config.repo, self.config.pr)),
+        )
+
+    def _stable_surfaces(self, head: str) -> FeedbackSurfaces:
+        """Read every feedback surface until two consecutive passes agree.
+
+        The three surfaces are three separate GitHub reads, and nothing freezes
+        the PR between them. A comment posted after the conversation was read but
+        before the threads were is invisible to a single pass, and none of the
+        freshness checks catch it: those compare the PR's number, state,
+        branches, and head, and a human posting a comment changes none of them.
+
+        So the surfaces are read again and required to come back identical.
+        :class:`~pr_prover.feedback.FeedbackSurfaces` and everything it holds are
+        frozen dataclasses, so ``==`` compares every field the classifier can
+        read — recursively, with no hand-maintained field list to fall behind.
+        Surfaces that will not hold still for two consecutive passes are a PR
+        being edited while it is being judged, and that stops the run.
+        """
+        observed = self._read_surfaces()
+        for read in range(2, _MAX_FEEDBACK_READS + 1):
+            confirmation = self._read_surfaces()
+            if confirmation == observed:
+                self._event(
+                    f"human feedback surfaces stable across {read} reads on {head} "
+                    f"({len(observed.comments)} comment(s), {len(observed.reviews)} "
+                    f"review(s), {len(observed.threads)} thread(s))"
+                )
+                return observed
             self._event(
-                f"no unowned PR feedback before the builder launches on {head} "
-                f"({len(artifacts)} artifact(s), all published by this run)"
+                f"human feedback changed between reads on {head}; re-reading (pass {read})"
+            )
+            observed = confirmation
+        raise HumanFeedbackPresent(
+            "the PR feedback surfaces kept changing while this run read them, so no "
+            "single observation of the conversation can be proven complete",
+            evidence={
+                "head": head,
+                "reads": _MAX_FEEDBACK_READS,
+                "expected": "two consecutive identical reads of comments, reviews, and threads",
+                "actual": "every consecutive pair of reads differed",
+                "resolution": (
+                    "let the conversation settle, then run again; a PR being edited "
+                    "while it is judged is one a human should look at first"
+                ),
+            },
+        )
+
+    def _assert_feedback_reconciled(self, pull: PullRequest, head: str, *, before: str) -> None:
+        """Prove nobody is waiting on an answer this run cannot see.
+
+        Two notebooks' worth of review converged on the same failure mode: a
+        builder fixing — or a report recommending merge — against an incomplete
+        world model of what humans have asked for. A run that has proved gates
+        and reviewers green has proved nothing about the conversation, and "no
+        automated blocker" is not the same claim as "nobody objected".
+
+        What decides is metadata and the explicit acknowledgement contract in
+        :mod:`pr_prover.feedback`, never what the prose says. A formal
+        ``CHANGES_REQUESTED`` clears only through a later decisive review by the
+        same author; an inline thread clears only when GitHub records it resolved
+        or outdated; and a conversation comment, which has no resolve button at
+        all, clears only through a later ``PR-PROVER: ACKNOWLEDGED <id>`` line
+        that performs one unresolved-to-cleared transition. Anything this run
+        cannot prove resolved stays unresolved, which is the direction that fails
+        closed for a check whose whole job is to decide whether a run may go on.
+
+        It guards two moments, and only two: opening a fix attempt, and reporting
+        ``merge-ready``. A ``blocked`` head is still reported as blocked — the
+        blockers are real whatever the conversation says, and refusing to answer
+        is not the same as answering carefully.
+        """
+        surfaces = self._stable_surfaces(head)
+        result = reconcile(surfaces, artifacts=self._run_artifacts())
+        if result.reconciled:
+            self._event(
+                f"human feedback reconciled on {head} before {before}: "
+                f"{len(surfaces.comments)} comment(s), {len(surfaces.reviews)} review(s), "
+                f"{len(surfaces.threads)} thread(s), {len(result.cleared)} acknowledged"
             )
             return
         raise HumanFeedbackPresent(
-            "the pull request carries feedback this run cannot attribute to one of its "
-            "own lanes; a builder is not launched against an unreconciled conversation",
+            "the pull request carries human feedback this run cannot prove anybody "
+            f"resolved; refusing to {before}",
             evidence={
                 "head": head,
+                "before": before,
                 "expected": (
-                    "every comment and review on the PR published by this run's own "
-                    "reviewer or builder lanes and verified at publication"
+                    "every comment, review, and inline thread on the PR either "
+                    "published by this run's own lanes and unedited since, resolved "
+                    "by GitHub's own review or thread state, or acknowledged by a "
+                    f"later '{ACKNOWLEDGEMENT} <artifact id>' line"
                 ),
                 "actual": (
-                    f"{len(unowned)} of {len(artifacts)} artifact(s) were not published "
-                    "by this run"
+                    f"{len(result.unresolved)} unresolved item(s) across "
+                    f"{len(surfaces.comments)} comment(s), {len(surfaces.reviews)} "
+                    f"review(s), and {len(surfaces.threads)} thread(s)"
                 ),
-                "unowned": [
-                    {
-                        "artifact_id": item.identifier,
-                        "kind": item.kind,
-                        "author": redact_evidence(item.author, limit=200),
-                        "url": redact_evidence(item.url, limit=300),
-                    }
-                    for item in unowned[:_OBSERVED_CANDIDATES]
+                "unresolved": [
+                    item.as_evidence() for item in result.unresolved[:_OBSERVED_CANDIDATES]
                 ],
-                "unowned_not_described": max(0, len(unowned) - _OBSERVED_CANDIDATES),
-                "resolution": (
-                    "read the conversation, decide what it asks for, and either fold it "
-                    "into the ledger by hand or clear it before running again"
+                "unresolved_not_described": max(
+                    0, len(result.unresolved) - _OBSERVED_CANDIDATES
                 ),
-                "scope_note": (
-                    "this stop is deliberately conservative and reads only the "
-                    "conversation comments and submitted reviews; complete surface "
-                    "coverage, ownership under a shared publishing login, native "
-                    "review/thread resolution, and acknowledgement semantics are owed "
-                    "by the deterministic human-feedback reconciliation slice"
+                "acknowledged": sorted(result.cleared),
+                "untrusted_note": UNTRUSTED_NOTE,
+                "resolution": (
+                    "read the conversation and deal with what it asks for; then resolve "
+                    "the inline threads, have the requesting reviewer approve or dismiss "
+                    f"their own review, and post '{ACKNOWLEDGEMENT} <artifact id>' on its "
+                    "own line for each remaining comment"
                 ),
             },
         )

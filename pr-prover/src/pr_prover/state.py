@@ -38,16 +38,25 @@ exact head*, binding the run to a new head drops it rather than carrying it
 forward — the same invalidate-on-push rule the loop applies to every verdict.
 
 ``verified_artifacts`` is the fourth, and it is deliberately the one key a head
-change does *not* drop. It holds GitHub's own ids for the artifacts this run
+change does *not* drop. It maps GitHub's own id for each artifact this run
 watched appear and verified as its own lanes' publications — reviewer artifacts
-and builder fix comments. Ownership is a fact about a specific id this run
-caused, established at the only moment it is knowable: between the snapshot
-taken before a lane launched and the read taken after it. A second fix cycle
-still has to recognise what the first cycle published, and rediscovering that
-from body shape is impossible, because a signature, a role line, and a canonical
-head declaration all become copyable the moment a real artifact is posted. So
-the ids are journalled, and every other post on the PR stays what it is:
-feedback this run cannot attribute to itself.
+and builder fix comments — to
+:func:`~pr_prover.feedback.publication_evidence` for that artifact as readback
+found it. Ownership is a fact about a specific id this run caused, established
+at the only moment it is knowable: between the snapshot taken before a lane
+launched and the read taken after it. A second fix cycle still has to recognise
+what the first cycle published, and rediscovering that from body shape is
+impossible, because a signature, a role line, and a canonical head declaration
+all become copyable the moment a real artifact is posted.
+
+The paired evidence answers the question an id alone cannot: publication is not
+the last thing that can happen to a post. Comments and review bodies stay
+editable, and the account that can edit a verified lane artifact is the same
+shared account a human types into — so "this run published id X" must not harden
+into "id X can never be feedback again". An artifact nobody touched stays owned;
+one whose body or review state changed no longer matches what was proven, and
+goes back to being ordinary feedback. Every other post on the PR stays what it
+already was: feedback this run cannot attribute to itself.
 
 Persistence itself fails closed. Every filesystem step of :meth:`RunState.save`
 — creating the parent, writing the temporary file, replacing the real one — is
@@ -99,7 +108,11 @@ from .errors import LockContention, StateError
 from .findings import Classification
 from .redaction import evidence as redact_evidence
 
-SCHEMA_VERSION = 4
+# Bumped to 5 when ``verified_artifacts`` stopped being a bare id list. A v4
+# journal records ids with no publication evidence beside them, and reading one
+# under v5 rules would have to invent that evidence — which is exactly the
+# "retained id can never be feedback again" behaviour the pairing exists to end.
+SCHEMA_VERSION = 5
 MAX_ATTEMPTS = 2
 OUTCOMES = ("merge-ready", "blocked", "needs-karan")
 # The two phases of a run. ``attempt-in-flight`` means a builder was invoked (or
@@ -184,14 +197,15 @@ class RunState:
     phase: str = PHASE_IDLE
     attempt_head: str | None = None
     classification: Classification | None = None
-    # GitHub's own ids for the artifacts this run watched appear and verified as
-    # its own lanes' publications. Durable because a second fix cycle still has
-    # to recognise what the first cycle published: ownership is a fact about a
-    # specific id this run proved it caused, not a pattern a later read can
-    # rediscover from a body anybody could copy. Unlike the classification, it
-    # is *not* dropped when the run rebinds to a new head — an artifact this run
-    # published for an earlier head is still not human feedback.
-    verified_artifacts: tuple[str, ...] = ()
+    # GitHub's own id for each artifact this run watched appear and verified as
+    # its own lanes' publications, mapped to the publication evidence readback
+    # found. Durable because a second fix cycle still has to recognise what the
+    # first cycle published: ownership is a fact about a specific id this run
+    # proved it caused, not a pattern a later read can rediscover from a body
+    # anybody could copy. Unlike the classification, it is *not* dropped when the
+    # run rebinds to a new head — an artifact this run published for an earlier
+    # head is still not human feedback.
+    verified_artifacts: dict[str, str] = field(default_factory=dict)
     events: list[str] = field(default_factory=list, repr=False, compare=False)
 
     # -- persistence ------------------------------------------------------
@@ -376,9 +390,9 @@ class RunState:
                 )
 
         artifacts = raw["verified_artifacts"]
-        if not isinstance(artifacts, list):
+        if not isinstance(artifacts, dict):
             raise StateError(
-                "state file verified_artifacts is not a list",
+                "state file verified_artifacts is not an id-to-evidence object",
                 evidence={"state_file": str(path)},
             )
         if len(artifacts) > MAX_VERIFIED_ARTIFACTS:
@@ -390,19 +404,23 @@ class RunState:
                     "limit": MAX_VERIFIED_ARTIFACTS,
                 },
             )
-        owned: list[str] = []
-        for value in artifacts:
-            if not isinstance(value, str) or not value or len(value) > 200:
+        owned: dict[str, str] = {}
+        for identifier, evidence in artifacts.items():
+            if not isinstance(identifier, str) or not identifier or len(identifier) > 200:
                 raise StateError(
                     "state file verified_artifacts holds an unusable artifact id",
                     evidence={"state_file": str(path)},
                 )
-            if value in owned:
+            # An id with no usable publication evidence beside it is an id whose
+            # post can no longer be checked against what readback verified. It is
+            # refused rather than treated as owned-forever.
+            if not isinstance(evidence, str) or not _is_digest(evidence):
                 raise StateError(
-                    "state file records the same run-owned artifact twice",
-                    evidence={"state_file": str(path)},
+                    "state file verified_artifacts holds an artifact without usable "
+                    "publication evidence",
+                    evidence={"state_file": str(path), "artifact_id": identifier},
                 )
-            owned.append(value)
+            owned[identifier] = evidence
 
         outcome = raw["outcome"]
         if outcome is not None and outcome not in OUTCOMES:
@@ -427,7 +445,7 @@ class RunState:
             phase=phase,
             attempt_head=attempt_head,
             classification=classification,
-            verified_artifacts=tuple(owned),
+            verified_artifacts=owned,
         )
 
     def save(self) -> None:
@@ -453,7 +471,7 @@ class RunState:
             "classification": (
                 self.classification.as_dict() if self.classification is not None else None
             ),
-            "verified_artifacts": list(self.verified_artifacts),
+            "verified_artifacts": dict(self.verified_artifacts),
         }
         body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         temporary = self.path.with_name(self.path.name + ".tmp")
@@ -515,7 +533,7 @@ class RunState:
             )
         self.classification = classification
 
-    def remember_artifact(self, identifier: str) -> bool:
+    def remember_artifact(self, identifier: str, evidence: str) -> bool:
         """Retain one artifact this run proved it published. ``False`` if already held.
 
         The id is the only part of a published artifact a human sharing the
@@ -523,24 +541,43 @@ class RunState:
         canonical head declaration are all copyable the moment a real artifact
         is posted, but an id this run watched appear between a pre-launch
         snapshot and a post-launch read is one this run's own lane caused.
+
+        ``evidence`` is the digest of what readback actually verified that post
+        holding. It is stored beside the id because the id alone cannot say
+        whether the post is still that post, and a retained id that hardened into
+        a permanent exemption is a way for an edited artifact to carry a human
+        stop invisibly.
         """
         if not isinstance(identifier, str) or not identifier or len(identifier) > 200:
             raise StateError(
                 "a run-owned artifact needs a usable GitHub id",
                 evidence={"artifact_id": redact_evidence(str(identifier), limit=200)},
             )
-        if identifier in self.verified_artifacts:
+        if not isinstance(evidence, str) or not _is_digest(evidence):
+            raise StateError(
+                "a run-owned artifact needs the publication evidence readback verified",
+                evidence={"artifact_id": redact_evidence(identifier, limit=200)},
+            )
+        if self.verified_artifacts.get(identifier) == evidence:
             return False
-        if len(self.verified_artifacts) >= MAX_VERIFIED_ARTIFACTS:
+        if (
+            identifier not in self.verified_artifacts
+            and len(self.verified_artifacts) >= MAX_VERIFIED_ARTIFACTS
+        ):
             raise StateError(
                 "this run has retained more artifacts than a run can publish",
                 evidence={"limit": MAX_VERIFIED_ARTIFACTS},
             )
-        self.verified_artifacts = (*self.verified_artifacts, identifier)
+        self.verified_artifacts = {**self.verified_artifacts, identifier: evidence}
         return True
 
     def owns_artifact(self, identifier: str) -> bool:
-        """Did this run watch that exact artifact id appear and verify it?"""
+        """Did this run watch that exact artifact id appear and verify it?
+
+        Identity only. Whether the post is *still* what was verified is
+        :meth:`~pr_prover.feedback.RunArtifacts.owns`' question, and it needs the
+        live post to answer it.
+        """
         return bool(identifier) and identifier in self.verified_artifacts
 
     def begin_attempt(self) -> int:
@@ -616,6 +653,11 @@ class RunState:
 
 def _is_full_sha(value: str) -> bool:
     return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+
+
+def _is_digest(value: str) -> bool:
+    """One sha256 hex digest, the only shape publication evidence is written in."""
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def _finding_heads(classification: Classification) -> set[str]:

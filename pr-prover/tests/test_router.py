@@ -111,7 +111,7 @@ CORE_MODULES = (
 # Proof-map rows whose status must stay qualified on this head. Anything else
 # must read exactly "shipped". Flattening the column in either direction — the
 # demonstrated "mark every row shipped" mutation, or a blanket "owed" — fails.
-QUALIFIED_INVARIANTS = ("M2", "M5", "M6", "M7", "M13")
+QUALIFIED_INVARIANTS = ("M2",)
 
 # The exact conflicting spellings already found in these references, pinned so
 # they cannot come back. The router and ``MISSION.md`` own the A → B →
@@ -514,28 +514,33 @@ class RepoContractTests(unittest.TestCase):
                         f"{identifier} defers work without naming who owes it",
                     )
 
-    def test_m13_separates_shipped_transport_reporting_from_owed_merge_authority(self) -> None:
-        """Transport is reported now; explicit merge-authority reporting still is not."""
-        status, seams = self.proof_map()["M13"]
-        self.assertIn("redaction", status.lower())
-        self.assertIn("transport", status)
-        self.assertIn("merge-authority", status)
-        self.assertIn("PAPI-97", status)
-        self.assertNotIn("PAPI-90", status, "PAPI-90's half of M13 has landed")
-        self.assertRegex(seams, r"no merge-authority field")
+    def test_m13_keeps_all_four_report_claims_distinguishable(self) -> None:
+        """Transport, verdict, exact-head readiness, and merge authority are four facts."""
+        _, seams = self.proof_map()["M13"]
+        for named in ("transport_complete", "merge_authority", "redaction.py"):
+            with self.subTest(seam=named):
+                self.assertIn(named, seams)
         report = (PR_PROVER / "src" / "pr_prover" / "report.py").read_text(encoding="utf-8")
-        # The half that shipped is present...
-        for present in ("transport", "transport_complete"):
+        for present in ("transport", "transport_complete", "merge_authority"):
             with self.subTest(field=present):
                 self.assertIn(present, report)
-        # ...and the half that has not must not appear to be.
-        for absent in ("merge_authority", "karan_approved"):
-            with self.subTest(field=absent):
-                self.assertNotIn(
-                    absent,
-                    report,
-                    "report.py grew the field M13 declares owed; update the proof map",
-                )
+        # Advice, never permission. A field a run could set to "approved" is a
+        # field something could be made to set.
+        self.assertNotIn("karan_approved", report)
+
+    def test_m5_m6_and_m7_name_the_module_that_makes_them_deterministic(self) -> None:
+        """A row that moved to shipped has to say what proves it, not who owed it."""
+        rows = self.proof_map()
+        for identifier, expected in (
+            ("M5", "github.py"),
+            ("M6", "feedback.py"),
+            ("M7", "state.py"),
+        ):
+            with self.subTest(invariant=identifier):
+                status, seams = rows[identifier]
+                self.assertEqual(status, "shipped")
+                self.assertIn(expected, seams)
+                self.assertNotIn("PAPI-97", seams)
 
     def test_the_proof_map_rows_this_slice_ships_name_their_new_seams(self) -> None:
         """A row that moved to shipped has to say what proves it."""

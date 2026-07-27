@@ -38,6 +38,7 @@ from pr_prover.github import (
     LinkedIssue,
     PullRequest,
     ReviewEvidence,
+    ReviewThread,
 )
 
 HEAD_A = "a" * 40
@@ -177,6 +178,7 @@ class FakeRemote:
     is_draft: bool = True
     comments: list[Comment] = field(default_factory=list)
     reviews: list[Comment] = field(default_factory=list)
+    threads: list[ReviewThread] = field(default_factory=list)
     commit_oids: list[str] = field(default_factory=list)
     # The read-only surfaces a credential-free lane is handed in a frozen packet
     # instead of reading them itself. Empty is the ordinary case for this PR;
@@ -244,17 +246,28 @@ class FakeRemote:
             cursor = self.parents.get(cursor)
         return False
 
-    def comment(self, body: str, *, author: str = BUILDER_LOGIN) -> Comment:
+    def comment(
+        self, body: str, *, author: str = BUILDER_LOGIN, created_at: str | None = None
+    ) -> Comment:
         """Append a comment with a fresh, never-reused GitHub-style node id."""
         posted = Comment(
-            identifier=f"IC_comment{self._next_comment_id}", author=author, body=body
+            identifier=f"IC_comment{self._next_comment_id}",
+            author=author,
+            body=body,
+            created_at=self._stamp() if created_at is None else created_at,
         )
         self._next_comment_id += 1
         self.comments.append(posted)
         return posted
 
     def review(
-        self, body: str, *, author: str = REVIEWER_LOGIN, commit_id: str = "", state: str = "COMMENTED"
+        self,
+        body: str,
+        *,
+        author: str = REVIEWER_LOGIN,
+        commit_id: str = "",
+        state: str = "COMMENTED",
+        created_at: str | None = None,
     ) -> Comment:
         """Append a submitted review, in the namespaced id space reviews use."""
         posted = Comment(
@@ -264,16 +277,56 @@ class FakeRemote:
             kind="review",
             commit_id=commit_id,
             state=state,
+            created_at=self._stamp() if created_at is None else created_at,
         )
         self._next_comment_id += 1
         self.reviews.append(posted)
         return posted
 
+    def thread(
+        self,
+        body: str,
+        *,
+        author: str = "karan",
+        resolved: bool = False,
+        outdated: bool = False,
+        path: str = "src/thing.py",
+    ) -> ReviewThread:
+        """Append one inline review thread carrying a single comment."""
+        posted = ReviewThread(
+            identifier=f"PRRT_thread{self._next_comment_id}",
+            is_resolved=resolved,
+            is_outdated=outdated,
+            path=path,
+            comments=(
+                Comment(
+                    identifier=f"PRRC_reply{self._next_comment_id}",
+                    author=author,
+                    body=body,
+                    kind="review-thread-comment",
+                    created_at=self._stamp(),
+                ),
+            ),
+        )
+        self._next_comment_id += 1
+        self.threads.append(posted)
+        return posted
+
+    def _stamp(self) -> str:
+        """One UTC-aware GitHub-style timestamp per post, strictly increasing.
+
+        Real posts arrive in order and say so, so the default double does too.
+        A test that needs missing, equal, naive, or reordered chronology passes
+        ``created_at`` explicitly rather than fighting this.
+        """
+        minute, second = divmod(self._next_comment_id, 60)
+        return f"2026-07-27T{minute:02d}:{second:02d}:00Z"
+
     def review_evidence(self) -> ReviewEvidence:
         """What the boundary can tell a lane that cannot read GitHub itself.
 
-        The completeness flags mirror the shipped ``gh`` boundary's own: the
-        reviews read paginates to the end, the conversation read does not yet.
+        The completeness flags mirror the shipped ``gh`` boundary's own: every
+        surface here is read to its last page.
         """
         return ReviewEvidence(
             inline_comments=tuple(self.inline_comments),
@@ -284,7 +337,7 @@ class FakeRemote:
             check_runs_complete=True,
             linked_issues_complete=True,
             governing_issues_complete=self.governing_issues_complete,
-            conversation_comments_complete=False,
+            conversation_comments_complete=True,
             reviews_complete=True,
         )
 
@@ -311,6 +364,7 @@ class FakeGitHub:
         self.comment_calls = 0
         self.commit_calls = 0
         self.review_calls = 0
+        self.thread_calls = 0
         self.review_evidence_calls = 0
         self.governing_issues_asked_for: list[tuple[int, ...]] = []
 
@@ -329,6 +383,10 @@ class FakeGitHub:
     def reviews(self, repo: str, number: int) -> tuple[Comment, ...]:
         self.review_calls += 1
         return tuple(self.remote.reviews)
+
+    def review_threads(self, repo: str, number: int) -> tuple[ReviewThread, ...]:
+        self.thread_calls += 1
+        return tuple(self.remote.threads)
 
     def review_evidence(
         self, repo: str, number: int, head: str, governing_issues: Sequence[int]

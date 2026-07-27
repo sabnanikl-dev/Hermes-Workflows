@@ -268,10 +268,7 @@ def build_packet(
                     for item in comments
                 ],
                 complete=evidence.conversation_comments_complete,
-                how=(
-                    "one 'gh pr view --json comments' read; this surface carries no "
-                    "pagination guarantee yet (M5, owed by PAPI-97)"
-                ),
+                how="REST 'gh api --paginate' to the last page",
             ),
             "reviews": _surface(
                 [
@@ -555,8 +552,8 @@ def read_packet(
     for name in sorted(REQUIRED_SURFACES):
         _validate_surface(surfaces[name], name=name, context=context)
     # Most surfaces may honestly be empty or partial: a PR really can have no
-    # inline comments, and the conversation read really cannot prove it reached
-    # the end. The two contract surfaces are different in kind. The run named
+    # inline comments, and a boundary that did not prove a read complete must be
+    # able to say so. The two contract surfaces are different in kind. The run named
     # the governing issues itself and every PR has a body, so an empty or
     # incomplete one is not a quiet PR — it is a lane about to judge scope,
     # staleness, and acceptance criteria against a document nobody handed it.

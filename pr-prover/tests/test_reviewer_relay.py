@@ -545,7 +545,7 @@ class TransportAttributionTests(LoopHarness):
         self.assertTrue(result.transport[0].prepared)
         self.assertFalse(result.transport[0].read_back)
         self.assertFalse(result.transport[0].identifier)
-        self.assertEqual(self.state().get("verified_artifacts", []), [])
+        self.assertEqual(self.state().get("verified_artifacts", {}), {})
 
     def test_the_evidence_names_the_post_that_arrived_while_the_lane_ran(self) -> None:
         """A missing relay post should not read as an unexplained readback puzzle."""
@@ -564,6 +564,9 @@ class TransportAttributionTests(LoopHarness):
         """Both posts are valid and both are under the configured login.
 
         Only one of them is this run's transport, and the run keeps that one.
+        The copy is then exactly what human-feedback reconciliation is for: a
+        post on the PR that nothing in this run's evidence accounts for, so the
+        run refuses to call the head merge-ready over it.
         """
         loop = self.build()
         self.lane_posts_its_own_artifact("lane-reviewer-A", HEAD_A, "reviewer-a")
@@ -571,7 +574,6 @@ class TransportAttributionTests(LoopHarness):
 
         result = loop.run()
 
-        self.assertEqual(result.outcome, MERGE_READY)
         # Four comments: A's lane-side copy plus one relay post per lane.
         self.assertEqual(len(self.remote.comments), 4)
         lane_side = self.remote.comments[0].identifier
@@ -582,6 +584,12 @@ class TransportAttributionTests(LoopHarness):
         for item in result.transport:
             self.assertTrue(item.identifier)
             self.assertIn(item.identifier, owned)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "human-feedback")
+        self.assertEqual(
+            [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]],
+            [lane_side],
+        )
 
     def test_a_copied_artifact_that_predates_the_lane_still_never_counts(self) -> None:
         """The pre-launch snapshot keeps doing its own job as well."""

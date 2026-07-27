@@ -225,16 +225,15 @@ class PacketContentTests(unittest.TestCase):
     def test_a_surface_that_cannot_prove_it_read_to_the_end_says_so(self) -> None:
         """An unproven surface must not present itself as a whole one.
 
-        Conversation-comment completeness is PAPI-97's obligation (M5). Until it
-        lands, the honest packet says the read carries no guarantee rather than
-        letting a reviewer conclude from a first page that nothing is there.
+        The shipped boundary now pages both conversation surfaces to the end, so
+        this drives the packet from a boundary that did *not* prove it: what the
+        packet renders is what the read claimed, never what the writer assumes.
         """
         payload = self.build(
             evidence=ReviewEvidence(reviews_complete=True, conversation_comments_complete=False)
         )
         surfaces = payload["surfaces"]
         self.assertFalse(surfaces["conversation_comments"]["complete"])
-        self.assertIn("PAPI-97", surfaces["conversation_comments"]["read_as"])
         self.assertTrue(surfaces["reviews"]["complete"])
 
     def test_the_packet_says_it_is_untrusted_evidence(self) -> None:
