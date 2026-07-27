@@ -65,6 +65,19 @@ from .redaction import evidence as redact_evidence
 
 _PR_FIELDS = "number,state,isDraft,title,url,headRefName,headRefOid,baseRefName,body"
 
+# Every state GitHub itself defines for a review. A review's state is the whole
+# resolution model for that surface, so the parser has to be able to *weigh* the
+# value, not merely receive one: ``""``, whitespace, and an unknown word are all
+# strings, and all three reach the reconciler as a review that is neither
+# blocking nor clearing — a live objection that resolves itself by being
+# unreadable. A value outside this set is therefore malformed evidence rather
+# than a state with no opinion, and it stops the read where the other required
+# feedback fields do. Interpreting which of these states resolves what stays
+# :mod:`pr_prover.feedback`'s job; this is only the vocabulary.
+REVIEW_STATES = frozenset(
+    {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"}
+)
+
 # ``$endCursor`` is the variable ``gh api graphql --paginate`` supplies, so the
 # threads of a heavily reviewed PR cannot silently stop at the first page.
 #
@@ -725,6 +738,17 @@ def _review_from(payload: object) -> Comment:
             "resolves this surface, and an absent one cannot be read as approval",
             evidence={"author": login, "field": "state"},
         )
+    # Present but unusable is the same failure one step later. A blank, blank-ish,
+    # or unrecognised state is not a review with no position on the change; it is
+    # a payload this parser cannot weigh, and weighing it anyway silently files a
+    # decisive review as undecided prose.
+    normalized = state.strip().upper()
+    if normalized not in REVIEW_STATES:
+        raise GitHubError(
+            "review payload has no usable state; a blank or unrecognised state is "
+            "not a review with no opinion, and it cannot be read as approval",
+            evidence={"author": login, "field": "state"},
+        )
     return Comment(
         # Namespaced, because a review id and a comment id are two different
         # counters and the loop keeps both in one set of run-owned identities.
@@ -734,7 +758,7 @@ def _review_from(payload: object) -> Comment:
         url=str(payload.get("html_url") or ""),
         kind="review",
         commit_id=(commit_id or "").lower(),
-        state=state.upper(),
+        state=normalized,
         # A review's immutable ordering evidence is when it was submitted. A
         # review still being drafted has no such moment, and it is carried as
         # the empty string rather than invented.
@@ -900,6 +924,19 @@ def _thread_from(node: object) -> ReviewThread:
         raise GitHubError(
             "review thread has no usable comments array, so its replies are unknown "
             "rather than absent",
+            evidence={"thread": identifier},
+        )
+    if not items:
+        # A complete-looking empty list is the same false success by a different
+        # route. A review thread exists *because* somebody wrote the comment that
+        # started it, so GitHub cannot deliver a live thread with nothing in it:
+        # an empty reply list is a read that lost the replies, not a thread that
+        # never had any. Left standing, it has no readable human author, is
+        # dropped downstream, and clears the PR by looking agent-only.
+        raise GitHubError(
+            "review thread reports a complete but empty reply list; an existing "
+            "thread carries the comment that opened it, so an empty one is "
+            "malformed evidence rather than a thread nobody is in",
             evidence={"thread": identifier},
         )
     return ReviewThread(

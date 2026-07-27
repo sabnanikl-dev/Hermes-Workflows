@@ -189,21 +189,48 @@ def _post_key(item: Comment) -> tuple[int, float, int, str]:
     )
 
 
-def _thread_key(thread: ReviewThread) -> tuple[int, float, int, str]:
-    """:func:`canonical_key` for one inline thread.
+def _reply_key(reply: Comment) -> tuple[int, float, int, str]:
+    """:func:`canonical_key` for one reply inside an inline thread."""
+    return canonical_key(
+        moment=published_at(reply), surface=reply.kind, identifier=reply.identifier
+    )
 
-    A thread carries no timestamp of its own, so it is placed at the earliest
-    instant GitHub recorded for any of its replies — the moment it was started.
+
+def _thread_origin(thread: ReviewThread) -> Comment | None:
+    """The reply a thread is ranked *and* quoted from, in one canonical order.
+
+    A thread carries no timestamp of its own, so it borrows one from the reply
+    that started it. That reply is the earliest by :func:`canonical_key` among
+    those GitHub gave a usable instant — the same total order every other stream
+    here sorts on, so an equal instant falls through to surface and immutable id
+    rather than to whichever tuple the API handed over first.
+
+    One function answers it because the thread's rank and the evidence Karan
+    reads are the same question. Deriving them separately is how a thread kept
+    its position under a reply reordering while the quoted URL and excerpt moved
+    to a different comment: same finding, different bytes, for a PR nobody
+    touched.
+
+    A thread whose replies are all unorderable still has an origin — canonical
+    order is total, so it falls back to surface and id — and the thread itself
+    is unorderable, exactly as before.
+    """
+    replies = sorted(thread.comments, key=_reply_key)
+    for reply in replies:
+        if published_at(reply) is not None:
+            return reply
+    return replies[0] if replies else None
+
+
+def _thread_key(thread: ReviewThread) -> tuple[int, float, int, str]:
+    """:func:`canonical_key` for one inline thread, at its origin's instant.
+
     A thread whose replies are all unorderable is unorderable itself, and falls
     back to its immutable id like anything else.
     """
-    moments = [
-        moment
-        for moment in (published_at(reply) for reply in thread.comments)
-        if moment is not None
-    ]
+    origin = _thread_origin(thread)
     return canonical_key(
-        moment=min(moments) if moments else None,
+        moment=published_at(origin) if origin is not None else None,
         surface="thread",
         identifier=thread.identifier,
     )
@@ -447,7 +474,9 @@ def _unresolved_threads(
         )
         if not humans:
             continue
-        first = thread.comments[0] if thread.comments else None
+        # The same reply the thread is ranked from, so the evidence and the
+        # position cannot disagree about which comment opened it.
+        first = _thread_origin(thread)
         where = f" on {thread.path}" if thread.path else ""
         findings.append(
             (

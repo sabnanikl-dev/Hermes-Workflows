@@ -391,10 +391,21 @@ resolved stops the run and asks Karan.
 the reconciler needs. A thread whose reply list did not arrive, a comment or
 review whose body did not arrive, and a review with no state are each an
 incomplete read — not a thread with no replies, a post with nothing in it, or a
-review nobody has to clear. Each stops the read where it happened. A post a
-human really did leave empty is still data and still parses; the difference
-between "empty" and "absent" only exists at the boundary, so that is where it is
-decided.
+review nobody has to clear. Each stops the read where it happened.
+
+A field can also arrive and still be unusable, which is the same false success
+one step later. A review state must be one GitHub actually defines: `""`,
+whitespace, and an unknown word are all strings, and every one of them reaches
+the reconciler as a review that neither blocks nor clears, so a live
+`CHANGES_REQUESTED` would resolve itself by being unreadable. A live thread must
+carry at least one reply, because a review thread exists only from the comment
+that opened it; a complete-looking empty reply list has no readable human author,
+is dropped as agent-only, and clears the PR. Both are malformed evidence and stop
+the read.
+
+A post a human really did leave empty is still data and still parses; the
+difference between "empty" and "absent" only exists at the boundary, so that is
+where it is decided.
 
 Nothing here interprets prose. Two surfaces carry their own resolution state and
 one does not:

@@ -18,9 +18,9 @@ from __future__ import annotations
 import json
 import sys
 import unittest
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from itertools import permutations
+from itertools import permutations, product
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -46,7 +46,7 @@ from pr_prover.feedback import (
     publication_evidence,
     reconcile,
 )
-from pr_prover.github import Comment, GhCliGitHub, ReviewThread
+from pr_prover.github import REVIEW_STATES, Comment, GhCliGitHub, ReviewThread
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN
 from test_loop import BLOCKER, LoopHarness
 
@@ -927,6 +927,22 @@ class ReviewThreadReadTests(unittest.TestCase):
                     self.read(self.page(node))
                 self.assertIn("unknown rather than absent", caught.exception.message)
 
+    def test_a_complete_but_empty_reply_list_is_not_a_thread_nobody_is_in(self) -> None:
+        """M5: the same false success, dressed as a complete read.
+
+        This one satisfies every completeness check the surface has: the
+        connection is there, it reports ``hasNextPage: false``, and ``nodes`` is
+        a real list. It is still impossible — a review thread exists because
+        somebody wrote the comment that opened it, so GitHub cannot deliver a
+        live thread with nothing in it. Accepted, it has no readable human
+        author, is dropped as agent-only, and clears the PR.
+        """
+        node = self.node()
+        node["comments"]["nodes"] = []
+        with self.assertRaises(GitHubError) as caught:
+            self.read(self.page(node))
+        self.assertIn("malformed evidence", caught.exception.message)
+
     def test_a_reply_whose_body_never_arrived_fails_closed(self) -> None:
         """The reply's text is the evidence a human is handed; absent is not blank."""
         for label, mutate in (
@@ -957,6 +973,9 @@ class ReviewThreadReadTests(unittest.TestCase):
         for label, mutate in (
             ("missing nodes", lambda node: node["comments"].pop("nodes")),
             ("null nodes", lambda node: node["comments"].update({"nodes": None})),
+            # A complete-looking empty list: every completeness check passes and
+            # the thread is still impossible.
+            ("empty nodes", lambda node: node["comments"].update({"nodes": []})),
             ("missing reply body", lambda node: node["comments"]["nodes"][0].pop("body")),
             (
                 "null reply body",
@@ -1098,6 +1117,41 @@ class MalformedFeedbackFieldTests(unittest.TestCase):
                     self.reviews(payload)
                 self.assertIn("cannot be read as approval", caught.exception.message)
 
+    def test_every_state_github_defines_still_parses(self) -> None:
+        """The guard is a vocabulary check, not a narrowing of real GitHub data.
+
+        A state GitHub really delivers must keep parsing, or the fix trades a
+        false ``merge-ready`` for a run that stops on ordinary reviews.
+        """
+        for state in sorted(REVIEW_STATES):
+            with self.subTest(state=state):
+                self.assertEqual(self.reviews(self.review_payload(state=state))[0].state, state)
+
+    def test_the_same_state_in_another_case_is_normalized_not_rejected(self) -> None:
+        parsed = self.reviews(self.review_payload(state="changes_requested"))
+        self.assertEqual(parsed[0].state, "CHANGES_REQUESTED")
+
+    def test_a_review_state_that_cannot_be_weighed_fails_closed(self) -> None:
+        """Present but semantically unusable is the same false success as absent.
+
+        ``""``, whitespace, and an unknown word are all strings, so the type
+        guard passes every one of them. Downstream each is a review that neither
+        blocks nor clears — which is how a live ``CHANGES_REQUESTED`` becomes a
+        PR with nothing on it, exactly as an absent state would.
+        """
+        for label, state in (
+            ("empty", ""),
+            ("spaces", "   "),
+            ("tab and newline", "\t\n"),
+            ("an unknown word", "LGTM"),
+            ("nearly the real state", "CHANGES-REQUESTED"),
+            ("a state from another surface", "RESOLVED"),
+        ):
+            with self.subTest(state=label):
+                with self.assertRaises(GitHubError) as caught:
+                    self.reviews(self.review_payload(state=state))
+                self.assertIn("cannot be read as approval", caught.exception.message)
+
     def test_no_malformed_conversation_read_can_reconcile_the_pr(self) -> None:
         """Boundary to reconciler, as one path: the answer is a stop, not ``True``.
 
@@ -1140,6 +1194,29 @@ class MalformedFeedbackFieldTests(unittest.TestCase):
             with self.subTest(payload=label):
                 with self.assertRaises(GitHubError):
                     reconcile(build(), artifacts=NOTHING_PROVED)
+
+    def test_no_unusable_review_state_can_reconcile_the_pr(self) -> None:
+        """The probe that catches this class: a state that parses and decides nothing.
+
+        Each of these is the reported shape exactly — a review whose body is
+        empty, so nothing survives as prose, and whose state is a string the
+        resolution model has no rule for. Both ends looked fine on their own:
+        the boundary returned a :class:`Comment`, and the reconciler returned
+        ``reconciled=True`` over a review nobody could weigh.
+        """
+        for label, state in (
+            ("empty", ""),
+            ("spaces", "   "),
+            ("an unknown word", "LGTM"),
+        ):
+            with self.subTest(state=label):
+                with self.assertRaises(GitHubError):
+                    reconcile(
+                        FeedbackSurfaces(
+                            reviews=self.reviews(self.review_payload(body="", state=state))
+                        ),
+                        artifacts=NOTHING_PROVED,
+                    )
 
 
 @dataclass(frozen=True)
@@ -1456,6 +1533,144 @@ class OrderInvarianceTests(unittest.TestCase):
         )
         self.assertEqual(self.sequence(threads=(early, late)), ("t-late-id", "t-early-id"))
         self.assertEqual(self.sequence(threads=(late, early)), ("t-late-id", "t-early-id"))
+
+    # -- the replies *inside* a thread are a surface too --------------------
+    def replies(self, *specs: tuple[str, str, str | None]) -> tuple[Comment, ...]:
+        """Thread replies, as GitHub hands them over."""
+        return tuple(
+            Comment(
+                identifier=identifier,
+                author=HUMAN,
+                body=body,
+                url=f"https://example.invalid/t/{identifier}",
+                kind="review-thread-comment",
+                created_at="" if created_at is None else created_at,
+            )
+            for identifier, body, created_at in specs
+        )
+
+    def live(self, identifier: str, comments: tuple[Comment, ...]) -> ReviewThread:
+        return ReviewThread(
+            identifier=identifier,
+            is_resolved=False,
+            is_outdated=False,
+            path="src/thing.py",
+            comments=comments,
+        )
+
+    def nested_answers(self, threads: tuple[ReviewThread, ...]) -> set[str]:
+        """Every reply order inside every thread, under every thread order.
+
+        The outer helper permutes the three top-level tuples and stops there, so
+        it cannot see a result that depends on how one thread's own replies were
+        ordered. This one permutes the nested lists as well and compares the
+        complete reconciliation evidence — id, kind, author, why, summary, url
+        and excerpt — rather than the sequence of ids alone, because the defect
+        this pins kept every id in place and moved only the quoted comment.
+        """
+        seen: set[str] = set()
+        for combination in product(*(permutations(one.comments) for one in threads)):
+            seen.update(
+                self.answers(
+                    threads=tuple(
+                        replace(one, comments=order)
+                        for one, order in zip(threads, combination)
+                    )
+                )
+            )
+        return seen
+
+    def evidence(self, thread: ReviewThread) -> tuple[str, str]:
+        """The url and excerpt one live thread emits, for this exact reply order."""
+        (found,) = reconcile(
+            FeedbackSurfaces(threads=(thread,)), artifacts=NOTHING_PROVED
+        ).unresolved
+        return found.url, found.excerpt
+
+    def test_reversing_two_replies_does_not_move_the_thread_evidence(self) -> None:
+        """The defect: same finding, same rank, a different comment quoted.
+
+        A thread borrows its position from the earliest instant GitHub recorded
+        for any of its replies, but the url and excerpt were taken from
+        whichever reply the tuple happened to start with. Two unchanged human
+        replies handed over in the other order therefore kept the finding's id,
+        author, summary and rank while moving the evidence Karan reads from the
+        comment that opened the thread onto the one that answered it.
+        """
+        opened, answered = self.replies(
+            ("PRRC_1", "the objection", at(1)), ("PRRC_2", "the answer", at(4))
+        )
+        self.assertEqual(len(self.nested_answers((self.live("PRRT_1", (opened, answered)),))), 1)
+        for order in permutations((opened, answered)):
+            with self.subTest(order=[reply.identifier for reply in order]):
+                self.assertEqual(
+                    self.evidence(self.live("PRRT_1", order)),
+                    (opened.url, "the objection"),
+                )
+
+    def test_replies_at_one_instant_fall_through_to_the_immutable_id(self) -> None:
+        """The same tie-break the rest of the order uses; GitHub's clock is coarse."""
+        first, second = self.replies(
+            ("PRRC_1", "one of two", at(3)), ("PRRC_2", "the other", at(3))
+        )
+        self.assertEqual(len(self.nested_answers((self.live("PRRT_1", (first, second)),))), 1)
+        for order in permutations((first, second)):
+            with self.subTest(order=[reply.identifier for reply in order]):
+                self.assertEqual(
+                    self.evidence(self.live("PRRT_1", order)), (first.url, "one of two")
+                )
+
+    def test_an_unorderable_reply_never_wins_the_thread_evidence(self) -> None:
+        """A reply GitHub gave no usable instant cannot become "the first one".
+
+        It still exists, and the thread is still reported. It simply cannot
+        claim the position no timestamp proves it holds — which is the same rule
+        the thread's own rank has always followed.
+        """
+        undated, dated = self.replies(
+            ("PRRC_1", "no usable instant", None), ("PRRC_2", "the objection", at(2))
+        )
+        self.assertEqual(len(self.nested_answers((self.live("PRRT_1", (undated, dated)),))), 1)
+        for order in permutations((undated, dated)):
+            with self.subTest(order=[reply.identifier for reply in order]):
+                self.assertEqual(
+                    self.evidence(self.live("PRRT_1", order)), (dated.url, "the objection")
+                )
+
+    def test_a_wholly_unorderable_thread_still_answers_the_same_way(self) -> None:
+        """No instant anywhere: the fallback is the id, not the arrival order."""
+        one, two = self.replies(("PRRC_1", "first by id", None), ("PRRC_2", "second", None))
+        self.assertEqual(len(self.nested_answers((self.live("PRRT_1", (one, two)),))), 1)
+        for order in permutations((one, two)):
+            with self.subTest(order=[reply.identifier for reply in order]):
+                self.assertEqual(
+                    self.evidence(self.live("PRRT_1", order)), (one.url, "first by id")
+                )
+
+    def test_every_nested_and_top_level_grouping_gives_one_answer(self) -> None:
+        """Two threads, three replies each, permuted inside and out at once."""
+        early = self.live(
+            "PRRT_late_id",
+            self.replies(
+                ("PRRC_a1", "the earlier thread opened", at(1)),
+                ("PRRC_a2", "a reply", at(5)),
+                ("PRRC_a3", "another reply", at(7)),
+            ),
+        )
+        late = self.live(
+            "PRRT_early_id",
+            self.replies(
+                ("PRRC_b1", "the later thread opened", at(6)),
+                ("PRRC_b2", "a reply", at(8)),
+                ("PRRC_b3", "no usable instant", None),
+            ),
+        )
+        self.assertEqual(len(self.nested_answers((early, late))), 1)
+        self.assertEqual(
+            self.sequence(threads=(late, early)), ("PRRT_late_id", "PRRT_early_id")
+        )
+        self.assertEqual(self.evidence(early), (early.comments[0].url, "the earlier thread opened"))
+        self.assertEqual(self.evidence(late), (late.comments[0].url, "the later thread opened"))
 
     def test_every_permutation_of_a_mixed_conversation_gives_one_answer(self) -> None:
         """All three surfaces at once, in all eight arrival orders."""
