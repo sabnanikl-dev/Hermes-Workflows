@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _support import BUILDER_LOGIN, HEAD_A, make_source_repo
+from _support import BUILDER_LOGIN, HEAD_A, make_finding, make_source_repo
 from pr_prover import cli, redaction
 from pr_prover.commands import CommandResult
 from pr_prover.config import RunConfig
@@ -18,7 +18,7 @@ from pr_prover.github import GhCliGitHub
 
 
 def finding(identifier: str, severity: str = "blocking", source: str = "reviewer:A") -> Finding:
-    return Finding(id=identifier, severity=severity, summary="s", source=source, head=HEAD_A)
+    return make_finding(identifier, severity, source)
 
 
 class ClassificationTests(unittest.TestCase):
@@ -67,7 +67,7 @@ class ClassificationTests(unittest.TestCase):
 
     def test_an_unknown_severity_cannot_be_constructed(self) -> None:
         with self.assertRaises(StateError):
-            Finding(id="a", severity="critical", summary="s", source="reviewer:A", head=HEAD_A)
+            finding("a", "critical")
 
 
 class GhBoundaryTests(unittest.TestCase):

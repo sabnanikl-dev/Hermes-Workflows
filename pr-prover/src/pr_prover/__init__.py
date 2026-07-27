@@ -13,8 +13,15 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .config import RunConfig
-from .errors import FailClosed, PrProverError
-from .findings import Classification, Finding, classify
+from .errors import FailClosed, FailureRecord, PrProverError
+from .findings import (
+    Classification,
+    ClassificationEvent,
+    Finding,
+    FindingLocation,
+    FindingProvenance,
+    classify,
+)
 from .loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop, RunResult
 from .state import MAX_ATTEMPTS, RunLock, RunState
 
@@ -24,8 +31,12 @@ __all__ = [
     "MERGE_READY",
     "NEEDS_KARAN",
     "Classification",
+    "ClassificationEvent",
     "FailClosed",
+    "FailureRecord",
     "Finding",
+    "FindingLocation",
+    "FindingProvenance",
     "PrProverError",
     "ProverLoop",
     "RunConfig",

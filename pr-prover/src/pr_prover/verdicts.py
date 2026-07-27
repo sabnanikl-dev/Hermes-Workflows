@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass
 
 from .errors import MalformedVerdict, ScopeContamination, StaleHead
-from .findings import SEVERITIES, Finding
+from .findings import SEVERITIES, Finding, FindingLocation, FindingProvenance
 from .redaction import evidence as redact_evidence
 
 FULL_SHA = re.compile(r"\A[0-9a-f]{40}\Z")
@@ -144,7 +144,7 @@ def parse_reviewer_verdict(reviewer: str, output: str, *, expected_head: str) ->
     _reject_near_misses(lines, _FINDING_CANDIDATE, _FINDING, lane=lane, kind="FINDING")
     findings: list[Finding] = []
     seen: set[str] = set()
-    for line in lines:
+    for number, line in enumerate(lines, start=1):
         found = _FINDING.match(line)
         if found is None:
             continue
@@ -160,8 +160,22 @@ def parse_reviewer_verdict(reviewer: str, output: str, *, expected_head: str) ->
                 id=identifier,
                 severity=found.group("severity"),
                 summary=redact_evidence(found.group("summary").strip(), limit=300),
-                source=f"reviewer:{reviewer}",
-                head=head,
+                # Provenance is taken here, at the only moment the surface is
+                # still known: which lane printed it, on which head, on which
+                # line of its output, and exactly what it said. Reconstructing
+                # any of that later means reading it back out of a rendered
+                # summary, which is the thing an escalation cannot rely on.
+                provenance=FindingProvenance(
+                    agent_id=reviewer,
+                    role="reviewer",
+                    head=head,
+                    location=FindingLocation(
+                        kind="lane-output",
+                        reference=f"reviewer:{reviewer}",
+                        line=number,
+                    ),
+                    evidence_excerpt=redact_evidence(line.strip(), limit=400),
+                ),
             )
         )
 

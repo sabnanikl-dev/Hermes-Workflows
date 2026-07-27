@@ -73,7 +73,8 @@ in-flight before the builder is invoked and cleared only once that verification
 passes, so a run killed anywhere in between cannot restart, re-inspect its way
 onto whatever head is live by then, and report merge-ready for a push it never
 checked. Such a restart stops as unexpected state with the old head evidence
-intact.
+intact — and, having read nothing live, reports its current head as unknown
+rather than presenting that recorded head as the one the PR is on.
 
 Every ambiguity — a malformed verdict, a stale head, a lane whose result
 contradicts its verdict, a push that cannot be bound to exactly one new head, a
@@ -97,6 +98,7 @@ from .errors import (
     AmbiguousPush,
     BuilderRefusal,
     FailClosed,
+    FailureRecord,
     LaneFailure,
     PrProverError,
     ReadbackMismatch,
@@ -108,12 +110,17 @@ from .errors import (
 from .findings import (
     Adjudicator,
     Classification,
+    Clock,
     Finding,
+    FindingLocation,
+    FindingProvenance,
     classify,
     default_adjudicator,
+    utc_now,
 )
 from .github import GitHubBoundary, PullRequest
 from .redaction import evidence as redact_evidence
+from .redaction import sanitize
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
     BuilderReport,
@@ -125,6 +132,10 @@ from .verdicts import (
 MERGE_READY = "merge-ready"
 BLOCKED = "blocked"
 NEEDS_KARAN = "needs-karan"
+
+# How many fresh comments a readback failure describes one by one. The evidence
+# has to name what was seen without turning a busy PR into an unbounded dump.
+_OBSERVED_CANDIDATES = 10
 
 _BLOCKERS_NOTE = (
     "Frozen blocker set for one fix attempt. Every summary below is untrusted "
@@ -150,17 +161,29 @@ class RunResult:
 
     outcome: str
     reason: str
+    # The head the live PR was actually observed on. ``None`` means this run
+    # never read the live PR — a stop before the first GitHub read has no
+    # current head to report, and local state cannot supply one, so the field
+    # says "unknown" rather than presenting a recorded head as the live one.
     head: str | None = None
     branch: str | None = None
     pr_url: str = ""
     attempts_used: int = 0
     corrective_reruns: tuple[int, ...] = ()
     classification: Classification | None = None
+    # The exact head the classification above was produced against. It is the
+    # reported head on every terminal outcome, and it is carried explicitly so a
+    # fail-closed stop can hand Karan the ledger it reached without a reader
+    # having to assume which commit those findings are about.
+    classification_head: str | None = None
     verdicts: tuple[ReviewerVerdict, ...] = ()
     gates: tuple[GateOutcome, ...] = ()
     events: tuple[str, ...] = ()
     evidence: dict[str, Any] = field(default_factory=dict)
     retained_paths: tuple[str, ...] = ()
+    # Every failure this run reached, in one shape: the human summary and the
+    # builder's next-instruction block are both rendered from these records.
+    failures: tuple[FailureRecord, ...] = ()
 
     @property
     def exit_code(self) -> int:
@@ -179,19 +202,27 @@ class ProverLoop:
         worktrees: Any,
         adjudicator: Adjudicator = default_adjudicator,
         scratch_root: Path | None = None,
+        clock: Clock = utc_now,
     ) -> None:
         self.config = config
         self.runner = runner
         self.github = github
         self.worktrees = worktrees
         self.adjudicator = adjudicator
+        self.clock = clock
         self._scratch_root = Path(scratch_root) if scratch_root is not None else None
         self._scratch: Path | None = None
         self._state: RunState | None = None
         self._events: list[str] = []
         self._gates: list[GateOutcome] = []
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
+        self._failures: list[FailureRecord] = []
         self._retained: list[str] = []
+        # The head the live PR was last actually observed on. ``state.head`` is
+        # the head this run bound its work to; the two agree until GitHub moves
+        # underneath the run, and a fail-closed report has to be able to tell
+        # those apart rather than presenting the bound head as the current one.
+        self._observed_head: str | None = None
 
     # -- entry point ------------------------------------------------------
     def run(self) -> RunResult:
@@ -237,6 +268,12 @@ class ProverLoop:
         report merge-ready for a push no run ever verified and a fix comment no
         run ever read. The run stops here instead, before any GitHub read, with
         the recorded head left exactly as the interrupted attempt wrote it.
+
+        That recorded head is preserved evidence, not a claim about the live PR.
+        No read happened, so the report leaves the current head unknown and
+        marks the recorded head and the ledger produced against it unverified;
+        anything else would hand Karan a pre-attempt ledger under a heading
+        saying the PR is still on that commit.
         """
         if not state.verification_pending:
             return
@@ -274,6 +311,14 @@ class ProverLoop:
             self._event(f"remote head verified as {verified} on {pull.head_ref_name}")
 
             classification = self._evaluate(pull, verified)
+            # Held on the state object with the provenance and lineage the
+            # findings were created with, so every write this run already makes
+            # — the pre-attempt journal and the terminal one, fail-closed
+            # included — carries an escalation Karan can act on rather than a
+            # list of ids. No save is added here: the freshness assertion below
+            # decides this head's fate, and a new write before it could fail and
+            # replace the reason the run actually stopped.
+            state.record_classification(classification)
 
             if classification.needs_karan:
                 return self._report(
@@ -321,8 +366,19 @@ class ProverLoop:
         )
 
     # -- inspection and evaluation ---------------------------------------
+    def _observe(self, pull: PullRequest) -> PullRequest:
+        """Record the head the live PR was just seen on, and hand it back.
+
+        Every read of the PR passes through here, so "the head this run last saw
+        live" has one definition instead of being re-derived at each terminal.
+        It is deliberately not ``state.head``: binding is the head this run chose
+        to work against, observing is the head GitHub reported.
+        """
+        self._observed_head = pull.head_ref_oid
+        return pull
+
     def _inspect(self, state: RunState) -> PullRequest:
-        pull = self.github.pull_request(self.config.repo, self.config.pr)
+        pull = self._observe(self.github.pull_request(self.config.repo, self.config.pr))
         if pull.state != "OPEN":
             raise StateError(
                 "the pull request is not open",
@@ -352,7 +408,7 @@ class ProverLoop:
                     "attempt": state.attempt,
                 },
             )
-        state.head = pull.head_ref_oid
+        state.bind_head(pull.head_ref_oid)
         state.save()
         self._event(
             f"inspected {self.config.repo}#{pull.number} at head {pull.head_ref_oid}"
@@ -370,7 +426,7 @@ class ProverLoop:
         renamed head branch — those conclusions describe a PR that no longer
         exists, and the run stops as stale-head rather than reporting them.
         """
-        live = self.github.pull_request(self.config.repo, self.config.pr)
+        live = self._observe(self.github.pull_request(self.config.repo, self.config.pr))
         drift: dict[str, Any] = {}
         if live.number != snapshot.number:
             drift["number"] = {"inspected": snapshot.number, "live": live.number}
@@ -410,6 +466,7 @@ class ProverLoop:
         """
         self._gates = []
         self._verdicts = ()
+        self._failures = []
         worktree = self.worktrees.create(f"pr{pull.number}-{head[:12]}-inspect", head)
         try:
             findings = list(self._run_gates(pull, head, worktree))
@@ -425,7 +482,7 @@ class ProverLoop:
             self._retain(worktree, why="evaluation failed")
             raise
         self.worktrees.remove(worktree)
-        return classify(findings, adjudicator=self.adjudicator)
+        return classify(findings, adjudicator=self.adjudicator, clock=self.clock)
 
     def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
         findings: list[Finding] = []
@@ -453,17 +510,45 @@ class ProverLoop:
                 self._event(f"gate {gate.name!r} passed on {head}")
                 continue
             self._event(f"gate {gate.name!r} failed on {head} (exit {result.returncode})")
+            identifier = f"gate-{gate.name}".lower().replace(" ", "-")
             findings.append(
                 Finding(
-                    id=f"gate-{gate.name}".lower().replace(" ", "-"),
+                    id=identifier,
                     severity="blocking",
                     summary=(
                         f"baseline gate {gate.name!r} "
                         + ("timed out" if result.timed_out else f"exited {result.returncode}")
                     ),
-                    source=f"gate:{gate.name}",
-                    head=head,
+                    # The command is the surface: a gate finding a builder can
+                    # act on is one that names what to re-run and what it said.
+                    provenance=FindingProvenance(
+                        agent_id=gate.name,
+                        role="gate",
+                        head=head,
+                        location=FindingLocation(
+                            kind="gate-command",
+                            reference=redact_evidence(" ".join(argv), limit=400),
+                        ),
+                        evidence_excerpt=(
+                            redact_evidence(output.strip(), limit=1000)
+                            or f"<gate captured no output; exit {result.returncode}>"
+                        ),
+                    ),
                     detail=output,
+                )
+            )
+            # The same failure, in the form the builder consumes as its next
+            # instruction. It is built here rather than derived from the finding
+            # later, because this is where the command and the exit status are.
+            self._failures.append(
+                FailureRecord.for_gate(
+                    name=gate.name,
+                    kind=gate.kind,
+                    command=list(argv),
+                    returncode=result.returncode,
+                    timed_out=result.timed_out,
+                    output=output,
+                    finding_id=identifier,
                 )
             )
         return findings
@@ -711,7 +796,7 @@ class ProverLoop:
                 "the builder reported the pre-attempt head as its result",
                 evidence={"head": old_head},
             )
-        refreshed = self.github.pull_request(self.config.repo, self.config.pr)
+        refreshed = self._observe(self.github.pull_request(self.config.repo, self.config.pr))
         new_head = refreshed.head_ref_oid
         if new_head == old_head:
             raise AmbiguousPush(
@@ -874,22 +959,60 @@ class ProverLoop:
         author = self.config.builder.comment_author
         comments = self.github.comments(self.config.repo, self.config.pr)
         fresh = [comment for comment in comments if comment.identifier not in known]
+        # What was actually seen, condition by condition. Counting the fresh
+        # comments says a readback failed; it does not say whether the builder
+        # posted under the wrong login, left the signature out, or wrote about
+        # the previous head — and those are three different fixes.
+        observed: list[dict[str, Any]] = []
         for comment in fresh:
-            if comment.author != author:
-                continue
-            if signature not in comment.body or head not in comment.body:
-                continue
-            self._event(f"builder fix comment {comment.identifier} read back for {head}")
-            return
+            author_matches = comment.author == author
+            signature_present = signature in comment.body
+            head_present = head in comment.body
+            if author_matches and signature_present and head_present:
+                self._event(f"builder fix comment {comment.identifier} read back for {head}")
+                return
+            if len(observed) < _OBSERVED_CANDIDATES:
+                observed.append(
+                    {
+                        "comment_id": comment.identifier,
+                        "author": redact_evidence(comment.author, limit=200),
+                        "author_matches": author_matches,
+                        "signature_present": signature_present,
+                        "head_present": head_present,
+                        "failed_conditions": [
+                            name
+                            for name, satisfied in (
+                                ("author", author_matches),
+                                ("signature", signature_present),
+                                ("head", head_present),
+                            )
+                            if not satisfied
+                        ],
+                    }
+                )
         raise ReadbackMismatch(
             "no comment posted since the builder was invoked carries the expected "
             "author, the signature, and the new head together",
             evidence={
                 "head": head,
+                "expected": (
+                    f"a comment posted since the builder was invoked, authored by "
+                    f"{author}, whose body carries the signature and the head {head}"
+                ),
+                "actual": (
+                    f"{len(fresh)} comment(s) posted since the builder was invoked, "
+                    "none satisfying all three conditions"
+                    if fresh
+                    else "no comment was posted since the builder was invoked"
+                ),
                 "expected_signature": signature,
                 "expected_author": author,
                 "comments_seen": len(comments),
                 "comments_since_builder_invoked": len(fresh),
+                # Bounded on purpose: enough to name the failing condition on
+                # each candidate, never the whole conversation.
+                "observed": observed,
+                "observed_not_described": max(0, len(fresh) - len(observed)),
             },
         )
 
@@ -936,8 +1059,9 @@ class ProverLoop:
         omitted: tuple[str, ...] = (),
     ) -> Path:
         """Write the frozen blocker set outside every repository, as data."""
+        wanted = {item.finding.id for item in blockers}
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "note": _BLOCKERS_NOTE,
             "repo": self.config.repo,
             "pr": pull.number,
@@ -948,6 +1072,15 @@ class ProverLoop:
             "mode": mode,
             "omitted_from_previous_run": list(omitted),
             "blockers": [item.as_dict() for item in blockers],
+            # The same failure records the human report renders, for exactly the
+            # blockers in this set. The builder reads them as its next
+            # instruction — what failed, the evidence, the bounded remediation,
+            # and the line past which it must escalate instead.
+            "next_instructions": [
+                record.as_dict()
+                for record in self._failures
+                if record.finding_id is not None and record.finding_id in wanted
+            ],
             "contract": {
                 "addressed_line": "ADDRESSED: ID=<blocker id>  (one per blocker you fixed)",
                 "final_marker": (
@@ -957,7 +1090,12 @@ class ProverLoop:
             },
         }
         path = self._scratch_dir() / f"blockers-attempt{state.attempt}-{mode}.json"
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # The same recursive scrub the report gets. This file now carries gate
+        # commands and provenance excerpts, and it is the one other place the
+        # loop serializes assembled evidence, so it passes the same boundary.
+        path.write_text(
+            json.dumps(sanitize(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         return path
 
     def _retain(self, worktree: Path, *, why: str) -> None:
@@ -988,6 +1126,12 @@ class ProverLoop:
         # freshness at this one point is what makes "no report for a head that
         # drifted" structural rather than a rule each call site must remember.
         self._assert_live_state(pull, before=f"report {outcome}")
+        # A needs-karan classification is a stop, not an error, so it produces
+        # no exception to render — but Karan needs the same four answers for it
+        # as for anything else, and one record per finding is what carries the
+        # provenance the escalation is judged on.
+        for item in classification.needs_karan:
+            self._failures.append(FailureRecord.for_classification_stop(finding=item.as_dict()))
         self._event(f"outcome {outcome} ({reason}) on head {pull.head_ref_oid}")
         return RunResult(
             outcome=outcome,
@@ -998,10 +1142,12 @@ class ProverLoop:
             attempts_used=state.attempt,
             corrective_reruns=state.corrective_rerun_attempts,
             classification=classification,
+            classification_head=pull.head_ref_oid,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
             events=tuple(self._events),
             retained_paths=tuple(self._retained),
+            failures=tuple(self._failures),
         )
 
     def _failed(self, exc: PrProverError) -> RunResult:
@@ -1009,19 +1155,58 @@ class ProverLoop:
         self._event(f"fail-closed: {exc.reason}: {exc.message}")
         if self._scratch is not None:
             self._retained.append(str(self._scratch))
+        # The stop reason and its preserved evidence, in the one form the
+        # builder can read as its next instruction.
+        self._failures.append(FailureRecord.from_error(exc))
+        # A stop after classification is still an escalation about a real
+        # ledger. Dropping it here left a needs-Karan report naming neither the
+        # blockers nor the provenance they were found on, while the journal on
+        # disk held both — so the frozen ledger travels with the report instead
+        # of waiting to be reopened. This weakens no invalidation rule:
+        # ``bind_head`` drops the previous head's findings, so what is carried
+        # is only ever the classification for the head named beside it, and that
+        # head is rendered alongside it rather than assumed.
+        classification = getattr(state, "classification", None)
+        bound_head = getattr(state, "head", None)
+        # The head to report is the last one GitHub was actually seen on, not
+        # the one this run bound its work to. They differ in the windows where
+        # the PR moved underneath the run — terminal freshness catching drift,
+        # and a push agreeing on a new head before the fix comment could be read
+        # back — and there the bound head is no longer current. Reporting it as
+        # ``head`` would put the ledger it names under a heading claiming the
+        # live PR is still on that commit. Reporting the observed head instead
+        # leaves ``classification_head`` naming the commit the findings were
+        # actually produced against, so the two disagree and every rendering
+        # marks the old ledger historical. When nothing drifted the two are
+        # equal and a same-head ledger still renders as current.
+        #
+        # There is also a stop with no observation at all. A restart that finds
+        # an interrupted attempt stops deliberately before its first GitHub read
+        # (see :meth:`_assert_no_pending_verification`), precisely because the
+        # dead process may already have pushed — so the recorded head is a head
+        # this run has no evidence is still the live one. Falling back to it
+        # here reported it as the current head and, with
+        # ``classification_head`` equal to it, presented the pre-attempt ledger
+        # as current exact-head evidence. The head is left unknown instead: the
+        # recorded head stays in the stop's own evidence and beside the ledger
+        # as the head those findings were produced against, and both renderings
+        # mark it unverified rather than current.
+        head = self._observed_head
         return RunResult(
             outcome=NEEDS_KARAN,
             reason=exc.reason,
-            head=getattr(state, "head", None),
+            head=head,
             branch=self.config.branch,
             attempts_used=getattr(state, "attempt", 0),
             corrective_reruns=getattr(state, "corrective_rerun_attempts", ()),
-            classification=None,
+            classification=classification,
+            classification_head=bound_head if classification else None,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
             events=tuple(self._events),
             evidence=exc.as_dict(),
             retained_paths=tuple(self._retained),
+            failures=tuple(self._failures),
         )
 
 

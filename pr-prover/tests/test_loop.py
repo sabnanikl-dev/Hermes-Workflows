@@ -34,6 +34,7 @@ from pr_prover.state import (
     MAX_ATTEMPTS,
     PHASE_ATTEMPT_IN_FLIGHT,
     PHASE_IDLE,
+    SCHEMA_VERSION,
     RunState,
 )
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
@@ -1415,10 +1416,10 @@ class StatePersistenceFailClosedTests(LoopHarness):
 
 
 class MissingSchemaKeyRestartTests(LoopHarness):
-    """PAPI88-RESUME-READBACK, end to end: a v2 journal missing the phase keys.
+    """PAPI88-RESUME-READBACK, end to end: a journal missing the phase keys.
 
     The reproduced bypass, measured exactly as the reviewers measured it: a
-    journal saying ``schema_version=2``, ``attempt=1``, ``head=A`` — and nothing
+    journal claiming the current schema with ``attempt=1``, ``head=A`` — and nothing
     about the verification that attempt owed — was accepted as idle. The restart
     re-inspected, rebound itself to the live B, found the fresh B reviewers
     clean, and reported ``merge-ready`` having invoked no builder and read no
@@ -1427,7 +1428,7 @@ class MissingSchemaKeyRestartTests(LoopHarness):
 
     def write_journal(self, *missing: str, **overrides: object) -> None:
         payload = {
-            "schema_version": 2,
+            "schema_version": SCHEMA_VERSION,
             "repo": "example/repo",
             "pr": 7,
             "attempt": 1,
@@ -1436,6 +1437,7 @@ class MissingSchemaKeyRestartTests(LoopHarness):
             "outcome": None,
             "phase": PHASE_IDLE,
             "attempt_head": None,
+            "classification": None,
         }
         payload.update(overrides)
         for key in missing:
