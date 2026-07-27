@@ -65,9 +65,10 @@ Completeness, not comfort
 
 Each surface records how many items it holds and whether the read that produced
 it reached the end. An incomplete surface is not an error — some GitHub reads
-simply carry no pagination guarantee, and proving the conversation surface
-complete is PAPI-97's obligation (M5). What matters is that the reviewer is
-told which is which, instead of reading a first page as a whole PR.
+simply carry no pagination guarantee — while the conversation, review, and
+thread surfaces the reconciler depends on are proven complete before they are
+used (M5). What matters is that the reviewer is told which is which, instead of
+reading a first page as a whole PR.
 
 Which is why the shape is validated rather than trusted. "Complete" has to be a
 boolean, a count has to be an integer that equals the number of items beside it,
@@ -268,10 +269,7 @@ def build_packet(
                     for item in comments
                 ],
                 complete=evidence.conversation_comments_complete,
-                how=(
-                    "one 'gh pr view --json comments' read; this surface carries no "
-                    "pagination guarantee yet (M5, owed by PAPI-97)"
-                ),
+                how="REST 'gh api --paginate' to the last page",
             ),
             "reviews": _surface(
                 [
@@ -555,8 +553,8 @@ def read_packet(
     for name in sorted(REQUIRED_SURFACES):
         _validate_surface(surfaces[name], name=name, context=context)
     # Most surfaces may honestly be empty or partial: a PR really can have no
-    # inline comments, and the conversation read really cannot prove it reached
-    # the end. The two contract surfaces are different in kind. The run named
+    # inline comments, and a boundary that did not prove a read complete must be
+    # able to say so. The two contract surfaces are different in kind. The run named
     # the governing issues itself and every PR has a body, so an empty or
     # incomplete one is not a quiet PR — it is a lane about to judge scope,
     # staleness, and acceptance criteria against a document nobody handed it.

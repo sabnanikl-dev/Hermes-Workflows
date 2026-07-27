@@ -26,9 +26,10 @@ the repo-native contract and the slim
 [`autonomous-pr-prover`](../Karan-skills/software-development/autonomous-pr-prover/SKILL.md)
 router that sends Hermes here are **PAPI-92**; finding provenance and the
 structured failure records are **PAPI-99**; the trusted execution adapters,
-reviewer artifact lifecycle, and GitHub readback below are **PAPI-90**.
-Deterministic human-feedback reconciliation (PAPI-97) and the final integration
-proof (PAPI-93) are still pending; see the proof map in
+reviewer artifact lifecycle, and GitHub readback below are **PAPI-90**;
+complete feedback surfaces, run-owned publication evidence, native
+review/thread resolution, and the acknowledgement contract are **PAPI-97**. The
+final integration proof (PAPI-93) is still pending; see the proof map in
 [`MISSION.md`](MISSION.md) for exactly which invariants are shipped and which
 are owed.
 
@@ -247,9 +248,9 @@ is evidence about the PR rather than authority over it, and a PR using `Refs #1`
 closes nothing at all.
 
 Each surface says how it was read and whether that read reached the end. An
-incomplete surface is not an error — the conversation-comment read carries no
-pagination guarantee yet, and proving it does is PAPI-97's obligation (M5) — but
-it is stated, so a reviewer cannot mistake a first page for a whole PR. The two
+incomplete surface is not an error — a PR can honestly have no inline comments,
+and a boundary that could not prove a read complete has to be able to say so —
+but it is stated, so a reviewer cannot mistake a first page for a whole PR. The two
 contract surfaces are the exception: they are not reads that may honestly come
 back empty, so an empty or clipped one stops the lane rather than being handed
 over as evidence.
@@ -358,32 +359,108 @@ record, the `transport` list says exactly how far that one got. None of this is 
 verdict: three failing reviews whose artifacts all landed are complete transport
 and a blocked head.
 
+And none of it is permission. Every report carries a constant `merge_authority`
+line, in the JSON and in the Markdown, saying that Karan alone decides and that
+what is above it is evidence about one exact head. It is a module constant
+rather than a computed field, because a value something could set is a value
+something could be made to set to the wrong thing.
+
 ## What this run owns, and what it does not
 
-Every artifact the loop watches appear and verifies is retained **by GitHub's
-own id**, in the run state file. That is the whole definition of "this run
-published it", and the reason is that everything visible in a body becomes
-copyable the moment a real artifact exists — the signature, the role line, the
-head declaration — while a configured login proves nothing either, because the
-account is shared with a human.
+Every artifact the loop watches appear and verifies is retained in the run state
+file **by GitHub's own id, paired with a digest of what readback verified it
+holding**. The id is the whole definition of "this run published it", because
+everything visible in a body becomes copyable the moment a real artifact exists
+— the signature, the role line, the head declaration — while a configured login
+proves nothing either, since the account is shared with a human. The digest is
+the other half: published artifacts stay editable, so an id alone would let
+somebody rewrite a verified lane comment into "do not merge" and keep it
+invisible. An artifact nobody touched stays owned; an edited one re-enters human
+classification.
 
-Before a builder is launched, any comment or review the run cannot attribute to
-itself stops the run and asks Karan. No prose is interpreted, no login is
-trusted for being configured, and no resolution state is read. A builder fixing
-against an unread human objection is the failure this prevents, and being wrong
-in this direction costs an unnecessary question while being wrong in the other
-costs a push over a "do not merge".
+## Human feedback, reconciled rather than guessed
 
-The bluntness is priced deliberately. An old approving review stops the fix lane
-too. Making it precise — complete surfaces, positive ownership under a shared
-login, native review and thread resolution, and a finite acknowledgement
-contract — is PAPI-97's subject, and this check reads only the conversation
-comments and submitted reviews until then.
+Gates and reviewer lanes are not the whole PR. Before a fix attempt opens and
+before `merge-ready` is reported, the loop reads three surfaces — conversation
+comments, submitted reviews, and inline review threads — to their last page,
+reads them again until two consecutive passes agree, and reconciles them in
+[`feedback.py`](src/pr_prover/feedback.py). Anything it cannot prove somebody
+resolved stops the run and asks Karan.
 
-The stop guards the **fix lane only**. A run still reports `merge-ready`,
-`blocked`, or `needs-Karan` on the head it measured: refusing to answer is not
-the same as answering carefully, and the report is what Karan reads before
-deciding.
+"Read to their last page" is checked rather than assumed, and so is every field
+the reconciler needs. A thread whose reply list did not arrive, a comment or
+review whose body did not arrive, and a review with no state are each an
+incomplete read — not a thread with no replies, a post with nothing in it, or a
+review nobody has to clear. Each stops the read where it happened.
+
+A field can also arrive and still be unusable, which is the same false success
+one step later. A review state must be one GitHub actually defines: `""`,
+whitespace, and an unknown word are all strings, and every one of them reaches
+the reconciler as a review that neither blocks nor clears, so a live
+`CHANGES_REQUESTED` would resolve itself by being unreadable. A live thread must
+carry at least one reply, because a review thread exists only from the comment
+that opened it; a complete-looking empty reply list has no readable human author,
+is dropped as agent-only, and clears the PR. Both are malformed evidence and stop
+the read.
+
+A post a human really did leave empty is still data and still parses; the
+difference between "empty" and "absent" only exists at the boundary, so that is
+where it is decided.
+
+Nothing here interprets prose. Two surfaces carry their own resolution state and
+one does not:
+
+- a formal `CHANGES_REQUESTED` clears only when the **same author** submits a
+  later `APPROVED` or `DISMISSED` review;
+- an inline thread clears only when GitHub records it resolved or outdated;
+- prose on the surfaces GitHub gives no resolution state — a conversation
+  comment, and the body of a review carrying no decisive state, such as a plain
+  `COMMENTED` one — clears only through a later line reading, after the
+  surrounding whitespace of that line is trimmed:
+
+  ```text
+  PR-PROVER: ACKNOWLEDGED <one immutable GitHub artifact id>
+  ```
+
+  Neither of the first two is acknowledgeable. A `CHANGES_REQUESTED` review and
+  an inline thread each have a native GitHub action that resolves them, so an
+  acknowledgement naming one of those is a line that clears nothing — it stays
+  in the body as the prose it is.
+
+  The grammar is the whole line and it is exact: the literal prefix, **exactly
+  one ordinary space**, and one id containing no whitespace. A double space, a
+  tab, a case variant, an extra token, or the same words inside a sentence are
+  all ineffective, on purpose — a form loose enough to forgive a typo is a
+  second, unwritten way to clear somebody's stop.
+
+That line is *spent* only when all six of these hold: its author is not a
+configured publishing login; it names exactly one eligible unresolved prose item
+on a surface with no native resolution; GitHub's own UTC-aware timestamps put
+that target strictly earlier; the target is not the post itself; the target is
+not already cleared, globally or by an earlier line of the same post; and so the
+line performs exactly one unresolved-to-cleared transition.
+
+One canonical order — UTC-aware timestamp, then surface, then immutable id —
+governs everywhere an order exists: which posts are considered as candidates,
+which of an author's still-standing change requests a finding names, and the
+sequence of findings a stop reports. The same conversation therefore reconciles
+to the same answer, in the same order, however its pages were grouped or its
+tuples arrived. That last one is not presentation: a stop describes only the
+first few items it found, so the order decides which ones Karan is shown at all.
+
+Only spent lines are removed from the body. A blank remainder is pure
+bookkeeping and creates no finding — otherwise acknowledging anything would
+leave one more thing to acknowledge. **Any** non-blank remainder is unresolved
+human prose, and that deliberately includes every acknowledgement-*looking* line
+that did nothing: a post reading `PR-PROVER: ACKNOWLEDGED <real id>` above
+`PR-PROVER: ACKNOWLEDGED missing-target DO NOT MERGE` clears the first id,
+clears nothing with the second, and the stop written on that second line must
+not vanish with it.
+
+The check guards two moments and only two: opening a fix attempt, and reporting
+`merge-ready`. A `blocked` head is still reported blocked — the blockers are
+real whatever the conversation says, and refusing to answer is not the same as
+answering carefully.
 
 ## Fix cycles start fresh
 
@@ -594,11 +671,12 @@ state, not something to repair. And because a finding is evidence about one
 exact commit, binding the run to a new head drops the old head's findings rather
 than carrying them forward.
 
-The one key a head change deliberately does *not* drop is the list of artifact
-ids this run owns. A finding is evidence about one commit, but an artifact this
-run published for an earlier head is still not human feedback — and cycle two
-has to recognise what cycle one posted, which is impossible to rediscover from a
-body anybody could copy.
+The one key a head change deliberately does *not* drop is the map of artifact
+ids this run owns to the publication evidence readback verified for each. A
+finding is evidence about one commit, but an artifact this run published for an
+earlier head is still not human feedback — and cycle two has to recognise what
+cycle one posted, which is impossible to rediscover from a body anybody could
+copy.
 
 ### The lock is released by identity, not by pathname
 

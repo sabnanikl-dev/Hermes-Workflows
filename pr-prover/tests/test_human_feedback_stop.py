@@ -1,20 +1,22 @@
-"""The conservative stop: no builder runs against a conversation nobody read.
+"""The identity half of the stop: whose post is this, and did this run cause it?
 
-The rule this slice ships is deliberately blunt. Every published comment and
-review whose id this run did not itself watch appear and verify is human
-feedback, and its presence stops the run before the fix lane is launched. No
-prose is interpreted, no login is trusted for being configured, and no
-resolution state is read.
+These began as PAPI-90's conservative stop — every published comment and review
+whose id this run did not itself watch appear and verify is human feedback — and
+they still pin down exactly that half of the rule, in both directions: it must
+not be avoidable by anything a body can say, and it must not be so wide that
+this run's own publications trip it.
 
-What the tests here pin down is the shape of that bluntness, in both directions:
-it must not be avoidable by anything a body can say, and it must not be so wide
-that this run's own publications trip it. Making it *precise* — complete
-surfaces, positive ownership under a shared login, native review and thread
-resolution, acknowledgement semantics — is the deterministic-reconciliation
-slice's subject, and nothing here pretends otherwise.
+What PAPI-97 changed underneath them is the other half. The stop is no longer
+blunt about *resolution*: native review and thread state now clear what GitHub
+records as cleared, an explicit acknowledgement contract clears conversation
+prose, and the check guards ``merge-ready`` as well as the fix lane, because a
+run cannot claim a PR is done while a human is waiting for an answer. The three
+assertions that only made sense while the rule was blunt say so where they
+changed; the resolution semantics themselves live in ``test_human_feedback.py``.
 """
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -32,6 +34,7 @@ from _support import (
     reviewer_output,
 )
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN
+from pr_prover.state import SCHEMA_VERSION
 from test_loop import BLOCKER, LoopHarness
 
 
@@ -58,7 +61,7 @@ class UnownedFeedbackStopTests(LoopHarness):
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "human-feedback")
         self.assertEqual(
-            [item["artifact_id"] for item in result.evidence["evidence"]["unowned"]],
+            [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]],
             [raised.identifier],
         )
         self.assertEqual(result.attempts_used, 0)
@@ -75,16 +78,26 @@ class UnownedFeedbackStopTests(LoopHarness):
 
         self.assertEqual(result.reason, "human-feedback")
 
-    def test_an_approving_review_stops_it_as_well(self) -> None:
-        """Deliberately: this rule does not read approval, and must not guess it."""
+    def test_an_approving_review_no_longer_stops_it(self) -> None:
+        """Superseded, deliberately: GitHub's own review state is authoritative.
+
+        PAPI-90's blunt rule stopped on this because it read no resolution state
+        at all. It has to be read now — a run that asks Karan about an approval
+        teaches its operator to wave the stop through — and an ``APPROVED``
+        review is exactly the case GitHub already recorded as resolved. So the
+        builder runs, and the second head proves clean.
+        """
         loop = self.build()
         self.blocked_round()
         self.scripted_builder()
         self.remote.review("Looks good.", author="karan", state="APPROVED")
+        self.review_round(HEAD_B)
 
         result = loop.run()
 
-        self.assertEqual(result.reason, "human-feedback")
+        self.assertEqual(result.outcome, MERGE_READY, result.reason)
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(result.head, HEAD_B)
 
     def test_prose_cannot_talk_its_way_out_of_being_feedback(self) -> None:
         """No body is interpreted, so no body can exempt itself by what it says."""
@@ -120,11 +133,11 @@ class UnownedFeedbackStopTests(LoopHarness):
         self.assertEqual(result.reason, "human-feedback")
         self.assertIn(
             planted.identifier,
-            [item["artifact_id"] for item in result.evidence["evidence"]["unowned"]],
+            [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]],
         )
 
-    def test_the_stop_names_the_slice_that_makes_it_precise(self) -> None:
-        """The evidence has to say what this check does *not* cover."""
+    def test_the_stop_says_exactly_how_to_clear_what_it_found(self) -> None:
+        """A stop nobody can act on sends its operator looking for a bypass."""
         loop = self.build()
         self.blocked_round()
         self.scripted_builder()
@@ -132,11 +145,12 @@ class UnownedFeedbackStopTests(LoopHarness):
 
         evidence = loop.run().evidence["evidence"]
 
-        self.assertIn("conversation comments and submitted reviews", evidence["scope_note"])
-        self.assertIn("acknowledgement", evidence["scope_note"])
-        self.assertIn("resolution", evidence)
+        self.assertIn("PR-PROVER: ACKNOWLEDGED", evidence["resolution"])
+        self.assertIn("approve or dismiss", evidence["resolution"])
+        self.assertIn("untrusted", evidence["untrusted_note"].lower())
+        self.assertEqual(evidence["unresolved"][0]["why"], "unacknowledged")
 
-    def test_many_unowned_artifacts_are_described_but_bounded(self) -> None:
+    def test_many_unresolved_items_are_described_but_bounded(self) -> None:
         """Enough to act on, never the whole conversation."""
         loop = self.build()
         self.blocked_round()
@@ -146,8 +160,8 @@ class UnownedFeedbackStopTests(LoopHarness):
 
         evidence = loop.run().evidence["evidence"]
 
-        self.assertEqual(len(evidence["unowned"]), 10)
-        self.assertEqual(evidence["unowned_not_described"], 4)
+        self.assertEqual(len(evidence["unresolved"]), 10)
+        self.assertEqual(evidence["unresolved_not_described"], 4)
 
     # -- the stop does not fire --------------------------------------------
     def test_this_runs_own_reviewer_artifacts_do_not_stop_it(self) -> None:
@@ -184,20 +198,49 @@ class UnownedFeedbackStopTests(LoopHarness):
         # Three reviewer artifacts per head, plus one fix comment per attempt.
         self.assertEqual(len(self.state()["verified_artifacts"]), 3 * 3 + 2)
 
-    def test_the_stop_guards_the_fix_lane_and_not_the_report(self) -> None:
-        """A PR with a human comment can still be reported on; it just is not fixed.
+    def test_merge_ready_is_guarded_too_and_blocked_is_not(self) -> None:
+        """Superseded, deliberately: ``merge-ready`` owes the conversation an answer.
 
-        Reporting is what Karan reads before deciding, so gating it on the
-        conversation would replace an answer with a refusal to answer. Only the
-        automated fix lane is held back.
+        PAPI-90 guarded only the fix lane, because a blunt rule that also gated
+        reporting would have refused to answer about nearly every PR. A precise
+        one must gate it: ``merge-ready`` is the claim that this head is done,
+        and it cannot be true while a human is waiting. ``blocked`` still
+        reports — the blockers are real whatever the conversation says, and
+        refusing to answer is not the same as answering carefully.
         """
         loop = self.build()
         self.review_round(HEAD_A)
         self.remote.comment("nice work", author="karan")
 
-        result = loop.run()
+        self.assertEqual(loop.run().reason, "human-feedback")
 
-        self.assertEqual(result.outcome, MERGE_READY)
+        self.setUp()
+        blocked = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.remote.comment("nice work", author="karan")
+        (self.tmp / "state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "repo": "example/repo",
+                    "pr": 7,
+                    "attempt": 2,
+                    "head": HEAD_A,
+                    "corrective_rerun_attempts": [],
+                    "outcome": None,
+                    "phase": "idle",
+                    "attempt_head": None,
+                    "classification": None,
+                    "verified_artifacts": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = blocked.run()
+
+        self.assertEqual(result.outcome, BLOCKED)
+        self.assertEqual(result.reason, "attempt-cap-reached")
 
     def test_the_ledger_is_frozen_before_the_stop_so_karan_gets_it(self) -> None:
         """Stopping is not the same as having nothing to say.
@@ -227,10 +270,10 @@ class AttemptCapWithFeedbackTests(LoopHarness):
         self.review_round(HEAD_A, [BLOCKER])
         self.remote.comment("please look at this", author="karan")
         (self.tmp / "state.json").write_text(
-            '{"schema_version": 4, "repo": "example/repo", "pr": 7, "attempt": 2, '
-            f'"head": "{HEAD_A}", "corrective_rerun_attempts": [], "outcome": null, '
-            '"phase": "idle", "attempt_head": null, "classification": null, '
-            '"verified_artifacts": []}',
+            f'{{"schema_version": {SCHEMA_VERSION}, "repo": "example/repo", "pr": 7, '
+            f'"attempt": 2, "head": "{HEAD_A}", "corrective_rerun_attempts": [], '
+            '"outcome": null, "phase": "idle", "attempt_head": null, '
+            '"classification": null, "verified_artifacts": {}}',
             encoding="utf-8",
         )
 

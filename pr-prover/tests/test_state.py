@@ -53,7 +53,7 @@ class StateFileHarness(unittest.TestCase):
             "phase": PHASE_IDLE,
             "attempt_head": None,
             "classification": None,
-            "verified_artifacts": [],
+            "verified_artifacts": {},
         }
         payload.update(overrides)
         return payload

@@ -28,6 +28,7 @@ from _support import (
     reviewer_output,
 )
 from pr_prover.errors import ScopeContamination, StateError
+from pr_prover.feedback import publication_evidence
 from pr_prover.findings import Finding
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop
 from pr_prover.state import (
@@ -1119,7 +1120,7 @@ class CommentIdentityTests(LoopHarness):
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "human-feedback")
         self.assertEqual(
-            [item["artifact_id"] for item in result.evidence["evidence"]["unowned"]],
+            [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]],
             [planted.identifier],
         )
         # The builder was never launched, so the attempt was never spent.
@@ -1642,12 +1643,22 @@ class MissingSchemaKeyRestartTests(LoopHarness):
             "phase": PHASE_IDLE,
             "attempt_head": None,
             "classification": None,
-            "verified_artifacts": [],
+            "verified_artifacts": {},
         }
         payload.update(overrides)
         for key in missing:
             payload.pop(key)
         (self.tmp / "state.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def journal_the_existing_comments(self) -> None:
+        """Record every comment already on the PR as this run's own publication."""
+        path = self.tmp / "state.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["verified_artifacts"] = {
+            comment.identifier: publication_evidence(comment)
+            for comment in self.remote.comments
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
     def world_the_restart_wakes_up_in(self) -> ProverLoop:
         """The attempt already pushed: the PR is on B and B reviews clean."""
@@ -1714,6 +1725,11 @@ class MissingSchemaKeyRestartTests(LoopHarness):
         """The positive control: strictness must not break an ordinary resume."""
         self.write_journal(attempt=1, head=HEAD_B)
         loop = self.world_the_restart_wakes_up_in()
+        # The previous attempt's own fix comment is already on the PR. A journal
+        # written by the attempt that posted it records it, so this one does too;
+        # otherwise the resume stops on it as feedback nobody can attribute,
+        # which is a different test than this one.
+        self.journal_the_existing_comments()
 
         result = loop.run()
 

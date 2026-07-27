@@ -18,14 +18,19 @@ distinction: an unknown head is printed as unknown, and a classification carried
 into the report is marked historical or unverified unless the head it was
 produced against is the head that was observed.
 
-Three claims are kept apart rather than blended into one impression of health.
+Four claims are kept apart rather than blended into one impression of health.
 **Transport** says an artifact reached GitHub under the configured identity and
 can be read back — it says nothing about what the review concluded. The
 **implementation verdict** is the reviewer statuses and the classification
 buckets. **Exact-head readiness** is the outcome at the top, tied to the head
 the live PR was observed on. A run can have complete transport, a failing
 verdict, and no readiness at all, and the report has to be able to say so.
-Deciding to merge remains Karan's, on evidence, and no field here is permission.
+
+**Human merge authority** is the fourth, and it is written down rather than left
+to be inferred from the other three: ``merge_authority`` says in every report,
+in both renderings, that Karan alone decides and that nothing here is
+permission. It is a module constant, not a computed field, because a value
+something could set is a value something could set to the wrong thing.
 
 Two things are rendered rather than summarized. A ``needs-Karan`` escalation
 prints each finding's provenance inline — who found it, on which head, at which
@@ -46,6 +51,14 @@ from .config import REQUIRED_REVIEWER_ROLES
 from .findings import provenance_lines
 from .loop import NEEDS_KARAN, RunResult
 from .redaction import sanitize
+
+# Who may merge, stated in every report in both renderings. ``merge-ready`` is
+# advice about one exact head; a reader who takes it as approval has read three
+# accurate fields and drawn the one conclusion none of them supports.
+MERGE_AUTHORITY = (
+    "Karan alone decides whether to merge. Every field in this report is "
+    "evidence about one exact head, and none of it is merge permission."
+)
 
 
 def as_dict(result: RunResult) -> dict[str, Any]:
@@ -111,6 +124,11 @@ def as_dict(result: RunResult) -> dict[str, Any]:
             for item in result.transport
         ],
         "transport_complete": _transport_is_complete(result),
+        # The fourth claim, said rather than implied. Everything above is
+        # evidence; none of it is permission, and ``merge-ready`` is the outcome
+        # most easily misread as one. It is a constant on purpose: a field whose
+        # value could vary is a field something could be made to set.
+        "merge_authority": MERGE_AUTHORITY,
         "classification": result.classification.as_dict() if result.classification else None,
         "classification_head": result.classification_head,
         # Whether the ledger above is evidence about the head the live PR was
@@ -203,6 +221,7 @@ def to_markdown(result: RunResult) -> str:
         )
     if payload["pr_url"]:
         lines.append(f"**PR:** {payload['pr_url']}")
+    lines.append(f"**Merge authority:** {payload['merge_authority']}")
 
     if payload["gates"]:
         lines += ["", "### Gates"]

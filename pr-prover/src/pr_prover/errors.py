@@ -121,7 +121,12 @@ class EvidencePacketError(FailClosed):
 
 
 class HumanFeedbackPresent(FailClosed):
-    """The PR carries feedback this run cannot attribute to one of its own lanes."""
+    """The PR carries human feedback this run cannot prove anybody resolved.
+
+    Raised both for unresolved feedback and for feedback surfaces that would not
+    hold still long enough to be observed once. They are the same stop: in
+    either case the run cannot say what the conversation currently asks for.
+    """
 
     reason = "human-feedback"
 
@@ -309,9 +314,9 @@ _PLAYBOOK: dict[str, _Playbook] = {
     HumanFeedbackPresent.reason: _Playbook(
         remediation=_STOP_ONLY,
         escalation=(
-            "always: feedback this run cannot attribute to one of its own lanes is a human "
-            "asking for something, and a builder must not fix against a PR conversation "
-            "nobody has reconciled"
+            "always: feedback this run cannot prove resolved is a human asking for "
+            "something, and neither a builder nor a merge-ready report may act over a "
+            "PR conversation nobody has reconciled"
         ),
     ),
     ScopeContamination.reason: _Playbook(
