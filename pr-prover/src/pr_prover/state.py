@@ -56,7 +56,9 @@ shared account a human types into — so "this run published id X" must not hard
 into "id X can never be feedback again". An artifact nobody touched stays owned;
 one whose body or review state changed no longer matches what was proven, and
 goes back to being ordinary feedback. Every other post on the PR stays what it
-already was: feedback this run cannot attribute to itself.
+already was: feedback — which is where ownership's job ends and
+:mod:`pr_prover.feedback` takes over, clearing an item only on native
+resolution or an explicit acknowledgement, and otherwise leaving it unresolved.
 
 Persistence itself fails closed. Every filesystem step of :meth:`RunState.save`
 — creating the parent, writing the temporary file, replacing the real one — is

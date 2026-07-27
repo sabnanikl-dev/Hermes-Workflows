@@ -68,7 +68,9 @@ If the frozen ledger contains valid blockers, Claude receives only that ledger. 
 
 Each fix cycle starts the builder in a **fresh context**. A builder that carries a failed cycle's reasoning into the next one degrades exactly when the last cycle matters most, so cycle two is launched the way cycle one was — a new process, re-grounded on the live PR and on a blocker file written for that cycle — and everything that must survive between cycles travels through the run state file rather than through conversation history.
 
-A builder is not launched at all while the pull request carries feedback the run cannot attribute to one of its own lanes. Fixing against an unread human objection is worse than not fixing, so the presence of any such comment or review stops the run and asks Karan. The stop guards the fix lane only: a run still reports `merge-ready`, `blocked`, or `needs-Karan` on the head it measured, because refusing to answer is not the same as answering carefully.
+Human feedback is reconciled at two guard points, and only two: before a fix attempt opens, and before a run reports `merge-ready`. Fixing against an unread human objection is worse than not fixing, and recommending a merge over one is worse still, so each guard reads the conversation, review, and inline-thread surfaces to completion and clears an item only on evidence the reconciler can prove — a later decisive review by the same author, a thread GitHub records resolved or outdated, or an acknowledgement of an earlier comment by immutable id.
+
+A head already proven blocked still reports `blocked`; the blockers are real whatever the conversation says, and refusing to answer is not the same as answering carefully. But feedback that is unresolved, incomplete, or ambiguous is never flattened into a readiness claim: it stops the run as `needs-Karan`.
 
 A push starts a new exact-head proof. Old gates, artifacts, reviews, and readiness claims remain historical evidence only.
 

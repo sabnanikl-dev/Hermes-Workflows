@@ -65,9 +65,10 @@ Completeness, not comfort
 
 Each surface records how many items it holds and whether the read that produced
 it reached the end. An incomplete surface is not an error — some GitHub reads
-simply carry no pagination guarantee, and proving the conversation surface
-complete is PAPI-97's obligation (M5). What matters is that the reviewer is
-told which is which, instead of reading a first page as a whole PR.
+simply carry no pagination guarantee — while the conversation, review, and
+thread surfaces the reconciler depends on are proven complete before they are
+used (M5). What matters is that the reviewer is told which is which, instead of
+reading a first page as a whole PR.
 
 Which is why the shape is validated rather than trusted. "Complete" has to be a
 boolean, a count has to be an integer that equals the number of items beside it,

@@ -158,6 +158,33 @@ PRESERVED_LESSONS = {
     "shared-reviewer-account-state-and-quiet-lanes.md": ("collapses", "mcp"),
 }
 
+# The superseded PAPI-90 human-feedback claim. ``MISSION.md`` once said the
+# stop guarded the fix lane only, which let a run report ``merge-ready`` over an
+# unresolved human objection — the opposite of what the same document's
+# ``merge-ready`` definition and the shipped loop do. These are the exact retired
+# spellings, pinned so the contradiction cannot return by drift.
+RETIRED_FEEDBACK_CLAIM = (
+    r"guards the fix lane only",
+    r"stop guards the fix lane",
+    r"fix lane only",
+)
+
+# The PAPI-97 semantics that replaced it: two guard points, a ``blocked`` head
+# that still reports blocked, and ambiguity that escalates instead of claiming
+# readiness. Removing the old sentence without stating these would leave the
+# lifecycle silent rather than correct.
+REQUIRED_FEEDBACK_SEMANTICS = (
+    r"two guard points",
+    r"before a fix attempt opens",
+    r"before a run reports `merge-ready`",
+    r"still reports `blocked`",
+    r"stops the run as `needs-Karan`",
+)
+
+# The two shipped guard call sites, read out of the loop itself so the contract
+# is pinned against behavior rather than against a second copy of the prose.
+_GUARD_CALL = re.compile(r'_assert_feedback_reconciled\([^)]*before="([^"]+)"', re.S)
+
 _LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 _REFERENCE = re.compile(r"`references/([a-z0-9-]+\.md)`")
 
@@ -513,6 +540,49 @@ class RepoContractTests(unittest.TestCase):
                         r"PAPI-\d+|M\d+",
                         f"{identifier} defers work without naming who owes it",
                     )
+
+    def test_the_mission_pins_the_two_guard_human_feedback_semantics(self) -> None:
+        """The retired "fix lane only" reading must not return.
+
+        Both directions matter. Deleting the stale sentence is not enough if the
+        replacement leaves the lifecycle silent, and stating the new rule is not
+        enough if the old claim survives somewhere else in the document.
+        """
+        text = MISSION.read_text(encoding="utf-8")
+        for retired in RETIRED_FEEDBACK_CLAIM:
+            with self.subTest(retired=retired):
+                self.assertIsNone(
+                    re.search(retired, text, re.IGNORECASE),
+                    f"MISSION.md revives the superseded feedback claim {retired!r}",
+                )
+        for required in REQUIRED_FEEDBACK_SEMANTICS:
+            with self.subTest(required=required):
+                self.assertRegex(text, required)
+
+    def test_the_retired_feedback_claim_scan_is_not_vacuous(self) -> None:
+        """Every retired pattern must still catch the sentence it was written for."""
+        superseded = (
+            "The stop guards the fix lane only: a run still reports `merge-ready`, "
+            "`blocked`, or `needs-Karan` on the head it measured, because refusing "
+            "to answer is not the same as answering carefully."
+        )
+        for retired in RETIRED_FEEDBACK_CLAIM:
+            with self.subTest(retired=retired):
+                self.assertRegex(superseded, retired)
+
+    def test_the_mission_guard_points_are_the_ones_the_loop_enforces(self) -> None:
+        """Contract parity: the prose names exactly the loop's two guard sites.
+
+        The blocker this pins was a document and an implementation disagreeing
+        while both suites stayed green, so the assertion reads the shipped call
+        sites rather than trusting a second prose copy of them.
+        """
+        loop = (PR_PROVER / "src" / "pr_prover" / "loop.py").read_text(encoding="utf-8")
+        self.assertEqual(
+            set(_GUARD_CALL.findall(loop)),
+            {"open a fix attempt", "report merge-ready"},
+            "the loop's feedback guard points no longer match the mission contract",
+        )
 
     def test_m13_keeps_all_four_report_claims_distinguishable(self) -> None:
         """Transport, verdict, exact-head readiness, and merge authority are four facts."""
