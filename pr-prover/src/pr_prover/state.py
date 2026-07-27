@@ -37,6 +37,18 @@ journal this writer can produce. And because a finding is evidence *for one
 exact head*, binding the run to a new head drops it rather than carrying it
 forward — the same invalidate-on-push rule the loop applies to every verdict.
 
+``verified_artifacts`` is the fourth, and it is deliberately the one key a head
+change does *not* drop. It holds GitHub's own ids for the artifacts this run
+watched appear and verified as its own lanes' publications — reviewer artifacts
+and builder fix comments. Ownership is a fact about a specific id this run
+caused, established at the only moment it is knowable: between the snapshot
+taken before a lane launched and the read taken after it. A second fix cycle
+still has to recognise what the first cycle published, and rediscovering that
+from body shape is impossible, because a signature, a role line, and a canonical
+head declaration all become copyable the moment a real artifact is posted. So
+the ids are journalled, and every other post on the PR stays what it is:
+feedback this run cannot attribute to itself.
+
 Persistence itself fails closed. Every filesystem step of :meth:`RunState.save`
 — creating the parent, writing the temporary file, replacing the real one — is
 translated into :class:`~pr_prover.errors.StateError`, because a raw ``OSError``
@@ -87,7 +99,7 @@ from .errors import LockContention, StateError
 from .findings import Classification
 from .redaction import evidence as redact_evidence
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_ATTEMPTS = 2
 OUTCOMES = ("merge-ready", "blocked", "needs-karan")
 # The two phases of a run. ``attempt-in-flight`` means a builder was invoked (or
@@ -149,8 +161,13 @@ _SAVED_KEYS = frozenset(
         "phase",
         "attempt_head",
         "classification",
+        "verified_artifacts",
     }
 )
+# How many run-owned artifact identities one run may retain. A run publishes one
+# artifact per reviewer lane per head plus one builder fix comment per attempt,
+# so this is far above any real run and still bounds the journal.
+MAX_VERIFIED_ARTIFACTS = 64
 
 
 @dataclass
@@ -167,6 +184,14 @@ class RunState:
     phase: str = PHASE_IDLE
     attempt_head: str | None = None
     classification: Classification | None = None
+    # GitHub's own ids for the artifacts this run watched appear and verified as
+    # its own lanes' publications. Durable because a second fix cycle still has
+    # to recognise what the first cycle published: ownership is a fact about a
+    # specific id this run proved it caused, not a pattern a later read can
+    # rediscover from a body anybody could copy. Unlike the classification, it
+    # is *not* dropped when the run rebinds to a new head — an artifact this run
+    # published for an earlier head is still not human feedback.
+    verified_artifacts: tuple[str, ...] = ()
     events: list[str] = field(default_factory=list, repr=False, compare=False)
 
     # -- persistence ------------------------------------------------------
@@ -350,6 +375,35 @@ class RunState:
                     evidence={"state_file": str(path), "head": head, "finding_heads": off_head},
                 )
 
+        artifacts = raw["verified_artifacts"]
+        if not isinstance(artifacts, list):
+            raise StateError(
+                "state file verified_artifacts is not a list",
+                evidence={"state_file": str(path)},
+            )
+        if len(artifacts) > MAX_VERIFIED_ARTIFACTS:
+            raise StateError(
+                "state file records more run-owned artifacts than a run can publish",
+                evidence={
+                    "state_file": str(path),
+                    "count": len(artifacts),
+                    "limit": MAX_VERIFIED_ARTIFACTS,
+                },
+            )
+        owned: list[str] = []
+        for value in artifacts:
+            if not isinstance(value, str) or not value or len(value) > 200:
+                raise StateError(
+                    "state file verified_artifacts holds an unusable artifact id",
+                    evidence={"state_file": str(path)},
+                )
+            if value in owned:
+                raise StateError(
+                    "state file records the same run-owned artifact twice",
+                    evidence={"state_file": str(path)},
+                )
+            owned.append(value)
+
         outcome = raw["outcome"]
         if outcome is not None and outcome not in OUTCOMES:
             raise StateError(
@@ -373,6 +427,7 @@ class RunState:
             phase=phase,
             attempt_head=attempt_head,
             classification=classification,
+            verified_artifacts=tuple(owned),
         )
 
     def save(self) -> None:
@@ -398,6 +453,7 @@ class RunState:
             "classification": (
                 self.classification.as_dict() if self.classification is not None else None
             ),
+            "verified_artifacts": list(self.verified_artifacts),
         }
         body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         temporary = self.path.with_name(self.path.name + ".tmp")
@@ -458,6 +514,34 @@ class RunState:
                 evidence={"head": self.head, "finding_heads": off_head},
             )
         self.classification = classification
+
+    def remember_artifact(self, identifier: str) -> bool:
+        """Retain one artifact this run proved it published. ``False`` if already held.
+
+        The id is the only part of a published artifact a human sharing the
+        publishing account cannot reproduce: a signature, a role line, and a
+        canonical head declaration are all copyable the moment a real artifact
+        is posted, but an id this run watched appear between a pre-launch
+        snapshot and a post-launch read is one this run's own lane caused.
+        """
+        if not isinstance(identifier, str) or not identifier or len(identifier) > 200:
+            raise StateError(
+                "a run-owned artifact needs a usable GitHub id",
+                evidence={"artifact_id": redact_evidence(str(identifier), limit=200)},
+            )
+        if identifier in self.verified_artifacts:
+            return False
+        if len(self.verified_artifacts) >= MAX_VERIFIED_ARTIFACTS:
+            raise StateError(
+                "this run has retained more artifacts than a run can publish",
+                evidence={"limit": MAX_VERIFIED_ARTIFACTS},
+            )
+        self.verified_artifacts = (*self.verified_artifacts, identifier)
+        return True
+
+    def owns_artifact(self, identifier: str) -> bool:
+        """Did this run watch that exact artifact id appear and verify it?"""
+        return bool(identifier) and identifier in self.verified_artifacts
 
     def begin_attempt(self) -> int:
         """Open the next fix attempt. Attempt 3 is structurally unreachable."""
@@ -844,6 +928,7 @@ __all__ = [
     "CLEANUP_REMOVED",
     "CLEANUP_REPLACEMENT_PRESERVED",
     "MAX_ATTEMPTS",
+    "MAX_VERIFIED_ARTIFACTS",
     "OUTCOMES",
     "PHASES",
     "PHASE_ATTEMPT_IN_FLIGHT",

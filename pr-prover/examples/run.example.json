@@ -26,43 +26,104 @@
   "reviewers": [
     {
       "name": "A",
+      "role": "reviewer-a",
       "argv": [
-        "./scripts/reviewer-lane.sh",
-        "--role", "{reviewer}",
+        "/absolute/path/to/pr-prover/scripts/codex-reviewer.sh",
+        "--role", "{role}",
         "--repo", "{repo}",
         "--pr", "{pr}",
         "--head", "{head}",
-        "--worktree", "{worktree}"
+        "--base", "{base}",
+        "--worktree", "{worktree}",
+        "--artifact-file", "{artifact_file}",
+        "--signature", "Reviewed by: CodexReviewer via Hermes orchestration",
+        "--focus", "correctness, safety, failure behaviour, tests, and regressions"
       ],
+      "artifact_author": "the-reviewer-login",
+      "artifact_signature": "Reviewed by: CodexReviewer via Hermes orchestration",
+      "relay": {
+        "argv": [
+          "gh", "pr", "comment", "{pr}",
+          "--repo", "{repo}",
+          "--body-file", "{artifact_file}"
+        ],
+        "timeout": 300
+      },
       "timeout": 1800
     },
     {
       "name": "B",
+      "role": "reviewer-b",
       "argv": [
-        "./scripts/reviewer-lane.sh",
-        "--role", "{reviewer}",
+        "/absolute/path/to/pr-prover/scripts/codex-reviewer.sh",
+        "--role", "{role}",
         "--repo", "{repo}",
         "--pr", "{pr}",
         "--head", "{head}",
-        "--worktree", "{worktree}"
+        "--base", "{base}",
+        "--worktree", "{worktree}",
+        "--artifact-file", "{artifact_file}",
+        "--signature", "Reviewed by: CodexReviewer via Hermes orchestration",
+        "--focus", "architecture, maintainability, mission drift, and proportionality"
       ],
+      "artifact_author": "the-reviewer-login",
+      "artifact_signature": "Reviewed by: CodexReviewer via Hermes orchestration",
+      "relay": {
+        "argv": [
+          "gh", "pr", "comment", "{pr}",
+          "--repo", "{repo}",
+          "--body-file", "{artifact_file}"
+        ],
+        "timeout": 300
+      },
+      "timeout": 1800
+    },
+    {
+      "name": "Integration Auditor",
+      "role": "integration-auditor",
+      "argv": [
+        "/absolute/path/to/pr-prover/scripts/codex-reviewer.sh",
+        "--role", "{role}",
+        "--repo", "{repo}",
+        "--pr", "{pr}",
+        "--head", "{head}",
+        "--base", "{base}",
+        "--worktree", "{worktree}",
+        "--artifact-file", "{artifact_file}",
+        "--signature", "Reviewed by: CodexReviewer via Hermes orchestration",
+        "--focus", "the shipped configuration, prompts, parsers, GitHub readback, and exact-head outcome as one end-to-end contract, including the Reviewer A and Reviewer B artifacts already published for this head"
+      ],
+      "artifact_author": "the-reviewer-login",
+      "artifact_signature": "Reviewed by: CodexReviewer via Hermes orchestration",
+      "relay": {
+        "argv": [
+          "gh", "pr", "comment", "{pr}",
+          "--repo", "{repo}",
+          "--body-file", "{artifact_file}"
+        ],
+        "timeout": 300
+      },
       "timeout": 1800
     }
   ],
   "builder": {
     "argv": [
-      "./scripts/builder-lane.sh",
+      "/absolute/path/to/pr-prover/scripts/claude-builder.sh",
       "--repo", "{repo}",
       "--pr", "{pr}",
       "--branch", "{branch}",
+      "--base", "{base}",
       "--head", "{head}",
       "--attempt", "{attempt}",
       "--mode", "{mode}",
       "--blockers", "{blockers_file}",
-      "--worktree", "{worktree}"
+      "--worktree", "{worktree}",
+      "--signature", "Fixed by: Claude Code via Hermes orchestration",
+      "--mcp-config", "/absolute/path/to/pr-prover/examples/claude-empty-mcp.json"
     ],
     "signature": "Fixed by: Claude Code via Hermes orchestration",
     "comment_author": "the-builder-login",
+    "env_unset": ["GH_TOKEN"],
     "timeout": 2400
   }
 }

@@ -361,8 +361,9 @@ class ConfigTests(unittest.TestCase):
             "lock_file": "run.lock",
             "gates": [{"name": "tests", "argv": ["make", "test"]}],
             "reviewers": [
-                {"name": "A", "argv": ["reviewer-a", "{head}"]},
-                {"name": "B", "argv": ["reviewer-b", "{head}"]},
+                self.reviewer("A", "reviewer-a"),
+                self.reviewer("B", "reviewer-b"),
+                self.reviewer("Auditor", "integration-auditor"),
             ],
             "builder": {
                 "argv": ["builder", "{blockers_file}"],
@@ -372,6 +373,19 @@ class ConfigTests(unittest.TestCase):
         }
         body.update(overrides)
         return body
+
+    @staticmethod
+    def reviewer(name: str, role: str, **overrides: object) -> dict:
+        """One self-publishing reviewer lane, which is the smallest valid shape."""
+        lane: dict = {
+            "name": name,
+            "role": role,
+            "argv": [f"reviewer-{name.lower()}", "{head}", "{role}"],
+            "artifact_author": "the-reviewer-login",
+            "artifact_signature": "Reviewed by: CodexReviewer",
+        }
+        lane.update(overrides)
+        return lane
 
     def load(self, **overrides: object) -> RunConfig:
         return RunConfig.from_mapping(self.payload(**overrides), base_dir=self.tmp)
@@ -394,13 +408,167 @@ class ConfigTests(unittest.TestCase):
 
     def test_one_reviewer_lane_is_not_enough(self) -> None:
         with self.assertRaises(ConfigError):
-            self.load(reviewers=[{"name": "A", "argv": ["reviewer-a"]}])
+            self.load(reviewers=[self.reviewer("A", "reviewer-a")])
 
     def test_duplicate_lane_names_fail_closed(self) -> None:
         with self.assertRaises(ConfigError):
             self.load(
-                reviewers=[{"name": "A", "argv": ["a"]}, {"name": "A", "argv": ["b"]}]
+                reviewers=[
+                    self.reviewer("A", "reviewer-a"),
+                    self.reviewer("A", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
             )
+
+    def test_the_acceptance_lifecycle_must_be_the_three_required_roles_in_order(self) -> None:
+        """The auditor reconciles two artifacts, so it cannot be missing or first."""
+        for roles in (
+            ("reviewer-a", "reviewer-b"),
+            ("integration-auditor", "reviewer-a", "reviewer-b"),
+            ("reviewer-b", "reviewer-a", "integration-auditor"),
+            ("reviewer-a", "reviewer-b", "reviewer-c"),
+        ):
+            with self.subTest(roles=roles):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(
+                        reviewers=[
+                            self.reviewer(f"L{index}", role)
+                            for index, role in enumerate(roles)
+                        ]
+                    )
+                self.assertEqual(
+                    caught.exception.evidence["required_roles"],
+                    ["reviewer-a", "reviewer-b", "integration-auditor"],
+                )
+
+    def test_two_lanes_sharing_a_role_fail_closed(self) -> None:
+        """Either lane could satisfy the other's readback, which ends independence."""
+        with self.assertRaises(ConfigError):
+            self.load(
+                reviewers=[
+                    self.reviewer("A", "reviewer-a"),
+                    self.reviewer("B", "reviewer-a"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+
+    def test_a_reviewer_without_a_pinned_artifact_author_fails_closed(self) -> None:
+        lane = self.reviewer("A", "reviewer-a")
+        del lane["artifact_author"]
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    lane,
+                    self.reviewer("B", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+        self.assertIn("artifact_author", caught.exception.message)
+
+    def test_a_relay_lane_must_receive_the_artifact_file_on_both_sides(self) -> None:
+        """Neither half of the handoff can be left holding nothing."""
+        no_write = self.reviewer(
+            "A",
+            "reviewer-a",
+            relay={"argv": ["gh", "pr", "comment", "--body-file", "{artifact_file}"]},
+        )
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    no_write,
+                    self.reviewer("B", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+        self.assertIn("nowhere to prepare", caught.exception.message)
+
+        no_post = self.reviewer(
+            "A",
+            "reviewer-a",
+            argv=["reviewer-a", "{head}", "--artifact-file", "{artifact_file}"],
+            relay={"argv": ["gh", "pr", "comment"]},
+        )
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    no_post,
+                    self.reviewer("B", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+        self.assertIn("no prepared artifact to publish", caught.exception.message)
+
+    def test_a_relayed_lane_may_not_be_handed_a_github_credential(self) -> None:
+        """The relay publishes; naming a token for the judging lane contradicts that."""
+        lane = self.reviewer(
+            "A",
+            "reviewer-a",
+            argv=["reviewer-a", "{head}", "--artifact-file", "{artifact_file}"],
+            relay={"argv": ["gh", "pr", "comment", "--body-file", "{artifact_file}"]},
+            env={"GH_TOKEN": "provided-elsewhere"},
+        )
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                reviewers=[
+                    lane,
+                    self.reviewer("B", "reviewer-b"),
+                    self.reviewer("Auditor", "integration-auditor"),
+                ]
+            )
+        self.assertIn("without a GitHub credential", caught.exception.message)
+
+    def test_a_lane_may_not_retarget_the_session_the_agents_authenticate_through(
+        self,
+    ) -> None:
+        """No synthetic HOME: the trusted lanes need the real OAuth/keychain session."""
+        for variable in ("HOME", "USER", "LOGNAME", "SHELL"):
+            with self.subTest(variable=variable):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(
+                        builder={
+                            "argv": ["builder", "{blockers_file}"],
+                            "signature": "Fixed by: Claude Code",
+                            "comment_author": BUILDER_LOGIN,
+                            "env": {variable: "/tmp/synthetic"},
+                        }
+                    )
+                self.assertIn(variable, caught.exception.message)
+                with self.assertRaises(ConfigError):
+                    self.load(
+                        builder={
+                            "argv": ["builder", "{blockers_file}"],
+                            "signature": "Fixed by: Claude Code",
+                            "comment_author": BUILDER_LOGIN,
+                            "env_unset": [variable],
+                        }
+                    )
+
+    def test_a_credential_shaped_env_value_fails_closed(self) -> None:
+        """Tokens live in the keychain and in gh's auth, not in run evidence."""
+        with self.assertRaises(ConfigError) as caught:
+            self.load(
+                builder={
+                    "argv": ["builder", "{blockers_file}"],
+                    "signature": "Fixed by: Claude Code",
+                    "comment_author": BUILDER_LOGIN,
+                    "env": {"SOME_TOKEN": "ghp_examplevaluethatlookslikeacredential"},
+                }
+            )
+        self.assertIn("credential", caught.exception.message)
+
+    def test_an_unbounded_or_unrealistic_budget_is_advised_not_refused(self) -> None:
+        """Advisories are notes: a repo with a two-minute suite may know better."""
+        config = self.load(
+            builder={
+                "argv": ["builder", "{blockers_file}"],
+                "signature": "Fixed by: Claude Code",
+                "comment_author": BUILDER_LOGIN,
+                "timeout": 60,
+            }
+        )
+        notes = " ".join(config.advisories())
+        self.assertIn("builder timeout is 60s", notes)
+        self.assertIn("has no timeout", notes)
 
     def test_required_visual_qa_without_a_visual_gate_fails_closed(self) -> None:
         with self.assertRaises(ConfigError) as caught:
@@ -537,8 +705,18 @@ class CliTests(unittest.TestCase):
                     "lock_file": str(self.tmp / "run.lock"),
                     "gates": [],
                     "reviewers": [
-                        {"name": "A", "argv": ["reviewer-a", "{head}"]},
-                        {"name": "B", "argv": ["reviewer-b", "{head}"]},
+                        {
+                            "name": name,
+                            "role": role,
+                            "argv": [f"reviewer-{role}", "{head}", "{role}"],
+                            "artifact_author": "the-reviewer-login",
+                            "artifact_signature": "Reviewed by: CodexReviewer",
+                        }
+                        for name, role in (
+                            ("A", "reviewer-a"),
+                            ("B", "reviewer-b"),
+                            ("Auditor", "integration-auditor"),
+                        )
                     ],
                     "builder": {
                 "argv": ["builder", "{blockers_file}"],
@@ -552,6 +730,45 @@ class CliTests(unittest.TestCase):
 
     def test_check_config_accepts_a_valid_config(self) -> None:
         self.assertEqual(self.cli(["check-config", "--config", str(self.config_path)]), 0)
+
+    def test_check_config_accepts_the_shipped_example_and_names_the_lifecycle(self) -> None:
+        """The repository-required gate, run against the config it is run against.
+
+        ``pr-prover/bin/pr-prover check-config --config
+        pr-prover/examples/run.example.json`` is one of the checks every change
+        to this tool must pass. This drives the same entry point over the same
+        file, so the gate is exercised by the suite rather than only by whoever
+        remembers to type it.
+        """
+        example = Path(__file__).resolve().parents[1] / "examples" / "run.example.json"
+        payload = json.loads(example.read_text(encoding="utf-8"))
+        # The one field that cannot be checked in place: the example names an
+        # absolute clone path that only exists on an operator's machine.
+        payload["source_repo"] = str(self.clone)
+        local = self.tmp / "example.json"
+        local.write_text(json.dumps(payload), encoding="utf-8")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["check-config", "--config", str(local)])
+
+        self.assertEqual(code, 0)
+        printed = buffer.getvalue()
+        self.assertIn("config ok:", printed)
+        self.assertIn("reviewer-a, reviewer-b, integration-auditor", printed)
+
+    def test_check_config_prints_budget_advisories_without_failing(self) -> None:
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        payload["builder"]["timeout"] = 30
+        short = self.tmp / "short.json"
+        short.write_text(json.dumps(payload), encoding="utf-8")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["check-config", "--config", str(short)])
+
+        self.assertEqual(code, 0, "an advisory is a note, not a rejection")
+        self.assertIn("note: builder timeout is 30s", buffer.getvalue())
 
     def test_check_config_rejects_a_bad_config(self) -> None:
         bad = self.tmp / "bad.json"

@@ -101,6 +101,18 @@ class ReadbackMismatch(FailClosed):
     reason = "readback-mismatch"
 
 
+class ReviewerRelayError(FailClosed):
+    """A reviewer's artifact could not be prepared or published under its identity."""
+
+    reason = "relay-failure"
+
+
+class HumanFeedbackPresent(FailClosed):
+    """The PR carries feedback this run cannot attribute to one of its own lanes."""
+
+    reason = "human-feedback"
+
+
 class ScopeContamination(FailClosed):
     """Work appeared outside the frozen blocker set or the attempt worktree is dirty."""
 
@@ -147,6 +159,8 @@ FAILURE_CLASSES = (
     StaleHead.reason,
     AmbiguousPush.reason,
     ReadbackMismatch.reason,
+    ReviewerRelayError.reason,
+    HumanFeedbackPresent.reason,
     ScopeContamination.reason,
     BuilderRefusal.reason,
     GitHubError.reason,
@@ -261,6 +275,21 @@ _PLAYBOOK: dict[str, _Playbook] = {
         escalation=(
             "the comment cannot be posted under the configured identity, or a comment already "
             "matched before this attempt ran"
+        ),
+    ),
+    ReviewerRelayError.reason: _Playbook(
+        remediation=_STOP_ONLY,
+        escalation=(
+            "always: a reviewer artifact is the reviewer lane's own output and the relay's "
+            "own transport, and the builder never writes, edits, or republishes one"
+        ),
+    ),
+    HumanFeedbackPresent.reason: _Playbook(
+        remediation=_STOP_ONLY,
+        escalation=(
+            "always: feedback this run cannot attribute to one of its own lanes is a human "
+            "asking for something, and a builder must not fix against a PR conversation "
+            "nobody has reconciled"
         ),
     ),
     ScopeContamination.reason: _Playbook(
@@ -427,11 +456,13 @@ __all__ = [
     "FailClosed",
     "FailureRecord",
     "GitHubError",
+    "HumanFeedbackPresent",
     "LaneFailure",
     "LockContention",
     "MalformedVerdict",
     "PrProverError",
     "ReadbackMismatch",
+    "ReviewerRelayError",
     "ScopeContamination",
     "StaleHead",
     "StateError",

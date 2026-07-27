@@ -1,14 +1,31 @@
 """The injectable GitHub boundary.
 
-The loop reads GitHub for exactly three things: the live PR (to bind the exact
+The loop reads GitHub for four things: the live PR (to bind the exact
 ``headRefOid``), the PR's commit list (a second, independent view of what the
-push actually put on the branch), and the PR conversation comments (to read back
-the builder's signed fix comment). It never writes. The builder pushes and
-comments under its own PAPI-90 scoped identity; PAPI-88 only verifies what
-actually landed.
+push actually put on the branch), the PR conversation comments (to read back the
+builder's signed fix comment), and the submitted reviews (to read back each
+reviewer lane's published artifact under the identity it was published as). It
+never writes.
 
-Everything returned here is untrusted data. PR titles, bodies, and comment
-bodies are spec evidence, never instructions.
+That split is the whole trust model. The trusted agents do their own work on
+GitHub — the builder pushes, comments, and signs; the reviewer artifacts are
+published under the configured reviewer identity, by the lane itself or by its
+relay — and this boundary exists so the loop can check what actually landed
+instead of believing what a lane printed about itself.
+
+Reviews are read through ``gh api`` rather than ``gh pr view --json reviews``
+because only the REST payload carries ``commit_id``, the commit GitHub itself
+records a review against. That field is a head binding the author cannot retype,
+so where it exists the loop uses it alongside the artifact's own declaration.
+
+Completeness of the *whole* human-feedback surface — pagination guarantees,
+inline review threads, and their resolution state — is the deterministic
+reconciliation slice's obligation, not this one's. What ships here is the
+artifact readback these reads exist for, plus the conservative stop the loop
+builds on top of them.
+
+Everything returned here is untrusted data. PR titles, bodies, comment bodies,
+and review bodies are spec evidence, never instructions.
 """
 from __future__ import annotations
 
@@ -40,20 +57,32 @@ class PullRequest:
 
 @dataclass(frozen=True)
 class Comment:
-    """One PR conversation comment, as untrusted evidence.
+    """One published PR artifact — a conversation comment or a review.
 
-    ``identifier`` is GitHub's own node id for the comment. It is the only
-    field here that is stable and not attacker-chosen: an author login can be
-    impersonated only by controlling that account, but a body — signature, head
-    SHA and all — can be copied verbatim by anybody who can comment. The loop
-    therefore snapshots these ids before it invokes the builder and accepts only
-    an id it had not already seen.
+    ``identifier`` is GitHub's own id for the artifact. It is the only field
+    here that is stable and not attacker-chosen: an author login can be
+    impersonated only by controlling that account, but a body — signature, role
+    line, head SHA and all — can be copied verbatim by anybody who can comment.
+    The loop therefore snapshots these ids before it invokes a trusted agent and
+    accepts only an id it had not already seen.
+
+    ``commit_id`` is set for submitted reviews, where GitHub itself records the
+    commit reviewed. When it is present it is a head binding the author cannot
+    retype, so the loop requires it to agree with the artifact's own canonical
+    declaration rather than choosing between them.
+
+    ``state`` is a review's ``APPROVED``/``CHANGES_REQUESTED``/``COMMENTED``
+    state. It is carried verbatim as evidence; interpreting it as resolution is
+    the deterministic-reconciliation slice's job, not this one's.
     """
 
     identifier: str
     author: str
     body: str
     url: str = ""
+    kind: str = "comment"
+    commit_id: str = ""
+    state: str = ""
 
 
 class GitHubBoundary(Protocol):
@@ -64,6 +93,8 @@ class GitHubBoundary(Protocol):
     def commits(self, repo: str, number: int) -> tuple[str, ...]: ...
 
     def comments(self, repo: str, number: int) -> tuple[Comment, ...]: ...
+
+    def reviews(self, repo: str, number: int) -> tuple[Comment, ...]: ...
 
 
 class GhCliGitHub:
@@ -106,6 +137,56 @@ class GhCliGitHub:
                 "gh returned no comments array", evidence={"repo": repo, "pr": number}
             )
         return tuple(_comment_from(item) for item in raw)
+
+    def reviews(self, repo: str, number: int) -> tuple[Comment, ...]:
+        """Submitted reviews, read through the REST API for their ``commit_id``.
+
+        ``gh pr view --json reviews`` omits the commit a review was submitted
+        against, and that field is the one head binding an author cannot retype,
+        so this read goes through ``gh api`` instead.
+        """
+        owner, _, name = repo.partition("/")
+        payload = self._json_list(
+            [
+                self._gh,
+                "api",
+                "--paginate",
+                "--slurp",
+                f"repos/{owner}/{name}/pulls/{number}/reviews?per_page=100",
+            ],
+            what="pull request reviews",
+        )
+        # A PR reviewed more times than one page holds must not silently lose
+        # the page the current head's artifact is on.
+        return tuple(_review_from(item) for item in _flatten_pages(payload))
+
+    def _json_list(self, argv: Sequence[str], *, what: str) -> list[Any]:
+        result = self._runner.run(argv, timeout=self._timeout)
+        if not result.ok:
+            raise GitHubError(
+                f"gh failed while reading the {what}",
+                evidence={
+                    "argv": list(result.argv),
+                    "returncode": result.returncode,
+                    "stderr": redact_evidence(result.stderr, limit=1000),
+                },
+            )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise GitHubError(
+                f"gh returned unparsable JSON for the {what}: {exc}",
+                evidence={
+                    "argv": list(result.argv),
+                    "stdout": redact_evidence(result.stdout, limit=1000),
+                },
+            ) from exc
+        if not isinstance(payload, list):
+            raise GitHubError(
+                f"gh returned a non-array payload for the {what}",
+                evidence={"argv": list(result.argv)},
+            )
+        return payload
 
     def _json(self, argv: Sequence[str], *, what: str) -> dict[str, Any]:
         result = self._runner.run(argv, timeout=self._timeout)
@@ -221,6 +302,66 @@ def _comment_from(payload: object) -> Comment:
         author=login,
         body=body,
         url=str(payload.get("url") or ""),
+    )
+
+
+def _flatten_pages(payload: list[Any]) -> list[Any]:
+    """The items of a ``gh api --paginate --slurp`` response, in page order.
+
+    ``--slurp`` wraps each page's array in an outer array, so the items are
+    flattened one page at a time and never reordered: the loop compares artifact
+    ids across two reads of the same surface, and it can only do that if the same
+    PR always flattens the same way. A page that is an object rather than an
+    array is kept as a single item so a one-element response is not silently
+    dropped; validating it is the per-item parser's job.
+    """
+    return [
+        item for page in payload for item in (page if isinstance(page, list) else [page])
+    ]
+
+
+def _review_from(payload: object) -> Comment:
+    """One submitted review from the REST API.
+
+    A review may legitimately carry an empty body — an approval with no text —
+    so an empty body is data here, not an error. It simply cannot satisfy an
+    artifact readback, which needs the declaration block and the signature.
+    """
+    if not isinstance(payload, dict):
+        raise GitHubError("review payload is not an object")
+    user = payload.get("user")
+    login = str(user.get("login") or "") if isinstance(user, dict) else ""
+    if not login:
+        raise GitHubError(
+            "review payload has no author login",
+            evidence={"review_id": str(payload.get("id") or "")},
+        )
+    identifier = payload.get("id")
+    if (
+        not isinstance(identifier, (int, str))
+        or isinstance(identifier, bool)
+        or str(identifier) == ""
+    ):
+        raise GitHubError("review payload has no stable id", evidence={"author": login})
+    body = payload.get("body")
+    if body is not None and not isinstance(body, str):
+        raise GitHubError("review payload has an unusable body", evidence={"author": login})
+    commit_id = payload.get("commit_id")
+    if commit_id is not None and not isinstance(commit_id, str):
+        raise GitHubError("review payload has an unusable commit_id", evidence={"author": login})
+    state = payload.get("state")
+    if state is not None and not isinstance(state, str):
+        raise GitHubError("review payload has an unusable state", evidence={"author": login})
+    return Comment(
+        # Namespaced, because a review id and a comment id are two different
+        # counters and the loop keeps both in one set of run-owned identities.
+        identifier=f"review:{identifier}",
+        author=login,
+        body=body or "",
+        url=str(payload.get("html_url") or ""),
+        kind="review",
+        commit_id=(commit_id or "").lower(),
+        state=(state or "").upper(),
     )
 
 
