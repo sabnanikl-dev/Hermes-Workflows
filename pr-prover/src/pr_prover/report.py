@@ -42,6 +42,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from .config import REQUIRED_REVIEWER_ROLES
 from .findings import provenance_lines
 from .loop import NEEDS_KARAN, RunResult
 from .redaction import sanitize
@@ -109,7 +110,7 @@ def as_dict(result: RunResult) -> dict[str, Any]:
             }
             for item in result.transport
         ],
-        "transport_complete": all(item.complete for item in result.transport),
+        "transport_complete": _transport_is_complete(result),
         "classification": result.classification.as_dict() if result.classification else None,
         "classification_head": result.classification_head,
         # Whether the ledger above is evidence about the head the live PR was
@@ -126,6 +127,43 @@ def as_dict(result: RunResult) -> dict[str, Any]:
     if result.evidence:
         payload["fail_closed"] = result.evidence
     return sanitize(payload)
+
+
+def _transport_is_complete(result: RunResult) -> bool:
+    """Did the whole required artifact lifecycle reach GitHub on one exact head?
+
+    ``all(item.complete for item in result.transport)`` was vacuously true for an
+    empty ledger, so a gate that blocked before any reviewer launched, and a stop
+    before transport began, both published a positive claim that zero of the
+    three required artifacts had landed. A truncated-but-complete prefix — one
+    finished Reviewer A record and nothing else — said the same thing.
+
+    The field is a claim about the lifecycle, not about whichever records happen
+    to exist, so it is measured against the lifecycle: the required three roles,
+    in the required order, each read back on GitHub, and all of them bound to the
+    one head the ledger they support was produced against. Anything short of that
+    is incomplete, and the per-record list above is where a reader sees exactly
+    how far each one got.
+
+    This says nothing about the verdicts. Three failing reviews whose artifacts
+    all landed are complete transport and a blocked head, which is the separation
+    the field exists to preserve.
+    """
+    transport = result.transport
+    if len(transport) != len(REQUIRED_REVIEWER_ROLES):
+        return False
+    if tuple(item.role for item in transport) != REQUIRED_REVIEWER_ROLES:
+        return False
+    if not all(item.complete for item in transport):
+        return False
+    heads = {item.head for item in transport}
+    if len(heads) != 1 or not heads.pop():
+        return False
+    # The lanes ran against the head the classification is bound to; a ledger
+    # with no head at all cannot have a complete exact-head transport behind it.
+    return result.classification_head is not None and all(
+        item.head == result.classification_head for item in transport
+    )
 
 
 def _classification_head_is_current(result: RunResult) -> bool:

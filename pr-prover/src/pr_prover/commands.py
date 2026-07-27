@@ -25,11 +25,14 @@ actually behave:
   the report describes as unbounded, which is the single-value half of the
   timeout invariant.
 * **A lane is a process tree, not a process.** Each child starts in its own
-  process group, so when a budget runs out the whole group is ended rather than
-  just the one process the runner can see. A builder that spawned a test suite
-  cannot keep mutating its worktree after the loop has reported it stopped.
-  This is ordinary process hygiene for a trusted agent — the point is that the
-  loop owns what it started, not that the child is contained.
+  process group, and that group is ended on *every* completion path — the
+  ordinary exit-zero one included, not only the timeout. A builder that
+  backgrounded a test suite and then exited politely would otherwise keep
+  mutating its worktree after the loop had already recorded the lane as
+  stopped, which is a false success rather than a slow one. So the group id is
+  captured at launch and, before ``run`` returns, the runner proves nothing is
+  left in it. This is ordinary process hygiene for a trusted agent — the point
+  is that the loop owns what it started, not that the child is contained.
 * **The state stays observable.** While a child runs, ``progress`` reports
   elapsed time, bytes produced, and how long it has been quiet; when it ends,
   :class:`CommandResult` says whether it exited or timed out, and how long it
@@ -260,9 +263,14 @@ class SubprocessRunner:
                         f"could not launch {checked[0]}: {exc}",
                         evidence={"argv": list(checked)},
                     ) from exc
+                # Read while the child is certainly alive: the group outlives
+                # the process that led it, and ``os.getpgid`` stops answering
+                # once that process has been reaped.
+                group = self._launch_group(child)
                 try:
                     timed_out, quiet_seconds = self._supervise(
                         child,
+                        group,
                         argv=checked,
                         timeout=effective_timeout,
                         progress=progress,
@@ -271,8 +279,13 @@ class SubprocessRunner:
                 except BaseException:
                     # An interrupt, or a progress callback that raised, still
                     # leaves this run owning the tree it started.
-                    self._stop(child)
+                    self._stop(child, group)
                     raise
+                # The direct child ending is not the lane ending. Whatever it
+                # started is ended here, on the clean path as much as on the
+                # timeout one, so nothing this lane launched can still be
+                # writing when the caller reads the result below.
+                self._end_group(group)
             stdout = _read_text(out_path)
             stderr = _read_text(err_path)
         return CommandResult(
@@ -288,6 +301,7 @@ class SubprocessRunner:
     def _supervise(
         self,
         child: subprocess.Popen,
+        group: int | None,
         *,
         argv: tuple[str, ...],
         timeout: float | None,
@@ -317,7 +331,7 @@ class SubprocessRunner:
                 last_bytes = written
                 last_output = now
             if timeout is not None and now - started >= timeout:
-                self._stop(child)
+                self._stop(child, group)
                 return True, now - last_output
             if progress is not None and now - last_report >= self.progress_interval:
                 last_report = now
@@ -334,15 +348,14 @@ class SubprocessRunner:
             last_output = now
         return False, now - last_output
 
-    def _stop(self, child: subprocess.Popen) -> None:
+    def _stop(self, child: subprocess.Popen, group: int | None) -> None:
         """End a lane that ran out of budget: ask the tree first, then insist.
 
-        The lane is its whole process group. A builder that started a test suite
-        or an agent of its own can exit politely while what it started keeps
-        running, so the group is always ended — not only when the direct child
-        ignored the polite stop — before the runner reports the lane stopped.
+        This ends the direct child. :meth:`_end_group` is what then proves the
+        rest of the tree went with it, and it runs on every completion path, so
+        a lane that exited on its own is held to the same standard as one that
+        was stopped here.
         """
-        group = self._group(child)
         self._signal(child, group, hard=False)
         try:
             child.wait(timeout=self.kill_grace)
@@ -354,19 +367,75 @@ class SubprocessRunner:
         except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL is not refusable
             pass
 
-    def _group(self, child: subprocess.Popen) -> int | None:
+    def _end_group(self, group: int | None) -> None:
+        """Leave nothing of this lane running once the lane has finished.
+
+        The invariant the loop depends on is not "the direct child exited" but
+        "the tree this run started is gone", and those come apart exactly where
+        it matters: a builder or reviewer can background a test runner, print a
+        clean marker, and exit zero while what it started keeps writing into the
+        worktree the loop is about to judge. So the launched group is checked
+        here on every path out, politely ended if anything is still in it, and
+        then insisted upon.
+
+        The ordinary case — a ``git`` call, a lane that started nothing — is a
+        group that is already empty, which costs one signal probe and returns.
+        """
+        if group is None or not self._group_alive(group):
+            return
+        self._signal_group(group, hard=False)
+        if self._await_group_exit(group):
+            return
+        self._signal_group(group, hard=True)
+        self._await_group_exit(group)
+
+    def _launch_group(self, child: subprocess.Popen) -> int | None:
         """This lane's process group, or ``None`` when it cannot be one safely.
 
-        A lane that somehow shares this process's own group is never signalled
-        as a group: ending it that way would end the prover with it.
+        Read once at launch, because the group can outlive the child that led
+        it and ``os.getpgid`` answers only while that child is unreaped.
+        ``start_new_session`` makes the child its own group leader, so the group
+        id is the child's pid; a lane that somehow shares this process's own
+        group is never signalled as a group, since ending it that way would end
+        the prover with it.
         """
         if not _POSIX:
             return None
         try:
             group = os.getpgid(child.pid)
-        except OSError:  # already reaped, or no such process
-            return None
+        except OSError:  # pragma: no cover - the child has not been waited on yet
+            group = child.pid
         return None if group == os.getpgrp() else group
+
+    def _group_alive(self, group: int) -> bool:
+        """Is anything — running or not yet reaped — still in this group?"""
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:  # pragma: no cover - a member changed credentials
+            return True
+        except OSError:  # pragma: no cover - defensive
+            return False
+        return True
+
+    def _await_group_exit(self, group: int) -> bool:
+        """Wait up to the kill grace for the group to empty. Never longer."""
+        deadline = time.monotonic() + max(self.kill_grace, 0.0)
+        while True:
+            if not self._group_alive(group):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(min(self.poll_interval, 0.05))
+
+    def _signal_group(self, group: int, *, hard: bool) -> None:
+        try:
+            os.killpg(group, signal.SIGKILL if hard else signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError:  # pragma: no cover - permission loss mid-run
+            return
 
     def _signal(self, child: subprocess.Popen, group: int | None, *, hard: bool) -> None:
         """Signal the whole group, falling back to the one child it holds."""

@@ -14,6 +14,14 @@ builder templates also get ``{attempt}``, ``{mode}`` (``initial`` or
 ``corrective``), and ``{blockers_file}``. Both file paths live under the OS temp
 directory, never inside a repo.
 
+``schema_version`` is ``2``. Version 1 described a genuinely different shape —
+reviewers were a free list of lanes with no required role, artifact author, or
+artifact signature — so the version was bumped rather than left describing two
+incompatible files. A v1 config is refused with the ordered upgrade steps rather
+than migrated: there are four of them, they are mechanical, and a migration
+layer would be more machinery than the break is worth. The state journal's own
+schema version is independent and unaffected.
+
 The ``reviewers`` array is the acceptance lifecycle, not a free list of lanes:
 it must be exactly ``reviewer-a``, ``reviewer-b``, and ``integration-auditor``,
 in that order. The loop runs the lanes in the order given, and the auditor's job
@@ -70,7 +78,26 @@ from .commands import validate_argv
 from .errors import ConfigError
 from .reviewers import CREDENTIAL_ENV
 
-SCHEMA_VERSION = 1
+# Version 2 is the acceptance-lifecycle shape. Version 1 described a config
+# whose reviewers were a free list of lanes; this one requires each lane to
+# declare its ``role``, ``artifact_author``, and ``artifact_signature``, requires
+# exactly the three ordered roles, and gives a relayed lane an artifact-file
+# handoff. A v1 file is not a v1 file with a few fields missing — it denotes a
+# different, incompatible shape — so the discriminator says so rather than
+# leaving the old version number over new semantics.
+SCHEMA_VERSION = 2
+# What a v1 config has to gain to become a v2 one. Deterministic, ordered, and
+# free of anything read out of the file, because this text is printed by the
+# same structured failure path an operator sees for any other config stop.
+_V1_UPGRADE_STEPS = (
+    "give every reviewer lane a 'role' of exactly reviewer-a, reviewer-b, or "
+    "integration-auditor, one each, listed in that order",
+    "give every reviewer lane an 'artifact_author' login and an "
+    "'artifact_signature' line its published artifact must carry",
+    "point each relayed lane's argv at '{artifact_file}' and give it a 'relay' "
+    "command that publishes that file",
+    "set 'schema_version' to 2",
+)
 GATE_KINDS = ("baseline", "visual")
 # The acceptance lifecycle, as configuration rather than operator convention.
 #
@@ -348,10 +375,30 @@ class RunConfig:
         unknown = sorted(set(raw) - _TOP_LEVEL_KEYS)
         if unknown:
             raise ConfigError("config has unknown keys", evidence={"unknown_keys": unknown})
-        if raw.get("schema_version") != SCHEMA_VERSION:
+        found = raw.get("schema_version")
+        if found != SCHEMA_VERSION:
+            # A v1 file is the one unsupported version this tool can name, so it
+            # gets the upgrade rather than the generic refusal. Nothing from the
+            # file is echoed: the version is a small integer the operator wrote,
+            # and the steps are fixed text. ``True == 1`` in Python, so the type
+            # is checked exactly — a boolean here is a malformed field, not a
+            # previous release.
+            if type(found) is int and found == 1:
+                raise ConfigError(
+                    "config schema_version 1 is no longer supported: version 2 requires "
+                    "the ordered reviewer-a, reviewer-b, integration-auditor lifecycle "
+                    "with a declared role, artifact author, and artifact signature per "
+                    "lane. Upgrade this file: "
+                    + "; ".join(f"({index}) {step}" for index, step in enumerate(_V1_UPGRADE_STEPS, 1)),
+                    evidence={
+                        "found": 1,
+                        "expected": SCHEMA_VERSION,
+                        "upgrade": list(_V1_UPGRADE_STEPS),
+                    },
+                )
             raise ConfigError(
                 "config schema_version is not supported",
-                evidence={"found": raw.get("schema_version"), "expected": SCHEMA_VERSION},
+                evidence={"found": found, "expected": SCHEMA_VERSION},
             )
 
         repo = raw.get("repo")
@@ -364,11 +411,38 @@ class RunConfig:
         root = Path(base_dir).resolve() if base_dir is not None else Path.cwd()
 
         def resolve(key: str) -> Path:
+            """One configured path field, or a structured stop.
+
+            "Valid JSON" and "a usable path" are not the same claim, and the gap
+            between them is reachable from an ordinary file: ``"bad\\u0000path"``
+            is a perfectly good JSON string that ``Path.resolve`` refuses with a
+            raw ``ValueError``, which the CLI — catching only ``PrProverError`` —
+            would let out as a traceback instead of the documented
+            ``invalid-config`` record and exit 64. So every way this can fail is
+            translated here, and the value itself is never echoed: a path is
+            operator-supplied text that may carry a token or a credential-shaped
+            segment, and the key alone says which field to fix.
+            """
             value = raw.get(key)
             if not isinstance(value, str) or not value:
                 raise ConfigError(f"config {key} must be a non-empty path", evidence={"key": key})
-            candidate = Path(value).expanduser()
-            return candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+            if "\x00" in value:
+                raise ConfigError(
+                    f"config {key} contains a NUL byte and is not a usable path",
+                    evidence={"key": key},
+                )
+            try:
+                candidate = Path(value).expanduser()
+                return (
+                    candidate.resolve()
+                    if candidate.is_absolute()
+                    else (root / candidate).resolve()
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ConfigError(
+                    f"config {key} could not be resolved to a filesystem path",
+                    evidence={"key": key, "error": type(exc).__name__},
+                ) from exc
 
         visual_required = raw.get("visual_qa_required", False)
         if not isinstance(visual_required, bool):

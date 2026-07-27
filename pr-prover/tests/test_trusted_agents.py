@@ -161,6 +161,77 @@ class SubprocessRunnerTests(unittest.TestCase):
             "a process the lane started outlived the lane's own budget",
         )
 
+    def test_a_cleanly_exiting_lane_cannot_leave_a_writer_behind(self) -> None:
+        """The false-success case: exit 0 with the real work still running.
+
+        A builder or reviewer that backgrounds a test runner, prints its clean
+        marker and exits is indistinguishable, from the direct child's exit
+        status alone, from one that finished. If only the timeout path ended the
+        group, this lane would be recorded as stopped while a descendant went on
+        writing into the worktree the loop is about to judge — so the writer must
+        not be able to advance a single byte after ``run`` returns.
+        """
+        witness = self.tmp / "descendant.log"
+        script = (
+            f"( while true; do printf x >> {witness}; sleep 0.02; done ) "
+            ">/dev/null 2>&1 & exit 0"
+        )
+        runner = SubprocessRunner(poll_interval=0.02, kill_grace=1.0)
+
+        result = runner.run(self.sh(script), timeout=30)
+
+        self.assertTrue(result.ok, "the direct child really did exit zero")
+        self.assertFalse(result.timed_out)
+        self.assertEqual(result.state, EXITED)
+        at_return = witness.stat().st_size if witness.exists() else 0
+        time.sleep(0.4)
+        after = witness.stat().st_size if witness.exists() else 0
+        self.assertEqual(
+            after,
+            at_return,
+            "a descendant kept writing after the lane was reported finished",
+        )
+
+    def test_the_launched_group_is_empty_once_a_clean_run_returns(self) -> None:
+        """Stated directly, rather than inferred from a witness file.
+
+        ``start_new_session`` makes the lane its own group leader, so the shell's
+        ``$$`` is the group id this run owns. Nothing may still be in it.
+        """
+        script = "( sleep 30 ) >/dev/null 2>&1 & echo $$; exit 0"
+        runner = SubprocessRunner(poll_interval=0.02, kill_grace=1.0)
+
+        result = runner.run(self.sh(script), timeout=30)
+
+        self.assertTrue(result.ok)
+        group = int(result.stdout.split()[0])
+        self.assertNotEqual(group, os.getpgrp(), "the lane had a group of its own")
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(group, 0)
+
+    def test_a_nonzero_exit_ends_the_tree_too(self) -> None:
+        """Failing is not an excuse to leave the tree running."""
+        script = "( sleep 30 ) >/dev/null 2>&1 & echo $$; exit 3"
+        runner = SubprocessRunner(poll_interval=0.02, kill_grace=1.0)
+
+        result = runner.run(self.sh(script), timeout=30)
+
+        self.assertEqual(result.returncode, 3)
+        self.assertFalse(result.ok)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(int(result.stdout.split()[0]), 0)
+
+    def test_a_lane_that_started_nothing_still_returns_promptly(self) -> None:
+        """The cleanup must cost an empty group a probe, not a grace period."""
+        runner = SubprocessRunner(poll_interval=0.02, kill_grace=5.0)
+
+        started = time.monotonic()
+        result = runner.run(self.sh("printf quick"), timeout=30)
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(result.ok)
+        self.assertLess(elapsed, 2.0, "an empty group must not wait out the kill grace")
+
     def test_a_lane_runs_in_its_own_process_group(self) -> None:
         """Which is what makes ending the tree possible without ending the prover."""
         runner = SubprocessRunner()

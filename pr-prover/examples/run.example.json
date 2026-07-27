@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "repo": "owner/name",
   "pr": 89,
   "branch": "feat/example-branch",

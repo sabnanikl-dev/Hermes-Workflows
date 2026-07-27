@@ -51,6 +51,22 @@ ships.
 
 ## Configuration
 
+`schema_version` is **`2`**. Version 1 described a different, incompatible file:
+its `reviewers` were a free list of lanes, with no required `role`,
+`artifact_author`, or `artifact_signature` and no fixed three-role lifecycle. One
+version number cannot truthfully denote both shapes, so the discriminator was
+bumped rather than left in place over new semantics. A v1 file is refused with
+the four ordered upgrade steps printed as a structured `invalid-config` record —
+there is no migration layer, because the edit is mechanical and a migration would
+be more machinery than the break is worth. The state journal keeps its own schema
+version, which is independent of this one.
+
+Every path field — `source_repo`, `worktree_root`, `state_file`, `lock_file` —
+is validated before it is resolved. A string that is valid JSON but not a usable
+path (an embedded NUL is the reachable case) is an `invalid-config` record and
+exit 64, not a `ValueError` traceback, and the record names the field rather than
+echoing the value back.
+
 Every child command is an **argv array**. Templates substitute only these
 tokens, and an unknown token fails the run rather than rendering literally:
 
@@ -58,7 +74,7 @@ tokens, and an unknown token fails the run rather than rendering literally:
 |---|---|---|
 | `{repo}` `{owner}` `{name}` `{pr}` | all lanes | from config |
 | `{branch}` `{base}` `{head}` | all lanes | from the **live** PR, never from config alone |
-| `{worktree}` | all lanes | the fresh worktree this lane runs in |
+| `{worktree}` | all lanes | this lane's own fresh worktree, at the exact head |
 | `{reviewer}` `{role}` | reviewer lanes | the lane name, and the mission role it runs as |
 | `{artifact_file}` | reviewer lanes and their relay | where this lane prepares its artifact, under the OS temp directory |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
@@ -152,9 +168,12 @@ output cannot establish:
 - **Silence is not a hang.** Elapsed time, bytes produced, and how long a lane
   has been quiet are recorded while it runs and reported when it ends. A builder
   can buffer its stdout for twenty minutes; that is written down, never acted on.
-- **A lane is a process tree.** Each child starts in its own process group, so a
-  builder that spawned a test suite cannot keep mutating its worktree after the
-  loop has reported it stopped.
+- **A lane is a process tree.** Each child starts in its own process group, and
+  that group is ended on *every* path out of the runner — the ordinary exit-zero
+  one as much as the timeout. A builder that backgrounds a test suite, prints a
+  clean marker, and exits politely would otherwise keep mutating its worktree
+  after the loop has recorded the lane as stopped, which is a false success
+  rather than a slow one. Before `run` returns, the group is proved empty.
 
 ## The reviewer artifact lifecycle
 
@@ -198,6 +217,16 @@ the canonical declaration in every case.
 
 A lane without a `relay` publishes for itself. It is still read back the same
 way; only the transport differs.
+
+The report's `transport_complete` is a claim about that whole lifecycle, not
+about whichever records happen to exist: three records, the required roles in the
+required order, each read back on GitHub, and all of them bound to the one head
+the ledger they support was produced against. An empty ledger — a gate that
+blocked before any reviewer launched, a stop before transport began — is not
+complete, and neither is a finished Reviewer A record with nothing after it. Per
+record, the `transport` list says exactly how far that one got. None of this is a
+verdict: three failing reviews whose artifacts all landed are complete transport
+and a blocked head.
 
 ## What this run owns, and what it does not
 
@@ -540,6 +569,17 @@ bounded with explicit markers.
 - Every attempt gets a fresh worktree, detached at one verified SHA. An existing
   path is refused rather than reused, and worktrees this run did not create
   cannot be removed.
+- **So does every gate and every reviewer lane, one each.** The acceptance
+  lifecycle is sequential, so a shared checkout would put whatever Reviewer A
+  left behind in front of Reviewer B and then the Integration Auditor — the two
+  lanes whose verdicts decide `merge-ready` — while all three artifacts still
+  declared the committed head. Each lane's own checkout is proved clean and
+  sitting on exactly the bound SHA both before it is launched and after it
+  returns; a lane that wrote into the tree it was judging stops the run as
+  `scope-contamination` and keeps its worktree for inspection, and a successful
+  lane's worktree is removed. A relay shares its reviewer's checkout rather than
+  taking one of its own: it publishes a file that already lives outside every
+  repository.
 - The frozen blocker set is written under the OS temp directory, never inside a
   repository, so a builder's inputs cannot contaminate the diff.
 - The state file and the lockfile must live outside the operational clone, so

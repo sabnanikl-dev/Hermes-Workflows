@@ -27,7 +27,7 @@ from _support import (
     make_source_repo,
     reviewer_output,
 )
-from pr_prover.errors import StateError
+from pr_prover.errors import ScopeContamination, StateError
 from pr_prover.findings import Finding
 from pr_prover.loop import BLOCKED, MERGE_READY, NEEDS_KARAN, ProverLoop
 from pr_prover.state import (
@@ -150,6 +150,151 @@ class CleanPassTests(LoopHarness):
         artifact = Path(argv[argv.index("--artifact-file") + 1])
         self.assertTrue(artifact.name.startswith("reviewer-A-"))
         self.assertFalse(artifact.is_relative_to(self.source_repo))
+
+
+class LaneWorktreeIsolationTests(LoopHarness):
+    """M9's "each lane uses a fresh run-owned worktree" as a checked fact.
+
+    The reproduced defect: gates, Reviewer A, Reviewer B, and the Integration
+    Auditor all ran in one shared checkout, so anything an earlier lane wrote was
+    sitting in front of the lane whose verdict decides ``merge-ready`` — while
+    every artifact still declared the committed head.
+    """
+
+    WITNESS = "reviewer-a-scratch.md"
+
+    def a_writes_into_its_own_checkout(self) -> None:
+        """Script Reviewer A to leave an untracked file where it ran."""
+
+        def leave_a_witness() -> None:
+            cwd = Path(self.runner.calls[-1].cwd)
+            (cwd / self.WITNESS).write_text("A generated this\n", encoding="utf-8")
+
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A), after=leave_a_witness)
+
+    def lane_cwds(self) -> list[str]:
+        return [call.cwd for call in self.runner.calls if call.argv[0].startswith("lane-")]
+
+    def test_every_gate_and_reviewer_lane_gets_a_checkout_of_its_own(self) -> None:
+        loop = self.build(gates=[{"name": "tests", "argv": ["lane-gate"]}])
+        self.script.add("lane-gate", "")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        # One per gate and one per reviewer. The relay shares its reviewer's,
+        # because it publishes a file that lives outside every repository.
+        judging = [
+            call.cwd
+            for call in self.runner.calls
+            if call.argv[0].startswith("lane-") and call.argv[0] != "lane-relay"
+        ]
+        self.assertEqual(len(judging), 4, "one gate lane and three reviewer lanes ran")
+        self.assertEqual(len(set(judging)), 4, f"lanes shared a checkout: {judging}")
+
+    def test_a_lane_starts_in_a_checkout_holding_nothing_but_the_head(self) -> None:
+        seen: dict[str, list[str]] = {}
+
+        def record(label: str):
+            def _observe() -> None:
+                cwd = Path(self.runner.calls[-1].cwd)
+                seen[label] = sorted(item.name for item in cwd.iterdir() if item.name != ".git")
+
+            return _observe
+
+        loop = self.build()
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A), after=record("A"))
+        self.script.add("lane-reviewer-B", reviewer_output(HEAD_A), after=record("B"))
+        self.script.add(
+            "lane-reviewer-Auditor", reviewer_output(HEAD_A), after=record("Auditor")
+        )
+
+        self.assertEqual(loop.run().outcome, MERGE_READY)
+        self.assertEqual(seen, {"A": [], "B": [], "Auditor": []})
+
+    def test_a_mutation_by_reviewer_a_never_reaches_the_lanes_that_judge_after_it(self) -> None:
+        """The exact probe the reviewers ran, now with the opposite answer."""
+        loop = self.build()
+        self.a_writes_into_its_own_checkout()
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "scope-contamination")
+        self.assertEqual(result.evidence["evidence"]["lane"], "reviewer A")
+        self.assertEqual(result.evidence["evidence"]["when"], "after")
+        self.assertIn(self.WITNESS, result.evidence["evidence"]["git_status"])
+        # A's own relay still publishes what A prepared — it reads a file from
+        # outside every repository. What must not happen is a *later* judging
+        # lane forming a verdict in a checkout an earlier reviewer wrote into.
+        launched = [call.argv[0] for call in self.runner.calls if call.argv[0].startswith("lane-")]
+        self.assertEqual(launched, ["lane-reviewer-A", "lane-relay"])
+        self.assertNotIn("lane-reviewer-B", launched)
+        self.assertNotIn("lane-reviewer-Auditor", launched)
+
+    def test_the_contaminated_lane_keeps_its_worktree_and_the_clean_ones_do_not(self) -> None:
+        loop = self.build()
+        self.a_writes_into_its_own_checkout()
+
+        result = loop.run()
+
+        retained = [path for path in result.retained_paths if "worktrees" in path]
+        self.assertEqual(len(retained), 1)
+        self.assertTrue(retained[0].endswith("reviewer-a"))
+        self.assertTrue((Path(retained[0]) / self.WITNESS).exists(), "kept for inspection")
+
+    def test_a_second_lane_cannot_see_what_a_failed_first_lane_left(self) -> None:
+        """The isolation itself, at the seam, with no stop in the way.
+
+        The run-level test above proves a contaminated lane stops before the next
+        one starts. This proves the other half: the next lane's checkout is a
+        different directory that never held the first lane's file.
+        """
+        loop = self.build()
+        first: Path | None = None
+
+        with self.assertRaises(ScopeContamination):
+            with loop._lane_worktree("pr7-aaaaaaaaaaaa-lane-one", HEAD_A, lane="lane one") as one:
+                first = one
+                (one / self.WITNESS).write_text("A generated this\n", encoding="utf-8")
+
+        assert first is not None
+        self.assertTrue((first / self.WITNESS).exists(), "the failed lane's tree is retained")
+        with loop._lane_worktree("pr7-aaaaaaaaaaaa-lane-two", HEAD_A, lane="lane two") as two:
+            self.assertNotEqual(two, first)
+            self.assertFalse((two / self.WITNESS).exists())
+
+    def test_a_lane_checkout_that_is_not_the_bound_head_fails_closed(self) -> None:
+        """A fresh path is not the claim; sitting on the exact SHA is."""
+        loop = self.build()
+        self.runner.lane_worktree_head = HEAD_C
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        evidence = result.evidence["evidence"]
+        self.assertEqual(evidence["bound_head"], HEAD_A)
+        self.assertEqual(evidence["local_head"], HEAD_C)
+        self.assertEqual(evidence["when"], "before", "checked before the lane was launched")
+        self.assertFalse(
+            [call for call in self.runner.calls if call.argv[0].startswith("lane-")],
+            "no lane runs in a checkout that is not the head this run is bound to",
+        )
+
+    def test_every_lane_worktree_is_gone_after_a_clean_run(self) -> None:
+        loop = self.build(gates=[{"name": "tests", "argv": ["lane-gate"]}])
+        self.script.add("lane-gate", "")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.retained_paths, ())
+        self.assertEqual(list((self.tmp / "worktrees").iterdir()), [])
 
 
 class NeedsKaranClassificationTests(LoopHarness):
@@ -1367,13 +1512,18 @@ class LocalHeadAgreementTests(LoopHarness):
         result = loop.run()
 
         self.assertEqual(result.outcome, MERGE_READY)
+        # Gate and reviewer lanes read their own worktree's HEAD too, as part of
+        # proving each lane really is on the bound SHA, so the count that means
+        # something here is the reads against the attempt worktree specifically.
         rev_parse = [
             call
             for call in self.runner.calls
-            if call.argv[0] == "git" and call.argv[3] == "rev-parse" and call.argv[4] == "HEAD"
+            if call.argv[0] == "git"
+            and call.argv[3] == "rev-parse"
+            and call.argv[4] == "HEAD"
+            and "attempt1" in call.argv[2]
         ]
         self.assertEqual(len(rev_parse), 1, "the attempt worktree's HEAD is read exactly once")
-        self.assertIn("attempt1", rev_parse[0].argv[2])
         self.assertIn(
             f"attempt worktree local HEAD agrees with the landed head {HEAD_B}", result.events
         )

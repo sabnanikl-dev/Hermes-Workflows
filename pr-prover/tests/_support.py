@@ -17,6 +17,7 @@ and :attr:`FakeRunner.relay_failures` makes the transport half fail.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from collections import deque
@@ -351,7 +352,21 @@ class FakeRunner:
         self.remote = remote
         self.script = script or LaneScript()
         self.calls: list[Call] = []
+        # ``git status --porcelain`` inside an *attempt* worktree. Lane
+        # worktrees are not covered by this: each gate and reviewer lane now has
+        # a checkout of its own, and the only honest way to model "the lane
+        # dirtied its own tree" is to report what is really in that directory,
+        # which is what :meth:`_porcelain` does.
         self.worktree_status = ""
+        # ``git rev-parse HEAD`` inside a gate or reviewer worktree. ``None``
+        # answers with the SHA that worktree was actually created at, the way a
+        # detached checkout does — it does not follow the branch. A test pins
+        # this to model a lane whose checkout moved underneath it.
+        self.lane_worktree_head: str | None = None
+        # Where each run-owned worktree was checked out, recorded by
+        # ``git worktree add`` exactly as the real command's ``<commit-ish>``
+        # argument would fix it.
+        self.worktree_oids: dict[str, str] = {}
         self.fetch_failures = 0
         # ``git merge-base --is-ancestor`` runs this many times as an error
         # (exit 128) before answering, so "the ancestry question could not be
@@ -451,7 +466,12 @@ class FakeRunner:
                 return CommandResult(argv=argv, returncode=1, stdout="", stderr="fetch refused")
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         if rest[0] == "rev-parse" and rest[1] == "HEAD":
-            head = self.remote.head if self.worktree_head is None else self.worktree_head
+            if _is_attempt(argv[2]):
+                head = self.remote.head if self.worktree_head is None else self.worktree_head
+            elif self.lane_worktree_head is not None:
+                head = self.lane_worktree_head
+            else:
+                head = self.worktree_oids.get(str(Path(argv[2]).resolve()), self.remote.head)
             return CommandResult(argv=argv, returncode=0, stdout=head + "\n", stderr="")
         if rest[0] == "rev-parse":
             head = self.remote.head if self.remote_ref_head is None else self.remote_ref_head
@@ -475,18 +495,49 @@ class FakeRunner:
             path = Path(rest[3])
             path.mkdir(parents=True, exist_ok=False)
             (path / ".git").write_text("gitdir: fake\n", encoding="utf-8")
+            self.worktree_oids[str(path.resolve())] = rest[4]
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         if rest[0] == "worktree" and rest[1] == "remove":
-            shutil.rmtree(Path(rest[3]), ignore_errors=True)
+            path = Path(rest[3])
+            self.worktree_oids.pop(str(path.resolve()), None)
+            shutil.rmtree(path, ignore_errors=True)
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         if rest[0] == "status":
-            return CommandResult(argv=argv, returncode=0, stdout=self.worktree_status, stderr="")
+            status = (
+                self.worktree_status if _is_attempt(argv[2]) else _porcelain(Path(argv[2]))
+            )
+            return CommandResult(argv=argv, returncode=0, stdout=status, stderr="")
         raise AssertionError(f"unexpected git call: {list(argv)}")
 
     # -- assertions -------------------------------------------------------
     def git_subcommands(self, repo_path: Path) -> list[str]:
         target = str(Path(repo_path).resolve())
         return [call.argv[3] for call in self.calls if call.argv[0] == "git" and call.argv[2] == target]
+
+
+_ATTEMPT = re.compile(r"-attempt\d+\Z")
+
+
+def _is_attempt(path: str) -> bool:
+    """Is this the builder's attempt worktree rather than a gate/reviewer lane's?
+
+    The two are modelled differently on purpose. An attempt worktree's ``git``
+    answers are scripted, because the tests there are about a builder that
+    pushed from somewhere else or left the tree dirty. A lane worktree's answers
+    are read off the real directory, because the tests there are about one lane
+    writing a file the next lane must not be able to see.
+    """
+    return bool(_ATTEMPT.search(Path(path).name))
+
+
+def _porcelain(path: Path) -> str:
+    """``git status --porcelain`` over what is actually in a lane's checkout."""
+    if not path.is_dir():
+        return ""
+    return "".join(
+        f"?? {item.name}\n" for item in sorted(path.iterdir(), key=lambda item: item.name)
+        if item.name != ".git"
+    )
 
 
 def _flag(argv: Sequence[str], name: str) -> str:
@@ -545,7 +596,7 @@ def make_config(
     reviewers: Sequence[Mapping[str, object]] | None = None,
 ) -> RunConfig:
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "repo": "example/repo",
         "pr": 7,
         "branch": branch,

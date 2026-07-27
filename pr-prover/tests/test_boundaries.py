@@ -11,7 +11,8 @@ from pathlib import Path
 from _support import BUILDER_LOGIN, HEAD_A, make_finding, make_source_repo
 from pr_prover import cli, redaction
 from pr_prover.commands import CommandResult
-from pr_prover.config import RunConfig
+from pr_prover.config import _V1_UPGRADE_STEPS as V1_UPGRADE_STEPS
+from pr_prover.config import SCHEMA_VERSION, RunConfig
 from pr_prover.errors import CommandContractError, ConfigError, GitHubError, StateError
 from pr_prover.findings import Finding, classify
 from pr_prover.github import GhCliGitHub
@@ -352,7 +353,7 @@ class ConfigTests(unittest.TestCase):
 
     def payload(self, **overrides: object) -> dict:
         body: dict = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "repo": "example/repo",
             "pr": 7,
             "source_repo": str(self.clone),
@@ -395,6 +396,103 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.state_file, self.tmp / "state.json")
         self.assertEqual(config.owner, "example")
         self.assertEqual(config.name, "repo")
+
+    # -- the versioned break --------------------------------------------------
+    def test_the_shipped_schema_version_is_two(self) -> None:
+        """PAPI90-B-P1-003: the discriminator names the shape it describes.
+
+        This head made the old shape invalid — reviewers gained a required role,
+        artifact author, and artifact signature, and the lifecycle became three
+        exact ordered roles — while still accepting only version 1. One number
+        cannot truthfully denote two incompatible files.
+        """
+        self.assertEqual(SCHEMA_VERSION, 2)
+        self.assertEqual(self.load().source, None)
+
+    def test_a_schema_v1_config_is_refused_with_the_upgrade_steps(self) -> None:
+        with self.assertRaises(ConfigError) as caught:
+            self.load(schema_version=1)
+
+        error = caught.exception
+        self.assertEqual(error.reason, "invalid-config")
+        self.assertEqual(error.evidence["found"], 1)
+        self.assertEqual(error.evidence["expected"], 2)
+        self.assertEqual(error.evidence["upgrade"], list(V1_UPGRADE_STEPS))
+        self.assertIn("schema_version 1 is no longer supported", error.message)
+        self.assertIn("set 'schema_version' to 2", error.message)
+
+    def test_the_v1_refusal_is_deterministic(self) -> None:
+        """Same input, same words: this text is read by a builder, not a human."""
+        messages = set()
+        for _ in range(3):
+            with self.assertRaises(ConfigError) as caught:
+                self.load(schema_version=1)
+            messages.add(json.dumps(caught.exception.as_dict(), sort_keys=True))
+        self.assertEqual(len(messages), 1)
+
+    def test_an_unknown_future_version_gets_the_generic_refusal(self) -> None:
+        for version in (0, 3, "2", None, True):
+            with self.subTest(version=version):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(schema_version=version)
+                self.assertEqual(caught.exception.reason, "invalid-config")
+                self.assertNotIn("upgrade", caught.exception.evidence)
+
+    def test_the_shipped_example_declares_the_supported_version(self) -> None:
+        example = Path(__file__).resolve().parents[1] / "examples" / "run.example.json"
+        payload = json.loads(example.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], SCHEMA_VERSION)
+
+    def test_the_state_journal_version_is_independent_of_the_config_one(self) -> None:
+        """Bumping one must not be read as bumping the other."""
+        from pr_prover.state import SCHEMA_VERSION as STATE_SCHEMA_VERSION
+
+        self.assertEqual(STATE_SCHEMA_VERSION, 4)
+        self.assertNotEqual(STATE_SCHEMA_VERSION, SCHEMA_VERSION)
+
+    # -- every configured path field, over the whole range of bad values ----
+    PATH_FIELDS = ("source_repo", "worktree_root", "state_file", "lock_file")
+
+    def test_a_nul_containing_path_is_a_structured_config_error(self) -> None:
+        """RA-P1-003: valid JSON that ``Path.resolve`` refuses is still config.
+
+        ``"bad\\u0000path"`` parses as JSON and reaches ``Path.resolve``, which
+        raises a bare ``ValueError`` the CLI does not catch. Every path field is
+        checked, because one translated field would only move the traceback.
+        """
+        for key in self.PATH_FIELDS:
+            with self.subTest(field=key):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(**{key: "bad\x00path"})
+                self.assertEqual(caught.exception.reason, "invalid-config")
+                self.assertEqual(caught.exception.evidence, {"key": key})
+                self.assertIn(key, caught.exception.message)
+
+    def test_a_rejected_path_is_never_echoed_back(self) -> None:
+        """The value is operator text; the field name is what needs fixing."""
+        hostile = "/tmp/ghp_0123456789abcdefghijABCDEFGHIJ0123\x00/x"
+        for key in self.PATH_FIELDS:
+            with self.subTest(field=key):
+                with self.assertRaises(ConfigError) as caught:
+                    self.load(**{key: hostile})
+                rendered = json.dumps(caught.exception.as_dict())
+                self.assertNotIn("ghp_", rendered)
+                self.assertNotIn("\\u0000", rendered)
+
+    def test_every_other_unusable_path_value_is_the_same_structured_stop(self) -> None:
+        for key in self.PATH_FIELDS:
+            for label, value in (
+                ("missing", None),
+                ("empty", ""),
+                ("wrong type", 7),
+                ("a list", ["/tmp"]),
+                ("null", None),
+            ):
+                with self.subTest(field=key, value=label):
+                    with self.assertRaises(ConfigError) as caught:
+                        self.load(**{key: value})
+                    self.assertEqual(caught.exception.reason, "invalid-config")
+                    self.assertIn(key, caught.exception.message)
 
     def test_an_unknown_key_fails_closed(self) -> None:
         with self.assertRaises(ConfigError) as caught:
@@ -696,7 +794,7 @@ class CliTests(unittest.TestCase):
         self.config_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": SCHEMA_VERSION,
                     "repo": "example/repo",
                     "pr": 7,
                     "source_repo": str(self.clone),

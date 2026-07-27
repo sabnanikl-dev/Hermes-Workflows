@@ -4,10 +4,14 @@ One pass is::
 
     inspect live PR  ->  bind exact headRefOid
     verify remote branch head matches that oid
-    fresh isolated worktree at the exact head
     baseline gates (browser/visual gates when the PR requires them)
-    exact-head reviewer A/B  ->  machine-readable verdicts
+    exact-head reviewer A/B/auditor  ->  machine-readable verdicts
     classify: blocking / non-blocking / false-positive / needs-karan
+
+with every one of those gate and reviewer lanes in a fresh isolated worktree of
+its own at the exact head, proved clean and on that SHA before and after it runs
+(:meth:`ProverLoop._lane_worktree`), so no lane can hand bytes to the lane that
+judges after it,
 
 and then either reports, or opens a bounded fix attempt::
 
@@ -108,9 +112,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -556,51 +562,52 @@ class ProverLoop:
         self._verdicts = ()
         self._failures = []
         self._transport = []
-        worktree = self.worktrees.create(f"pr{pull.number}-{head[:12]}-inspect", head)
-        try:
-            findings = list(self._run_gates(pull, head, worktree))
-            if findings:
-                self._event(
-                    f"{len(findings)} baseline gate failure(s); reviewers not launched on {head}"
-                )
-            else:
-                verdicts = self._run_reviewers(pull, head, worktree)
-                self._verdicts = verdicts
-                findings.extend(item for verdict in verdicts for item in verdict.findings)
-        except Exception:
-            self._retain(worktree, why="evaluation failed")
-            raise
-        self.worktrees.remove(worktree)
+        findings = list(self._run_gates(pull, head))
+        if findings:
+            self._event(
+                f"{len(findings)} baseline gate failure(s); reviewers not launched on {head}"
+            )
+        else:
+            verdicts = self._run_reviewers(pull, head)
+            self._verdicts = verdicts
+            findings.extend(item for verdict in verdicts for item in verdict.findings)
         return classify(findings, adjudicator=self.adjudicator, clock=self.clock)
 
-    def _run_gates(self, pull: PullRequest, head: str, worktree: Path) -> list[Finding]:
+    def _run_gates(self, pull: PullRequest, head: str) -> list[Finding]:
         findings: list[Finding] = []
-        for gate in self.config.gates:
+        for index, gate in enumerate(self.config.gates, start=1):
             if gate.kind == "visual" and not self.config.visual_qa_required:
                 self._event(f"visual gate {gate.name!r} skipped: this PR does not require visual QA")
                 continue
-            argv = render_argv(
-                gate.argv,
-                self._values(pull, head, worktree),
-                what=f"gate {gate.name!r}",
-            )
-            result = self._run_lane(
-                argv,
-                lane=f"gate {gate.name}",
-                cwd=worktree,
-                timeout=gate.timeout,
-                env=gate.env,
-            )
-            output = redact_evidence(_combined(result))
-            self._gates.append(
-                GateOutcome(
-                    name=gate.name,
-                    kind=gate.kind,
-                    returncode=result.returncode,
-                    passed=result.ok,
-                    output=output,
+            lane = f"gate {gate.name}"
+            with self._lane_worktree(
+                f"pr{pull.number}-{head[:12]}-gate{index}-{_slug(gate.name)}", head, lane=lane
+            ) as worktree:
+                argv = render_argv(
+                    gate.argv,
+                    self._values(pull, head, worktree),
+                    what=f"gate {gate.name!r}",
                 )
-            )
+                result = self._run_lane(
+                    argv,
+                    lane=lane,
+                    cwd=worktree,
+                    timeout=gate.timeout,
+                    env=gate.env,
+                )
+                # Recorded before the worktree is verified and removed, so a
+                # gate that both failed and left its checkout dirty reports what
+                # it said as well as what it left behind.
+                output = redact_evidence(_combined(result))
+                self._gates.append(
+                    GateOutcome(
+                        name=gate.name,
+                        kind=gate.kind,
+                        returncode=result.returncode,
+                        passed=result.ok,
+                        output=output,
+                    )
+                )
             if result.ok:
                 self._event(f"gate {gate.name!r} passed on {head}")
                 continue
@@ -648,9 +655,7 @@ class ProverLoop:
             )
         return findings
 
-    def _run_reviewers(
-        self, pull: PullRequest, head: str, worktree: Path
-    ) -> tuple[ReviewerVerdict, ...]:
+    def _run_reviewers(self, pull: PullRequest, head: str) -> tuple[ReviewerVerdict, ...]:
         """Run the ordered acceptance lifecycle against one exact head.
 
         The lanes run in configured order, which the configuration pins to
@@ -658,79 +663,92 @@ class ProverLoop:
         artifacts that must already exist when it starts, so the order is part
         of what is being proved rather than an operator convention.
 
-        Each lane is fresh: a new disposable worktree at the verified head, a
-        new prepared-artifact path cleared before launch, and a snapshot of the
-        artifact ids already on the PR taken before the lane can post anything.
-        Nothing carries over from the previous lane or the previous cycle.
+        Each lane is fresh: its own disposable worktree at the verified head,
+        proved clean and at that exact SHA before it is launched and again after
+        it returns, a new prepared-artifact path cleared before launch, and a
+        snapshot of the artifact ids already on the PR taken before the lane can
+        post anything. Nothing carries over from the previous lane or the
+        previous cycle — including bytes: a file Reviewer A leaves in its
+        checkout is not in the checkout Reviewer B or the auditor judges.
         """
         verdicts: list[ReviewerVerdict] = []
         for reviewer in self.config.reviewers:
-            verdicts.append(self._run_reviewer(reviewer, pull, head, worktree))
+            verdicts.append(self._run_reviewer(reviewer, pull, head))
         return tuple(verdicts)
 
     def _run_reviewer(
-        self, reviewer: ReviewerConfig, pull: PullRequest, head: str, worktree: Path
+        self, reviewer: ReviewerConfig, pull: PullRequest, head: str
     ) -> ReviewerVerdict:
         relayed = reviewer.relay is not None
         # Where a credential-free lane leaves its finished artifact. Outside
         # every repository, and cleared before the lane can be launched.
         prepared_path = artifact_path(self._scratch_dir(), reviewer=reviewer.name, head=head)
-        values = self._values(
-            pull,
-            head,
-            worktree,
-            extra={
-                "reviewer": reviewer.name,
-                "role": reviewer.role,
-                "artifact_file": str(prepared_path),
-            },
-        )
-        argv = render_argv(reviewer.argv, values, what=f"reviewer {reviewer.name!r}")
         lane = f"reviewer {reviewer.name}"
-        # Everything already published, captured before this lane can post. This
-        # snapshot is the only thing that can later tell this lane's artifact
-        # from a post that merely resembles one.
-        known = self._artifact_identities()
-        result = self._run_lane(
-            argv,
-            lane=lane,
-            cwd=worktree,
-            timeout=reviewer.timeout,
-            env=reviewer.env,
-            credential_free=relayed,
-        )
-        self._reject_timed_out(result, lane=lane, head=head)
-        verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
-        # "pass" is the only verdict that lets the PR through this lane, so
-        # it is the one that must be backed by a process that actually
-        # finished successfully. A failing verdict may exit nonzero.
-        self._require_success_for_clean(
-            result, lane=lane, status=verdict.status, clean="pass", head=head
-        )
-        blocking = len(verdict.blocking)
-        # Opened before the transport starts and advanced step by step, so a stop
-        # part-way through still reports how far this artifact actually got:
-        # "prepared but never published" and "published but never read back" are
-        # different diagnoses, and a bare readback failure names neither.
-        self._transport.append(
-            ArtifactTransport(
-                lane=lane, role=reviewer.role, head=head, identity=reviewer.artifact_author
-            )
-        )
-        if relayed:
-            self._relay_artifact(
-                reviewer,
+        # This reviewer's own checkout of the exact head, which no other lane
+        # ever sees. The relay shares it rather than taking a second one: it
+        # publishes a file that already lives outside every repository, so it
+        # needs no checkout of its own, and holding this one until the relay is
+        # done keeps ``{worktree}`` meaning the same directory for both halves
+        # of one lane.
+        with self._lane_worktree(
+            f"pr{pull.number}-{head[:12]}-{_slug(reviewer.role)}", head, lane=lane
+        ) as worktree:
+            values = self._values(
+                pull,
                 head,
-                prepared_path,
-                values,
-                cwd=worktree,
-                status=verdict.status,
-                blocking=blocking,
+                worktree,
+                extra={
+                    "reviewer": reviewer.name,
+                    "role": reviewer.role,
+                    "artifact_file": str(prepared_path),
+                },
             )
-        else:
-            # A self-publishing lane prepares and publishes in one step this
-            # loop cannot see between; only the readback below is evidence.
-            self._mark_transport(prepared=True, published=True)
+            argv = render_argv(reviewer.argv, values, what=f"reviewer {reviewer.name!r}")
+            # Everything already published, captured before this lane can post.
+            # This snapshot is the only thing that can later tell this lane's
+            # artifact from a post that merely resembles one.
+            known = self._artifact_identities()
+            result = self._run_lane(
+                argv,
+                lane=lane,
+                cwd=worktree,
+                timeout=reviewer.timeout,
+                env=reviewer.env,
+                credential_free=relayed,
+            )
+            self._reject_timed_out(result, lane=lane, head=head)
+            verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
+            # "pass" is the only verdict that lets the PR through this lane, so
+            # it is the one that must be backed by a process that actually
+            # finished successfully. A failing verdict may exit nonzero.
+            self._require_success_for_clean(
+                result, lane=lane, status=verdict.status, clean="pass", head=head
+            )
+            blocking = len(verdict.blocking)
+            # Opened before the transport starts and advanced step by step, so a
+            # stop part-way through still reports how far this artifact actually
+            # got: "prepared but never published" and "published but never read
+            # back" are different diagnoses, and a bare readback failure names
+            # neither.
+            self._transport.append(
+                ArtifactTransport(
+                    lane=lane, role=reviewer.role, head=head, identity=reviewer.artifact_author
+                )
+            )
+            if relayed:
+                self._relay_artifact(
+                    reviewer,
+                    head,
+                    prepared_path,
+                    values,
+                    cwd=worktree,
+                    status=verdict.status,
+                    blocking=blocking,
+                )
+            else:
+                # A self-publishing lane prepares and publishes in one step this
+                # loop cannot see between; only the readback below is evidence.
+                self._mark_transport(prepared=True, published=True)
         self._read_back_reviewer(
             reviewer, head, known, status=verdict.status, blocking=blocking
         )
@@ -860,6 +878,82 @@ class ProverLoop:
                 "artifacts_since_lane_launched": len(fresh),
             },
         )
+
+    # -- one disposable checkout per lane ----------------------------------
+    @contextmanager
+    def _lane_worktree(self, label: str, head: str, *, lane: str) -> Iterator[Path]:
+        """One exact-head checkout, owned by exactly one gate or reviewer lane.
+
+        M9 says each lane runs in a fresh run-owned worktree at a verified head,
+        and that is only true if the lanes do not share one. Sharing is not a
+        theoretical problem here: the acceptance lifecycle is deliberately
+        sequential, so anything Reviewer A writes into a shared checkout — a
+        cache, a generated file, an accidental edit — is sitting there when
+        Reviewer B and then the Integration Auditor form the judgement that
+        decides ``merge-ready``, while all three artifacts still declare the
+        committed head. Those are non-head bytes earning an exact-head verdict.
+
+        So each lane gets its own path, and the path is held to the same two
+        facts before the lane is launched and after it returns: nothing
+        uncommitted or untracked is in it, and it is still sitting on exactly
+        the SHA this run is bound to. The "before" check is what makes the
+        freshness claim evidence rather than an assumption about ``git worktree
+        add``; the "after" check is what turns a lane that wrote into the tree it
+        was judging into a deterministic stop instead of a silent influence on
+        the next verdict. A lane that fails either keeps its worktree for
+        inspection, exactly as a failed attempt does.
+        """
+        worktree = self.worktrees.create(label, head)
+        try:
+            self._assert_lane_worktree(worktree, head=head, lane=lane, when="before")
+            yield worktree
+            self._assert_lane_worktree(worktree, head=head, lane=lane, when="after")
+        except Exception:
+            self._retain(worktree, why=f"{lane} failed")
+            raise
+        self.worktrees.remove(worktree)
+
+    def _assert_lane_worktree(
+        self, worktree: Path, *, head: str, lane: str, when: str
+    ) -> None:
+        """This lane's checkout is clean and is exactly the head it claims."""
+        result = self.runner.run(
+            ["git", "-C", str(worktree), "status", "--porcelain"], timeout=120.0
+        )
+        if not result.ok:
+            raise ScopeContamination(
+                f"could not confirm the {lane} worktree is clean {when} the lane ran",
+                evidence={
+                    "lane": lane,
+                    "when": when,
+                    "worktree": str(worktree),
+                    "returncode": result.returncode,
+                    "stderr": redact_evidence(result.stderr, limit=1000),
+                },
+            )
+        if result.stdout.strip():
+            raise ScopeContamination(
+                f"the {lane} worktree holds uncommitted or untracked changes {when} the lane ran",
+                evidence={
+                    "lane": lane,
+                    "when": when,
+                    "head": head,
+                    "worktree": str(worktree),
+                    "git_status": redact_evidence(result.stdout, limit=2000),
+                },
+            )
+        local = self._local_head(worktree)
+        if local != head:
+            raise StaleHead(
+                f"the {lane} worktree is not sitting on the head this run is bound to",
+                evidence={
+                    "lane": lane,
+                    "when": when,
+                    "bound_head": head,
+                    "local_head": local,
+                    "worktree": str(worktree),
+                },
+            )
 
     # -- run-owned artifacts ----------------------------------------------
     def _artifacts(self) -> tuple[Comment, ...]:
@@ -1371,13 +1465,13 @@ class ProverLoop:
         )
 
     def _local_head(self, worktree: Path) -> str:
-        """Read ``git rev-parse HEAD`` inside this exact attempt worktree."""
+        """Read ``git rev-parse HEAD`` inside this exact run-owned worktree."""
         result = self.runner.run(
             ["git", "-C", str(worktree), "rev-parse", "HEAD"], timeout=120.0
         )
         if not result.ok:
             raise WorktreeError(
-                "could not read the attempt worktree's local HEAD",
+                "could not read the worktree's local HEAD",
                 evidence={
                     "worktree": str(worktree),
                     "returncode": result.returncode,
@@ -1387,7 +1481,7 @@ class ProverLoop:
         local = result.stdout.strip().lower()
         if not _is_full_sha(local):
             raise WorktreeError(
-                "the attempt worktree's local HEAD is not a full 40-hex SHA",
+                "the worktree's local HEAD is not a full 40-hex SHA",
                 evidence={
                     "worktree": str(worktree),
                     "rev_parse": redact_evidence(result.stdout, limit=200),
@@ -1714,6 +1808,16 @@ def _combined(result: CommandResult) -> str:
 
 def _is_full_sha(value: str) -> bool:
     return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+
+
+def _slug(value: str) -> str:
+    """A configured name as a directory-safe worktree label fragment.
+
+    Gate names may contain spaces, so they cannot be pasted into a path the
+    worktree provider will accept. Uniqueness does not rest on this: the callers
+    prefix an index or a required role, both of which are already unique.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-").lower() or "lane"
 
 
 def _marker_count(stream: str) -> int:

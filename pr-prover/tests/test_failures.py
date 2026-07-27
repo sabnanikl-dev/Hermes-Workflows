@@ -15,9 +15,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _support import BUILDER_LOGIN, HEAD_A, HEAD_B, builder_output, fix_comment, reviewer_output
+from _support import (
+    BUILDER_LOGIN,
+    HEAD_A,
+    HEAD_B,
+    builder_output,
+    fix_comment,
+    make_source_repo,
+    reviewer_output,
+)
 from pr_prover import cli
 from pr_prover import report
+from pr_prover.config import SCHEMA_VERSION as CONFIG_SCHEMA_VERSION
 from pr_prover.errors import (
     CLASSIFICATION_STOP,
     FAILURE_CLASSES,
@@ -893,6 +902,102 @@ class CliStructuredFailureTests(unittest.TestCase):
             code = cli.main(argv)
         return code, out.getvalue(), err.getvalue()
 
+    def valid_payload(self) -> dict:
+        """The smallest config the parser accepts, for one field to be broken in."""
+        clone = make_source_repo(self.tmp)
+        return {
+            "schema_version": CONFIG_SCHEMA_VERSION,
+            "repo": "example/repo",
+            "pr": 7,
+            "source_repo": str(clone),
+            "worktree_root": str(self.tmp / "worktrees"),
+            "state_file": str(self.tmp / "state.json"),
+            "lock_file": str(self.tmp / "run.lock"),
+            "gates": [],
+            "reviewers": [
+                {
+                    "name": name,
+                    "role": role,
+                    "argv": [f"reviewer-{role}", "{head}"],
+                    "artifact_author": "the-reviewer-login",
+                    "artifact_signature": "Reviewed by: CodexReviewer",
+                }
+                for name, role in (
+                    ("A", "reviewer-a"),
+                    ("B", "reviewer-b"),
+                    ("Auditor", "integration-auditor"),
+                )
+            ],
+            "builder": {
+                "argv": ["builder", "{blockers_file}"],
+                "signature": "Fixed by: Claude Code",
+                "comment_author": BUILDER_LOGIN,
+            },
+        }
+
+    def test_a_schema_v1_config_reaches_the_cli_as_an_upgrade_record(self) -> None:
+        """PAPI90-B-P1-003 at the boundary: a versioned break, said out loud."""
+        payload = self.valid_payload()
+        payload["schema_version"] = 1
+        self.bad.write_text(json.dumps(payload), encoding="utf-8")
+
+        code, out, err = self.invoke(["check-config", "--config", str(self.bad)])
+        json_code, json_out, _ = self.invoke(["run", "--config", str(self.bad), "--json"])
+
+        self.assertEqual(code, cli.USAGE_ERROR)
+        self.assertEqual(json_code, cli.USAGE_ERROR)
+        self.assertIn("invalid-config", out)
+        self.assertIn("schema_version 1 is no longer supported", out)
+        self.assertIn("set 'schema_version' to 2", out)
+        self.assertIn("invalid-config", err)
+        record = json.loads(json_out)
+        self.assertEqual(record["failure_class"], "invalid-config")
+        self.assertEqual(record["evidence"]["found"], 1)
+        self.assertEqual(record["evidence"]["expected"], CONFIG_SCHEMA_VERSION)
+        self.assertTrue(record["evidence"]["upgrade"])
+
+    def test_a_nul_containing_path_reaches_the_public_cli_as_a_record(self) -> None:
+        """RA-P1-003 at the boundary an operator actually types.
+
+        The reproducer was ``check-config`` exiting 1 with zero stdout bytes and
+        a ``ValueError: embedded null byte`` traceback. Both shipped commands,
+        both renderings, every path field: exit 64 and a structured record.
+        """
+        for key in ("source_repo", "worktree_root", "state_file", "lock_file"):
+            payload = self.valid_payload()
+            payload[key] = "/tmp/bad\x00path"
+            self.bad.write_text(json.dumps(payload), encoding="utf-8")
+            for argv in (
+                ["check-config", "--config", str(self.bad)],
+                ["run", "--config", str(self.bad)],
+                ["run", "--config", str(self.bad), "--json"],
+            ):
+                with self.subTest(field=key, command=argv[0], json="--json" in argv):
+                    code, out, err = self.invoke(argv)
+
+                    self.assertEqual(code, cli.USAGE_ERROR)
+                    self.assertTrue(out.strip(), "the record is the output, not a traceback")
+                    self.assertNotIn("Traceback", out)
+                    self.assertNotIn("Traceback", err)
+                    self.assertNotIn("embedded null byte", out + err)
+                    self.assertIn("invalid-config", out + err)
+                    self.assertIn(key, out)
+
+    def test_the_hostile_path_value_is_not_echoed_on_any_channel(self) -> None:
+        payload = self.valid_payload()
+        payload["state_file"] = "/tmp/ghp_0123456789abcdefghijABCDEFGHIJ0123\x00/state.json"
+        self.bad.write_text(json.dumps(payload), encoding="utf-8")
+
+        code, out, err = self.invoke(["run", "--config", str(self.bad), "--json"])
+
+        self.assertEqual(code, cli.USAGE_ERROR)
+        record = json.loads(out)
+        self.assertEqual(record["failure_class"], "invalid-config")
+        self.assertEqual(record["evidence"], {"key": "state_file"})
+        for channel in (out, err):
+            self.assertNotIn("ghp_", channel)
+            self.assertNotIn("\x00", channel)
+
     def test_an_invalid_config_emits_the_builder_facing_json_block(self) -> None:
         """The auditor's reproducer: exit 64 with a record, not zero stdout bytes."""
         code, out, err = self.invoke(["run", "--config", str(self.bad), "--json"])
@@ -930,7 +1035,8 @@ class CliStructuredFailureTests(unittest.TestCase):
     def test_the_record_passes_the_same_redaction_boundary_as_the_report(self) -> None:
         secret = "ghp_0123456789abcdefghijABCDEFGHIJ0123"
         self.bad.write_text(
-            json.dumps({"schema_version": 1, "repo": secret}), encoding="utf-8"
+            json.dumps({"schema_version": CONFIG_SCHEMA_VERSION, "repo": secret}),
+            encoding="utf-8",
         )
 
         code, out, _ = self.invoke(["run", "--config", str(self.bad), "--json"])
@@ -1006,7 +1112,10 @@ class CliRedactionBoundaryTests(unittest.TestCase):
 
     def test_a_credential_shaped_config_value_is_scrubbed_on_every_channel(self) -> None:
         bad = self.tmp / "run.json"
-        bad.write_text(json.dumps({"schema_version": 1, "repo": SECRET}), encoding="utf-8")
+        bad.write_text(
+            json.dumps({"schema_version": CONFIG_SCHEMA_VERSION, "repo": SECRET}),
+            encoding="utf-8",
+        )
 
         for as_json in (True, False):
             with self.subTest(json=as_json):
