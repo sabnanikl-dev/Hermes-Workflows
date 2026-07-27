@@ -73,7 +73,8 @@ in-flight before the builder is invoked and cleared only once that verification
 passes, so a run killed anywhere in between cannot restart, re-inspect its way
 onto whatever head is live by then, and report merge-ready for a push it never
 checked. Such a restart stops as unexpected state with the old head evidence
-intact.
+intact — and, having read nothing live, reports its current head as unknown
+rather than presenting that recorded head as the one the PR is on.
 
 Every ambiguity — a malformed verdict, a stale head, a lane whose result
 contradicts its verdict, a push that cannot be bound to exactly one new head, a
@@ -160,6 +161,10 @@ class RunResult:
 
     outcome: str
     reason: str
+    # The head the live PR was actually observed on. ``None`` means this run
+    # never read the live PR — a stop before the first GitHub read has no
+    # current head to report, and local state cannot supply one, so the field
+    # says "unknown" rather than presenting a recorded head as the live one.
     head: str | None = None
     branch: str | None = None
     pr_url: str = ""
@@ -263,6 +268,12 @@ class ProverLoop:
         report merge-ready for a push no run ever verified and a fix comment no
         run ever read. The run stops here instead, before any GitHub read, with
         the recorded head left exactly as the interrupted attempt wrote it.
+
+        That recorded head is preserved evidence, not a claim about the live PR.
+        No read happened, so the report leaves the current head unknown and
+        marks the recorded head and the ledger produced against it unverified;
+        anything else would hand Karan a pre-attempt ledger under a heading
+        saying the PR is still on that commit.
         """
         if not state.verification_pending:
             return
@@ -1158,17 +1169,29 @@ class ProverLoop:
         classification = getattr(state, "classification", None)
         bound_head = getattr(state, "head", None)
         # The head to report is the last one GitHub was actually seen on, not
-        # the one this run bound its work to. They differ in exactly the two
-        # windows where the PR moved underneath the run — terminal freshness
-        # catching drift, and a push agreeing on a new head before the fix
-        # comment could be read back — and there the bound head is no longer
-        # current. Reporting it as ``head`` would put the ledger it names under
-        # a heading claiming the live PR is still on that commit. Reporting the
-        # observed head instead leaves ``classification_head`` naming the commit
-        # the findings were actually produced against, so the two disagree and
-        # every rendering marks the old ledger historical. When nothing drifted
-        # the two are equal and a same-head ledger still renders as current.
-        head = self._observed_head or bound_head
+        # the one this run bound its work to. They differ in the windows where
+        # the PR moved underneath the run — terminal freshness catching drift,
+        # and a push agreeing on a new head before the fix comment could be read
+        # back — and there the bound head is no longer current. Reporting it as
+        # ``head`` would put the ledger it names under a heading claiming the
+        # live PR is still on that commit. Reporting the observed head instead
+        # leaves ``classification_head`` naming the commit the findings were
+        # actually produced against, so the two disagree and every rendering
+        # marks the old ledger historical. When nothing drifted the two are
+        # equal and a same-head ledger still renders as current.
+        #
+        # There is also a stop with no observation at all. A restart that finds
+        # an interrupted attempt stops deliberately before its first GitHub read
+        # (see :meth:`_assert_no_pending_verification`), precisely because the
+        # dead process may already have pushed — so the recorded head is a head
+        # this run has no evidence is still the live one. Falling back to it
+        # here reported it as the current head and, with
+        # ``classification_head`` equal to it, presented the pre-attempt ledger
+        # as current exact-head evidence. The head is left unknown instead: the
+        # recorded head stays in the stop's own evidence and beside the ledger
+        # as the head those findings were produced against, and both renderings
+        # mark it unverified rather than current.
+        head = self._observed_head
         return RunResult(
             outcome=NEEDS_KARAN,
             reason=exc.reason,

@@ -312,6 +312,13 @@ never re-inspects, rebinds itself to whatever head is live by then, and reports
 `merge-ready` for a push nothing verified. Confirm on the PR what that attempt
 actually did, then `pr-prover reset` before running again.
 
+Reading nothing also means having no current head to report. The recorded head
+is what the interrupted attempt was working on, not evidence that the PR is
+still there, so the report says `unknown` for the head (`"head": null` in JSON)
+and renders the recorded head only as the commit its ledger was produced
+against — marked unverified in both renderings, with `classification_head_current`
+false. A report never presents a head it did not observe as the live one.
+
 ### Reset refuses before it deletes
 
 `pr-prover reset` removes the state file; `--force` also removes the lockfile.
@@ -344,7 +351,9 @@ the evidence, the bounded remediation, the escalation condition — in both
 renderings described [above](#failures-are-the-builders-next-instruction),
 including the two classes the CLI reaches before a run report exists. A stop
 that happens after classification also carries the ledger it froze, with the
-exact head that ledger was produced against printed beside it.
+head that ledger was produced against printed beside it — called the exact head
+only while the live PR was observed on it, marked historical evidence once the
+PR has moved, and marked unverified when the stop happened before any live read.
 
 Redaction happens twice. Output captured from a child is scrubbed of
 credential-shaped text where it is captured, and then the assembled report —

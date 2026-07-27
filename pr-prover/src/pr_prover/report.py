@@ -12,6 +12,12 @@ is the last place a value can leak, so both renderers here are built from one
 string in it, however deeply nested, is scrubbed, and the structure and scalar
 types survive so the report stays readable and machine-usable.
 
+The reported head is the head the live PR was *observed* on, and it is absent
+when the run stopped before reading GitHub at all. Both renderings keep that
+distinction: an unknown head is printed as unknown, and a classification carried
+into the report is marked historical or unverified unless the head it was
+produced against is the head that was observed.
+
 Two things are rendered rather than summarized. A ``needs-Karan`` escalation
 prints each finding's provenance inline — who found it, on which head, at which
 surface, and the verbatim excerpt — so the decision does not require re-reading
@@ -65,6 +71,13 @@ def as_dict(result: RunResult) -> dict[str, Any]:
         ],
         "classification": result.classification.as_dict() if result.classification else None,
         "classification_head": result.classification_head,
+        # Whether the ledger above is evidence about the head the live PR was
+        # actually observed on. It is false both when the PR moved underneath
+        # the run and when the run stopped before reading the PR at all, so a
+        # machine reader is told the ledger is historical or unverified instead
+        # of having to infer it from two nullable heads — and ``head: null``
+        # can never be read as agreeing with a recorded classification head.
+        "classification_head_current": _classification_head_is_current(result),
         "failures": [record.as_dict() for record in result.failures],
         "events": list(result.events),
         "retained_paths": list(result.retained_paths),
@@ -72,6 +85,21 @@ def as_dict(result: RunResult) -> dict[str, Any]:
     if result.evidence:
         payload["fail_closed"] = result.evidence
     return sanitize(payload)
+
+
+def _classification_head_is_current(result: RunResult) -> bool:
+    """Is the classification's head the head the live PR was observed on?
+
+    Both heads have to exist and agree. An absent observed head is the case that
+    matters: a run that stopped before its first GitHub read has no evidence
+    about the live PR at all, so its recorded ledger is unverified rather than
+    current, and ``None == None`` must never make it look otherwise.
+    """
+    return (
+        result.head is not None
+        and result.classification_head is not None
+        and result.head == result.classification_head
+    )
 
 
 def to_json(result: RunResult) -> str:
@@ -85,7 +113,7 @@ def to_markdown(result: RunResult) -> str:
         f"## pr-prover — {payload['outcome']}",
         "",
         f"**Reason:** {payload['reason']}",
-        f"**Head:** `{payload['head'] or 'unknown'}`",
+        _head_line(payload["head"]),
         f"**Branch:** {payload['branch'] or 'unknown'}",
         f"**Attempts used:** {payload['attempts_used']}/{payload['attempt_cap']}",
     ]
@@ -113,14 +141,31 @@ def to_markdown(result: RunResult) -> str:
 
     if payload["classification"] is not None:
         bound = payload.get("classification_head")
+        current = payload.get("classification_head_current")
         # The findings are evidence about one exact commit, so the report says
-        # which one rather than letting a reader infer it from the outcome.
-        heading = f"### Classification (exact head `{bound}`)" if bound else "### Classification"
+        # which one rather than letting a reader infer it from the outcome. It
+        # calls that commit the exact head only when the live PR was read: with
+        # no observation, the same SHA is a recorded head this run could not
+        # hold against GitHub, and the heading has to say so.
+        if not bound:
+            heading = "### Classification"
+        elif payload["head"]:
+            heading = f"### Classification (exact head `{bound}`)"
+        else:
+            heading = (
+                f"### Classification (recorded head `{bound}` — "
+                "unverified against the live pull request)"
+            )
         lines += ["", heading]
-        if bound and payload["head"] and bound != payload["head"]:
+        if bound and not current:
             lines.append(
                 f"- historical evidence only: these findings were produced against `{bound}`, "
-                "not the head reported above"
+                + (
+                    "not the head reported above"
+                    if payload["head"]
+                    else "and this run read nothing live, so whether that is still the "
+                    "PR's head is unverified"
+                )
             )
         # A needs-Karan report is the one a human has to act on without the
         # run's context — including a fail-closed stop, where the ledger it
@@ -194,6 +239,22 @@ def failure_markdown(record: Mapping[str, Any]) -> list[str]:
         "```",
     ]
     return lines
+
+
+def _head_line(head: Any) -> str:
+    """Render the head the live PR was observed on, or say there is none.
+
+    A missing head is not a formatting gap to fill from somewhere else: it means
+    this run never read the live PR, so it has no current head to report. Saying
+    that is the whole point — the alternative is printing a head out of local
+    state under a label a reader takes as verified.
+    """
+    if head:
+        return f"**Head:** `{head}`"
+    return (
+        "**Head:** `unknown` — this run read nothing live, "
+        "so the pull request's current head is unverified"
+    )
 
 
 def _inline(value: Any) -> str:

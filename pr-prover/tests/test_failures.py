@@ -39,6 +39,7 @@ from pr_prover.errors import (
     WorktreeError,
 )
 from pr_prover.loop import NEEDS_KARAN, RunResult
+from pr_prover.state import PHASE_ATTEMPT_IN_FLIGHT, SCHEMA_VERSION
 from test_loop import BLOCKER, LoopHarness
 from test_provenance import stopped_clock
 
@@ -713,6 +714,157 @@ class DriftedHeadLedgerTests(LoopHarness):
         self.assertIn(f"### Classification (exact head `{HEAD_A}`)", text)
         self.assertIn("`null-deref`", text)
         self.assertNotIn("historical evidence only", text)
+
+
+class InterruptedRestartLedgerTests(LoopHarness):
+    """PAPI99-RB-R2-001 / PAPI99-IA-R2-001: an unread head is not a current one.
+
+    A restart that finds ``phase: "attempt-in-flight"`` stops before its first
+    GitHub read on purpose: the interrupted attempt may already have pushed, so
+    re-inspecting would rebind the run to whatever head is live by then and
+    erase the evidence of what that attempt owed. The stop is right; taking the
+    report's head from the journal afterwards was not. Nothing observed the live
+    PR, so the recorded head A is a head this run has no evidence about — and
+    reporting it as ``head`` beside ``classification_head`` A put the
+    pre-attempt ledger under a heading claiming the PR is still on A.
+
+    The live head is therefore unknown, and the recorded head is rendered as
+    what it is: the commit those findings were produced against, unverified.
+    """
+
+    def restart_after_an_interrupted_attempt(self) -> RunResult:
+        """Run one attempt that pushes HEAD_B and is killed before verification.
+
+        The journal it leaves is the schema-v3 state the blocker names: recorded
+        head A, the ledger classified on A, ``attempt=1``, and
+        ``phase="attempt-in-flight"``. The remote is modelled on B, the head the
+        dead attempt pushed and no run ever verified.
+        """
+        first = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+
+        def push_then_die() -> None:
+            self.remote.push(HEAD_B, comment=fix_comment(HEAD_B))
+            raise KeyboardInterrupt("the run was killed mid-attempt")
+
+        self.script.add(
+            "lane-builder", builder_output(HEAD_B, addressed=["null-deref"]), after=push_then_die
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            first.run()
+
+        journal = self.state()
+        self.assertEqual(journal["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(journal["phase"], PHASE_ATTEMPT_IN_FLIGHT)
+        self.assertEqual(journal["attempt"], 1)
+        self.assertEqual(journal["head"], HEAD_A)
+        self.assertEqual(
+            [item["id"] for item in journal["classification"]["blocking"]], ["null-deref"]
+        )
+        self.assertEqual(self.remote.head, HEAD_B, "the interrupted attempt already pushed")
+
+        second = self.build()
+        self.review_round(HEAD_B)
+        self.github.pull_request_calls = 0
+        self.github.comment_calls = 0
+        self.github.commit_calls = 0
+        result = second.run()
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "unexpected-state")
+        return result
+
+    def test_the_restart_still_stops_before_any_github_read(self) -> None:
+        """The intentional zero-read safety stop is unchanged by the reporting fix."""
+        result = self.restart_after_an_interrupted_attempt()
+
+        self.assertEqual(self.github.pull_request_calls, 0)
+        self.assertEqual(self.github.comment_calls, 0)
+        self.assertEqual(self.github.commit_calls, 0)
+        self.assertFalse(self.script.exhausted, "no lane may run on a restart that owes work")
+        self.assertEqual(result.evidence["evidence"]["recorded_head"], HEAD_A)
+        self.assertEqual(self.state()["head"], HEAD_A, "the recorded head is still not rebound")
+
+    def test_the_restart_reports_no_verified_live_head(self) -> None:
+        result = self.restart_after_an_interrupted_attempt()
+
+        self.assertIsNone(result.head, "nothing was read live, so there is no current head")
+        self.assertEqual(result.classification_head, HEAD_A)
+        self.assertEqual(
+            [item.finding.id for item in result.classification.blocking], ["null-deref"]
+        )
+
+    def test_the_restart_marks_the_recorded_ledger_unverified_in_markdown(self) -> None:
+        text = report.to_markdown(self.restart_after_an_interrupted_attempt())
+
+        self.assertIn("**Head:** `unknown`", text)
+        self.assertNotIn(f"**Head:** `{HEAD_A}`", text)
+        self.assertNotIn(f"### Classification (exact head `{HEAD_A}`)", text)
+        self.assertIn(f"### Classification (recorded head `{HEAD_A}`", text)
+        self.assertIn("unverified", text)
+        self.assertIn("historical evidence only", text)
+        self.assertIn("`null-deref`", text, "the ledger itself is still handed to Karan")
+
+    def test_the_restart_marks_the_recorded_ledger_unverified_in_json(self) -> None:
+        payload = json.loads(report.to_json(self.restart_after_an_interrupted_attempt()))
+
+        self.assertIsNone(payload["head"])
+        self.assertEqual(payload["classification_head"], HEAD_A)
+        self.assertIs(
+            payload["classification_head_current"],
+            False,
+            "a JSON reader is told the ledger is unverified, not left to compare nulls",
+        )
+        self.assertEqual(
+            [item["id"] for item in payload["classification"]["blocking"]], ["null-deref"]
+        )
+        self.assertEqual(payload["fail_closed"]["evidence"]["recorded_head"], HEAD_A)
+
+    def test_the_recorded_head_is_never_the_reported_current_head(self) -> None:
+        """The one thing that must not happen, asserted directly."""
+        result = self.restart_after_an_interrupted_attempt()
+        payload = json.loads(report.to_json(result))
+
+        self.assertNotEqual(payload["head"], payload["classification_head"])
+        self.assertNotEqual(payload["head"], HEAD_A)
+        self.assertNotEqual(payload["head"], HEAD_B, "the live head was never observed either")
+
+    # -- positive controls -------------------------------------------------
+    def test_an_observed_same_head_ledger_is_still_reported_as_current(self) -> None:
+        """The unknown-head rule fires only when nothing was observed."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder", builder_output(HEAD_B, addressed=["null-deref"], status="failure")
+        )
+
+        payload = json.loads(report.to_json(loop.run()))
+
+        self.assertEqual(payload["head"], HEAD_A)
+        self.assertEqual(payload["classification_head"], HEAD_A)
+        self.assertIs(payload["classification_head_current"], True)
+
+    def test_a_drifted_ledger_is_still_reported_against_the_observed_head(self) -> None:
+        """The two windows the previous cycle closed keep their behaviour."""
+        loop = self.build()
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A, [BLOCKER]))
+        self.script.add(
+            "lane-reviewer-B", reviewer_output(HEAD_A), after=lambda: self.remote.push(HEAD_B)
+        )
+
+        payload = json.loads(report.to_json(loop.run()))
+
+        self.assertEqual(payload["head"], HEAD_B)
+        self.assertEqual(payload["classification_head"], HEAD_A)
+        self.assertIs(payload["classification_head_current"], False)
+
+    def test_a_clean_run_reports_its_head_as_current(self) -> None:
+        loop = self.build()
+        self.review_round(HEAD_A)
+
+        payload = json.loads(report.to_json(loop.run()))
+
+        self.assertEqual(payload["head"], HEAD_A)
+        self.assertIs(payload["classification_head_current"], True)
 
 
 class CliStructuredFailureTests(unittest.TestCase):
