@@ -611,6 +611,110 @@ class FailClosedLedgerTests(LoopHarness):
         self.assertNotIn("null-deref", report.to_markdown(result))
 
 
+class DriftedHeadLedgerTests(LoopHarness):
+    """PAPI99-RA2-P1-001 / PAPI99-RB-R1-001 / IA-PAPI99-R1-001.
+
+    Carrying the frozen ledger into a fail-closed report is right only while the
+    head it was produced against is still the live one. There are two windows
+    where it is not: terminal freshness catching drift, and a push whose head
+    agreement succeeded before the fix-comment readback failed. In both, state
+    is still bound to the old head because nothing has re-inspected yet, so a
+    report that took its head from state alone showed the old ledger under a
+    heading naming it the current exact head.
+
+    The reported head is therefore the last head the PR was *observed* on, which
+    leaves ``classification_head`` naming the commit the findings came from. The
+    two disagreeing is what makes every rendering mark the ledger historical.
+    """
+
+    def drift_during_the_last_reviewer(self) -> RunResult:
+        """Reviewers classify HEAD_A; the live PR moves to HEAD_B before the attempt."""
+        loop = self.build()
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A, [BLOCKER]))
+        self.script.add(
+            "lane-reviewer-B", reviewer_output(HEAD_A), after=lambda: self.remote.push(HEAD_B)
+        )
+        result = loop.run()
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "stale-head")
+        return result
+
+    def readback_failure_after_a_push(self) -> RunResult:
+        """The push reaches HEAD_B, then the fix comment is not there to read back."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            # Pushed without the signed fix comment: head agreement succeeds and
+            # readback is what fails, leaving state bound to HEAD_A.
+            after=lambda: self.remote.push(HEAD_B),
+        )
+        result = loop.run()
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        return result
+
+    # -- terminal freshness window ----------------------------------------
+    def test_drift_reports_the_head_the_pr_was_last_observed_on(self) -> None:
+        result = self.drift_during_the_last_reviewer()
+        self.assertEqual(result.head, HEAD_B, "the live PR is on HEAD_B, not the bound head")
+        self.assertEqual(result.classification_head, HEAD_A)
+
+    def test_drift_keeps_the_ledger_but_marks_it_historical_in_markdown(self) -> None:
+        text = report.to_markdown(self.drift_during_the_last_reviewer())
+        self.assertIn(f"### Classification (exact head `{HEAD_A}`)", text)
+        self.assertIn("`null-deref`", text)
+        self.assertIn("historical evidence only", text)
+        self.assertNotIn(f"### Classification (exact head `{HEAD_B}`)", text)
+
+    def test_drift_marks_the_ledger_historical_in_json(self) -> None:
+        payload = json.loads(report.to_json(self.drift_during_the_last_reviewer()))
+        self.assertEqual(payload["head"], HEAD_B)
+        self.assertEqual(payload["classification_head"], HEAD_A)
+        self.assertNotEqual(
+            payload["head"],
+            payload["classification_head"],
+            "the JSON reader distinguishes the two heads or it cannot tell the ledger is old",
+        )
+
+    # -- post-push / readback window --------------------------------------
+    def test_a_readback_failure_reports_the_pushed_head(self) -> None:
+        result = self.readback_failure_after_a_push()
+        self.assertEqual(result.head, HEAD_B, "push agreement already proved the PR is on HEAD_B")
+        self.assertEqual(result.classification_head, HEAD_A)
+
+    def test_a_readback_failure_marks_the_old_ledger_historical(self) -> None:
+        result = self.readback_failure_after_a_push()
+        self.assertIsNotNone(result.classification)
+        self.assertEqual(
+            [item.finding.id for item in result.classification.blocking], ["null-deref"]
+        )
+        text = report.to_markdown(result)
+        self.assertIn(f"### Classification (exact head `{HEAD_A}`)", text)
+        self.assertIn("historical evidence only", text)
+
+    # -- positive same-head control ---------------------------------------
+    def test_a_same_head_stop_still_reports_its_ledger_as_current(self) -> None:
+        """Nothing drifted, so the ledger is current and must not be marked historical."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"], status="failure"),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.reason, "builder-refusal")
+        self.assertEqual(result.head, HEAD_A)
+        self.assertEqual(result.classification_head, HEAD_A)
+        text = report.to_markdown(result)
+        self.assertIn(f"### Classification (exact head `{HEAD_A}`)", text)
+        self.assertIn("`null-deref`", text)
+        self.assertNotIn("historical evidence only", text)
+
+
 class CliStructuredFailureTests(unittest.TestCase):
     """IA-PAPI99-002: a declared class does not get prose instead of a record.
 
@@ -694,6 +798,110 @@ class CliStructuredFailureTests(unittest.TestCase):
         self.assertEqual(record["evidence"]["gate"], "tests")
         self.assertTrue(record["remediation"])
         self.assertTrue(record["escalation"])
+
+
+# A credential-shaped value, used below as both a config *path* and a config
+# *value* so the boundary is checked on the two ways a secret reaches these
+# failures: the argument the operator typed and the file's own contents.
+SECRET = "ghp_0123456789abcdefghijABCDEFGHIJ0123"
+
+
+class CliRedactionBoundaryTests(unittest.TestCase):
+    """PAPI99-RA2-P1-002 / IA-PAPI99-R1-002: one boundary for all three channels.
+
+    ``_fail_closed`` sanitizes a record for stdout and then also prints an
+    operator summary on stderr. Deriving that summary from the exception instead
+    of from the record put one failure through the boundary twice with two
+    different answers, and the unscrubbed answer was the one that reached logs
+    and CI capture. Every case here asserts on stderr as well as stdout, in both
+    renderings, for both pre-loop classes.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-cli-redaction-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name).resolve()
+
+    def invoke(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def fail_closed(self, exc, *, as_json: bool) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli._fail_closed(exc, as_json=as_json)
+        return code, out.getvalue(), err.getvalue()
+
+    # -- invalid-config ----------------------------------------------------
+    def test_a_credential_shaped_config_path_is_scrubbed_on_every_channel(self) -> None:
+        """The auditor's reproducer: the path the operator typed is the secret."""
+        for as_json in (True, False):
+            with self.subTest(json=as_json):
+                argv = ["run", "--config", str(self.tmp / f"{SECRET}.json")]
+                code, out, err = self.invoke(argv + ["--json"] if as_json else argv)
+
+                self.assertEqual(code, cli.USAGE_ERROR, "exit semantics are unchanged")
+                self.assertNotIn(SECRET, out)
+                self.assertNotIn(SECRET, err, "stderr is a terminal too")
+                self.assertIn("<redacted>", err)
+                self.assertIn("invalid-config", err)
+
+    def test_a_credential_shaped_config_value_is_scrubbed_on_every_channel(self) -> None:
+        bad = self.tmp / "run.json"
+        bad.write_text(json.dumps({"schema_version": 1, "repo": SECRET}), encoding="utf-8")
+
+        for as_json in (True, False):
+            with self.subTest(json=as_json):
+                argv = ["run", "--config", str(bad)]
+                code, out, err = self.invoke(argv + ["--json"] if as_json else argv)
+
+                self.assertEqual(code, cli.USAGE_ERROR)
+                self.assertNotIn(SECRET, out)
+                self.assertNotIn(SECRET, err)
+
+    # -- invalid-command ---------------------------------------------------
+    def test_an_invalid_command_message_is_scrubbed_on_every_channel(self) -> None:
+        """The other pre-loop class: the secret is inside the failure message."""
+        for as_json in (True, False):
+            with self.subTest(json=as_json):
+                code, out, err = self.fail_closed(
+                    CommandContractError(
+                        f"gate argv template carries a literal token {SECRET}",
+                        evidence={"gate": "tests", "argv": ["run", f"--token={SECRET}"]},
+                    ),
+                    as_json=as_json,
+                )
+
+                self.assertEqual(code, cli.USAGE_ERROR)
+                self.assertNotIn(SECRET, out)
+                self.assertNotIn(SECRET, err)
+                self.assertIn("<redacted>", err)
+                self.assertIn("invalid-command", err)
+
+    # -- one record behind all three channels ------------------------------
+    def test_the_stderr_summary_is_the_record_stdout_printed(self) -> None:
+        """Not merely scrubbed: the same sanitized record, so they cannot diverge."""
+        code, out, err = self.fail_closed(
+            ConfigError(f"cannot read {SECRET}", evidence={"path": SECRET}), as_json=True
+        )
+
+        self.assertEqual(code, cli.USAGE_ERROR)
+        record = json.loads(out)
+        self.assertEqual(
+            err.strip(),
+            f"pr-prover: {record['failure_class']}: {record['what_failed']}",
+        )
+
+    def test_exactly_one_structured_record_is_emitted(self) -> None:
+        """The stderr line is a summary of the record, not a second record."""
+        _, out, err = self.fail_closed(
+            ConfigError("schema_version is missing", evidence={}), as_json=True
+        )
+
+        json.loads(out)  # stdout is exactly one JSON document
+        self.assertEqual(len(err.strip().splitlines()), 1)
 
 
 # The stop-only playbook, spelled here so the CLI rendering is checked against

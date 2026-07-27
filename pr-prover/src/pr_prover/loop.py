@@ -213,6 +213,11 @@ class ProverLoop:
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
         self._failures: list[FailureRecord] = []
         self._retained: list[str] = []
+        # The head the live PR was last actually observed on. ``state.head`` is
+        # the head this run bound its work to; the two agree until GitHub moves
+        # underneath the run, and a fail-closed report has to be able to tell
+        # those apart rather than presenting the bound head as the current one.
+        self._observed_head: str | None = None
 
     # -- entry point ------------------------------------------------------
     def run(self) -> RunResult:
@@ -350,8 +355,19 @@ class ProverLoop:
         )
 
     # -- inspection and evaluation ---------------------------------------
+    def _observe(self, pull: PullRequest) -> PullRequest:
+        """Record the head the live PR was just seen on, and hand it back.
+
+        Every read of the PR passes through here, so "the head this run last saw
+        live" has one definition instead of being re-derived at each terminal.
+        It is deliberately not ``state.head``: binding is the head this run chose
+        to work against, observing is the head GitHub reported.
+        """
+        self._observed_head = pull.head_ref_oid
+        return pull
+
     def _inspect(self, state: RunState) -> PullRequest:
-        pull = self.github.pull_request(self.config.repo, self.config.pr)
+        pull = self._observe(self.github.pull_request(self.config.repo, self.config.pr))
         if pull.state != "OPEN":
             raise StateError(
                 "the pull request is not open",
@@ -399,7 +415,7 @@ class ProverLoop:
         renamed head branch — those conclusions describe a PR that no longer
         exists, and the run stops as stale-head rather than reporting them.
         """
-        live = self.github.pull_request(self.config.repo, self.config.pr)
+        live = self._observe(self.github.pull_request(self.config.repo, self.config.pr))
         drift: dict[str, Any] = {}
         if live.number != snapshot.number:
             drift["number"] = {"inspected": snapshot.number, "live": live.number}
@@ -769,7 +785,7 @@ class ProverLoop:
                 "the builder reported the pre-attempt head as its result",
                 evidence={"head": old_head},
             )
-        refreshed = self.github.pull_request(self.config.repo, self.config.pr)
+        refreshed = self._observe(self.github.pull_request(self.config.repo, self.config.pr))
         new_head = refreshed.head_ref_oid
         if new_head == old_head:
             raise AmbiguousPush(
@@ -1140,15 +1156,28 @@ class ProverLoop:
         # is only ever the classification for the head named beside it, and that
         # head is rendered alongside it rather than assumed.
         classification = getattr(state, "classification", None)
+        bound_head = getattr(state, "head", None)
+        # The head to report is the last one GitHub was actually seen on, not
+        # the one this run bound its work to. They differ in exactly the two
+        # windows where the PR moved underneath the run — terminal freshness
+        # catching drift, and a push agreeing on a new head before the fix
+        # comment could be read back — and there the bound head is no longer
+        # current. Reporting it as ``head`` would put the ledger it names under
+        # a heading claiming the live PR is still on that commit. Reporting the
+        # observed head instead leaves ``classification_head`` naming the commit
+        # the findings were actually produced against, so the two disagree and
+        # every rendering marks the old ledger historical. When nothing drifted
+        # the two are equal and a same-head ledger still renders as current.
+        head = self._observed_head or bound_head
         return RunResult(
             outcome=NEEDS_KARAN,
             reason=exc.reason,
-            head=getattr(state, "head", None),
+            head=head,
             branch=self.config.branch,
             attempts_used=getattr(state, "attempt", 0),
             corrective_reruns=getattr(state, "corrective_rerun_attempts", ()),
             classification=classification,
-            classification_head=getattr(state, "head", None) if classification else None,
+            classification_head=bound_head if classification else None,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
             events=tuple(self._events),

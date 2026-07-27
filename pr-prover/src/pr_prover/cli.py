@@ -108,6 +108,15 @@ def _fail_closed(exc: PrProverError, *, as_json: bool) -> int:
     reads in a log, but it is now a summary of the record on stdout rather than
     the only thing the failure produced.
 
+    That summary is read back out of the sanitized record rather than off the
+    exception, because stderr is a terminal too. Printing ``exc.message`` beside
+    a scrubbed stdout put the same failure through the redaction boundary twice
+    with two different answers, and the unscrubbed one — a credential-shaped
+    config path, a template carrying a token — is the one that reaches an
+    operator's log and CI capture. One sanitized record now feeds all three
+    channels, so JSON, Markdown, and the stderr line cannot disagree about what
+    is safe to print.
+
     The heading says the run never started rather than naming a run outcome:
     this returns the usage exit code, and a report that printed an outcome word
     over a different exit code would be claiming a run happened.
@@ -123,7 +132,10 @@ def _fail_closed(exc: PrProverError, *, as_json: bool) -> int:
         ]
         lines += failure_markdown(record)
         print("\n".join(lines))
-    print(f"pr-prover: {exc.reason}: {exc.message}", file=sys.stderr)
+    print(
+        f"pr-prover: {record['failure_class']}: {record['what_failed']}",
+        file=sys.stderr,
+    )
     return USAGE_ERROR
 
 
