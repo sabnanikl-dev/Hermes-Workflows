@@ -36,6 +36,12 @@ argv publishes that file under the reviewer identity. The relay is an ordinary
 command; it is given no credential by this tool and uses whatever ``gh`` session
 it already has.
 
+A relayed lane's argv must also receive ``{evidence_packet}``. Having no GitHub
+identity is not a detail it can work around — it cannot read the PR at all — so
+a relayed lane with nowhere to read its evidence from is as misconfigured as one
+with nowhere to write its artifact, and both are refused here rather than
+discovered by a lane that quietly reviewed nothing.
+
 The argv arrays are where the trusted agents are named. Hermes writes the exact
 invocation of the installed Claude/Codex wrapper it wants — model, empty MCP
 config, task-scoped tools, pointer-first prompt — and the loop runs it
@@ -94,8 +100,8 @@ _V1_UPGRADE_STEPS = (
     "integration-auditor, one each, listed in that order",
     "give every reviewer lane an 'artifact_author' login and an "
     "'artifact_signature' line its published artifact must carry",
-    "point each relayed lane's argv at '{artifact_file}' and give it a 'relay' "
-    "command that publishes that file",
+    "point each relayed lane's argv at '{artifact_file}' and '{evidence_packet}', "
+    "and give it a 'relay' command that publishes that file",
     "set 'schema_version' to 2",
 )
 GATE_KINDS = ("baseline", "visual")
@@ -156,6 +162,11 @@ _RELAY_KEYS = frozenset({"argv", "timeout", "env", "env_unset"})
 # The token every relayed lane has to be handed, on both sides of the handoff:
 # the reviewer needs somewhere to write, and the relay needs something to post.
 _ARTIFACT_FILE = "{artifact_file}"
+# The other half of what a relayed lane is handed. It runs with no GitHub
+# credential and cannot inspect the PR for itself, so a lane whose argv never
+# receives the frozen packet has been asked to judge a pull request it has no
+# way to read.
+_EVIDENCE_PACKET = "{evidence_packet}"
 _BUILDER_KEYS = frozenset(
     {"argv", "signature", "comment_author", "timeout", "env", "env_unset"}
 )
@@ -637,6 +648,17 @@ def _reviewer(item: object, index: int) -> ReviewerConfig:
                     f"GitHub credential; remove {variable} from its env and let the relay publish",
                     evidence={"reviewer": name, "name": variable},
                 )
+        # ...and having no credential is not a limitation the lane can work
+        # around: with no way to reach GitHub it needs the frozen packet, so a
+        # relayed lane that is never handed one is refused here rather than
+        # discovered as a lane that confidently reviewed nothing.
+        if not any(_EVIDENCE_PACKET in part for part in argv):
+            raise ConfigError(
+                f"reviewers[{index}] uses the relay lifecycle, so its lane runs with no "
+                f"GitHub credential and cannot read the PR; its argv must receive "
+                f"{_EVIDENCE_PACKET} to be given the frozen evidence instead",
+                evidence={"reviewer": name},
+            )
     return ReviewerConfig(
         name=name,
         argv=argv,

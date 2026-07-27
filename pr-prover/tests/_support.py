@@ -30,7 +30,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pr_prover.commands import RUNNER_DEFAULT, Budget, CommandResult, validate_argv
 from pr_prover.config import RunConfig
 from pr_prover.findings import Finding, FindingLocation, FindingProvenance
-from pr_prover.github import Comment, PullRequest
+from pr_prover.github import (
+    CheckRun,
+    Comment,
+    InlineComment,
+    LinkedIssue,
+    PullRequest,
+    ReviewEvidence,
+)
 
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
@@ -164,6 +171,12 @@ class FakeRemote:
     comments: list[Comment] = field(default_factory=list)
     reviews: list[Comment] = field(default_factory=list)
     commit_oids: list[str] = field(default_factory=list)
+    # The read-only surfaces a credential-free lane is handed in a frozen packet
+    # instead of reading them itself. Empty is the ordinary case for this PR;
+    # a test fills them in to prove they reach the lane.
+    inline_comments: list[InlineComment] = field(default_factory=list)
+    check_runs: list[CheckRun] = field(default_factory=list)
+    linked_issues: list[LinkedIssue] = field(default_factory=list)
     # Commit -> its first parent. This is the only thing that makes "the new
     # head descends from the old one" a question the doubles can answer, so a
     # force-pushed replacement is expressible rather than indistinguishable
@@ -233,6 +246,23 @@ class FakeRemote:
         self.reviews.append(posted)
         return posted
 
+    def review_evidence(self) -> ReviewEvidence:
+        """What the boundary can tell a lane that cannot read GitHub itself.
+
+        The completeness flags mirror the shipped ``gh`` boundary's own: the
+        reviews read paginates to the end, the conversation read does not yet.
+        """
+        return ReviewEvidence(
+            inline_comments=tuple(self.inline_comments),
+            check_runs=tuple(self.check_runs),
+            linked_issues=tuple(self.linked_issues),
+            inline_comments_complete=True,
+            check_runs_complete=True,
+            linked_issues_complete=True,
+            conversation_comments_complete=False,
+            reviews_complete=True,
+        )
+
     def pull_request(self) -> PullRequest:
         return PullRequest(
             number=self.number,
@@ -255,6 +285,7 @@ class FakeGitHub:
         self.comment_calls = 0
         self.commit_calls = 0
         self.review_calls = 0
+        self.review_evidence_calls = 0
 
     def pull_request(self, repo: str, number: int) -> PullRequest:
         self.pull_request_calls += 1
@@ -271,6 +302,10 @@ class FakeGitHub:
     def reviews(self, repo: str, number: int) -> tuple[Comment, ...]:
         self.review_calls += 1
         return tuple(self.remote.reviews)
+
+    def review_evidence(self, repo: str, number: int, head: str) -> ReviewEvidence:
+        self.review_evidence_calls += 1
+        return self.remote.review_evidence()
 
 
 @dataclass(frozen=True)
@@ -387,11 +422,27 @@ class FakeRunner:
         self.reviewer_artifact: Callable[..., str | None] | None = None
         # How many relay calls fail before one succeeds.
         self.relay_failures = 0
+        # How many relay calls report success while publishing nothing. This is
+        # the transport that looks fine from the outside and left the PR
+        # untouched — the one an artifact posted by somebody else could
+        # otherwise be mistaken for.
+        self.relay_noops = 0
+        # Every prepared artifact path a relay was asked to publish.
+        self.relayed_files: list[str] = []
+        # What each reviewer lane was actually handed as frozen evidence, read
+        # at call time. The scratch directory is cleaned up after a clean run,
+        # so a test that waits until afterwards has nothing left to read.
+        self.evidence_packets: list[dict] = []
         # The login the relay publishes under. Changing it models a relay that
         # reported success while the artifact landed as somebody else.
         self.relay_author = REVIEWER_LOGIN
         # Every environment the runner was handed, per lane program.
         self.lane_env: list[tuple[str, Mapping[str, str] | None]] = []
+        # What ``GH_CONFIG_DIR`` actually pointed at when each lane was
+        # launched, as ``(program, path, was an empty directory)``. Observed
+        # here rather than after the run, because a clean run removes its
+        # scratch directory and "the path is gone now" is not the question.
+        self.lane_gh_config: list[tuple[str, str, bool]] = []
         # Every budget the runner was handed, per lane program.
         self.lane_budgets: list[tuple[str, Budget]] = []
         # What each builder invocation was actually handed, read at call time.
@@ -414,6 +465,12 @@ class FakeRunner:
             return self._git(checked)
         self.lane_env.append((checked[0], env))
         self.lane_budgets.append((checked[0], timeout))
+        configured = (env or {}).get("GH_CONFIG_DIR")
+        if configured is not None:
+            directory = Path(configured)
+            self.lane_gh_config.append(
+                (checked[0], configured, directory.is_dir() and not any(directory.iterdir()))
+            )
         if checked[0] == RELAY_PROGRAM:
             return self._relay(checked)
         blockers = _flag(checked, "--blockers")
@@ -423,6 +480,11 @@ class FakeRunner:
             )
         result = self.script(checked, str(cwd) if cwd is not None else None)
         if checked[0].startswith("lane-reviewer-"):
+            packet = _flag(checked, "--evidence-packet")
+            if packet:
+                self.evidence_packets.append(
+                    json.loads(Path(packet).read_text(encoding="utf-8"))
+                )
             self._prepare_artifact(checked, result)
         return result
 
@@ -451,6 +513,10 @@ class FakeRunner:
         if self.relay_failures:
             self.relay_failures -= 1
             return CommandResult(argv=argv, returncode=1, stdout="", stderr="relay refused")
+        self.relayed_files.append(_flag(argv, "--file"))
+        if self.relay_noops:
+            self.relay_noops -= 1
+            return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         source = Path(_flag(argv, "--file"))
         self.remote.comment(source.read_text(encoding="utf-8"), author=self.relay_author)
         return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
@@ -576,6 +642,8 @@ def reviewer_lane(name: str, role: str, program: str) -> dict[str, object]:
             "{pr}",
             "--artifact-file",
             "{artifact_file}",
+            "--evidence-packet",
+            "{evidence_packet}",
         ],
         "artifact_author": REVIEWER_LOGIN,
         "artifact_signature": REVIEWER_SIGNATURE,

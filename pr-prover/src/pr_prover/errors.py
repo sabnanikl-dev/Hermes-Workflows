@@ -107,6 +107,19 @@ class ReviewerRelayError(FailClosed):
     reason = "relay-failure"
 
 
+class EvidencePacketError(FailClosed):
+    """The frozen evidence a credential-free reviewer judges from is unusable.
+
+    Distinct from :class:`ReviewerRelayError` because it stops the lane at the
+    other end of the lifecycle: the packet is what a lane with no GitHub
+    credential reads *before* it reviews, so an empty, malformed, or
+    wrongly-bound one means the review would have been formed against the wrong
+    head — or against nothing — rather than that transport failed.
+    """
+
+    reason = "evidence-packet"
+
+
 class HumanFeedbackPresent(FailClosed):
     """The PR carries feedback this run cannot attribute to one of its own lanes."""
 
@@ -160,6 +173,7 @@ FAILURE_CLASSES = (
     AmbiguousPush.reason,
     ReadbackMismatch.reason,
     ReviewerRelayError.reason,
+    EvidencePacketError.reason,
     HumanFeedbackPresent.reason,
     ScopeContamination.reason,
     BuilderRefusal.reason,
@@ -282,6 +296,14 @@ _PLAYBOOK: dict[str, _Playbook] = {
         escalation=(
             "always: a reviewer artifact is the reviewer lane's own output and the relay's "
             "own transport, and the builder never writes, edits, or republishes one"
+        ),
+    ),
+    EvidencePacketError.reason: _Playbook(
+        remediation=_STOP_ONLY,
+        escalation=(
+            "always: the frozen packet is this run's own read of GitHub, so a lane that cannot "
+            "get one bound to the current head has nothing to review and the builder has "
+            "nothing to fix about it"
         ),
     ),
     HumanFeedbackPresent.reason: _Playbook(
@@ -453,6 +475,7 @@ __all__ = [
     "BuilderRefusal",
     "CommandContractError",
     "ConfigError",
+    "EvidencePacketError",
     "FailClosed",
     "FailureRecord",
     "GitHubError",

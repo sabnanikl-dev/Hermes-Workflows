@@ -10,6 +10,8 @@ Only the third is evidence, and the loop is required to hold out for it.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -20,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from _support import (
     HEAD_A,
     HEAD_B,
+    RELAY_PROGRAM,
+    REVIEWER_LANES,
     REVIEWER_LOGIN,
     REVIEWER_SIGNATURE,
     builder_output,
@@ -31,11 +35,13 @@ from pr_prover.github import Comment
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN
 from pr_prover.reviewers import (
     CREDENTIAL_ENV,
+    GH_CONFIG_DIR_ENV,
     MAX_PREPARED_BYTES,
     artifact_disagreement,
     artifact_matches,
     artifact_path,
     credential_free,
+    credential_free_config_dir,
     parse_artifact,
     read_prepared,
 )
@@ -194,19 +200,63 @@ class PreparedArtifactTests(unittest.TestCase):
 
 
 class CredentialFreeLaneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.config_dir = credential_free_config_dir(self.tmp, reviewer="A")
+
     def test_every_named_credential_is_dropped(self) -> None:
         base = {name: "secret" for name in CREDENTIAL_ENV}
         base["HOME"] = "/Users/example"
-        resolved = credential_free(None, base=base)
+        resolved = credential_free(None, base=base, config_dir=self.config_dir)
         for name in CREDENTIAL_ENV:
             self.assertNotIn(name, resolved)
         self.assertEqual(resolved["HOME"], "/Users/example")
 
     def test_inheriting_untouched_still_becomes_a_concrete_credential_free_map(self) -> None:
         """``None`` is exactly how the operator's token would otherwise get through."""
-        resolved = credential_free(None, base={"GH_TOKEN": "ghp_x", "PATH": "/bin"})
+        resolved = credential_free(
+            None, base={"GH_TOKEN": "ghp_x", "PATH": "/bin"}, config_dir=self.config_dir
+        )
         self.assertIsNotNone(resolved)
         self.assertNotIn("GH_TOKEN", resolved)
+
+    def test_a_stored_gh_login_is_out_of_reach_without_retargeting_home(self) -> None:
+        """The operator's ordinary logged-in machine, minus the token variables.
+
+        This is the shape the false-pass came in: no ``GH_TOKEN`` anywhere, and
+        a perfectly good stored session still reachable through the three paths
+        ``gh`` searches. The lane environment must break all three for ``gh``
+        while leaving the session variables the trusted agent authenticates
+        through exactly where they were.
+        """
+        base = {
+            "HOME": "/Users/example",
+            "USER": "example",
+            "SHELL": "/bin/zsh",
+            "XDG_CONFIG_HOME": "/Users/example/.config",
+            "GH_CONFIG_DIR": "/Users/example/.config/gh",
+            "PATH": "/usr/bin",
+        }
+        resolved = credential_free(None, base=base, config_dir=self.config_dir)
+
+        self.assertEqual(resolved["GH_CONFIG_DIR"], str(self.config_dir))
+        self.assertEqual(sorted(self.config_dir.iterdir()), [])
+        # HOME, XDG_CONFIG_HOME and the rest of the session are untouched: the
+        # denial is scoped to gh, and synthesizing a HOME is what the mission
+        # forbids and what would take Codex's own OAuth down with it.
+        for name in ("HOME", "USER", "SHELL", "XDG_CONFIG_HOME", "PATH"):
+            self.assertEqual(resolved[name], base[name])
+
+    def test_each_lane_gets_its_own_empty_directory_even_if_one_is_there(self) -> None:
+        """A directory left by an earlier lane is emptied, not reused as-is."""
+        (self.config_dir / "hosts.yml").write_text("github.com:\n", encoding="utf-8")
+        again = credential_free_config_dir(self.tmp, reviewer="A")
+        self.assertEqual(again, self.config_dir)
+        self.assertEqual(sorted(again.iterdir()), [])
+        other = credential_free_config_dir(self.tmp, reviewer="Integration Auditor")
+        self.assertNotEqual(other, self.config_dir)
+        self.assertTrue(other.is_dir())
 
 
 class PublishedArtifactTests(unittest.TestCase):
@@ -383,6 +433,194 @@ class RelayLifecycleLoopTests(LoopHarness):
         self.assertEqual(
             sorted(owned), sorted(comment.identifier for comment in self.remote.comments)
         )
+
+    def test_the_judging_lane_has_no_route_to_a_stored_gh_login_either(self) -> None:
+        """Dropping the token variables is necessary and was never sufficient.
+
+        ``gh`` resolves a stored session through ``GH_CONFIG_DIR``, then
+        ``$XDG_CONFIG_HOME/gh``, then ``$HOME/.config/gh``, so a lane that only
+        lost ``GH_TOKEN`` could still publish under the operator's login. Each
+        lane is therefore pointed at an empty directory it owns — and at its
+        own, so one lane cannot be handed whatever another left behind.
+        """
+        loop = self.build()
+        self.review_round(HEAD_A)
+        loop.run()
+
+        observed = [
+            (path, empty)
+            for program, path, empty in self.runner.lane_gh_config
+            if program.startswith("lane-reviewer-")
+        ]
+        self.assertEqual(len(observed), 3)
+        self.assertEqual(len({path for path, _ in observed}), 3, "one per lane, not one shared")
+        for path, empty in observed:
+            self.assertTrue(empty, f"{path} was not an empty directory when the lane launched")
+
+        for program, env in self.runner.lane_env:
+            if not program.startswith("lane-reviewer-"):
+                continue
+            self.assertIn(GH_CONFIG_DIR_ENV, env)
+            # HOME and the rest of the session are not retargeted: the mission
+            # forbids a synthetic HOME, and it is where the trusted agent's own
+            # OAuth session lives. Denying gh must not deny Codex.
+            for name in ("HOME", "USER", "SHELL"):
+                if name in os.environ:
+                    self.assertEqual(env.get(name), os.environ[name])
+
+    def test_the_relay_keeps_its_own_transport_authority(self) -> None:
+        """Only the judging half is denied. The relay publishes as it always did."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        relay_envs = [env for program, env in self.runner.lane_env if program == RELAY_PROGRAM]
+        self.assertEqual(len(relay_envs), 3)
+        for env in relay_envs:
+            # No overlay is configured for the relay, so it inherits untouched —
+            # including whatever gh session it already holds.
+            self.assertIsNone(env)
+        self.assertEqual(len(self.remote.comments), 3)
+        for item in result.transport:
+            self.assertTrue(item.read_back, item.lane)
+
+
+class TransportAttributionTests(LoopHarness):
+    """Which post this run is allowed to call its own transport.
+
+    The pre-launch snapshot answers "did this id exist before the lane started".
+    That is not the same question as "did this relay publish it", and the
+    difference is the whole defect: a valid artifact posted by the judging lane
+    itself — under the configured login, on the right head, with every
+    declaration correct — satisfies the first and says nothing about the second.
+    So attribution runs off a second snapshot taken after the lane exits and
+    immediately before the relay is launched.
+    """
+
+    def lane_posts_its_own_artifact(self, program: str, head: str, role: str) -> None:
+        """Script one reviewer lane to publish a valid artifact for itself.
+
+        This is what a reachable stored login buys: not a forgery, a genuine
+        post under the configured account, indistinguishable from the relay's
+        by anything except when it happened.
+        """
+        self.script.add(
+            program,
+            reviewer_output(head),
+            after=lambda: self.remote.comment(
+                reviewer_artifact(role=role, head=head), author=REVIEWER_LOGIN
+            ),
+        )
+
+    def test_a_lane_side_post_cannot_stand_in_for_a_relay_that_published_nothing(
+        self,
+    ) -> None:
+        """The counterexample, end to end: complete-looking transport, zero relay posts.
+
+        Every relay exits zero and publishes nothing; each lane posts its own
+        valid artifact instead. Before the pre-relay snapshot this produced
+        ``merge-ready`` with three complete transport records. It must now fail
+        closed with neither.
+        """
+        loop = self.build()
+        for program, role in (
+            ("lane-reviewer-A", "reviewer-a"),
+            ("lane-reviewer-B", "reviewer-b"),
+            ("lane-reviewer-Auditor", "integration-auditor"),
+        ):
+            self.lane_posts_its_own_artifact(program, HEAD_A, role)
+        self.runner.relay_noops = 3
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        # The lane-side posts really did land, under the configured login.
+        self.assertEqual(len(self.remote.comments), 1)
+        self.assertEqual(self.remote.comments[0].author, REVIEWER_LOGIN)
+        # ...and none of them was credited as transport.
+        self.assertEqual(len(result.transport), 1)
+        self.assertTrue(result.transport[0].prepared)
+        self.assertFalse(result.transport[0].read_back)
+        self.assertFalse(result.transport[0].identifier)
+        self.assertEqual(self.state().get("verified_artifacts", []), [])
+
+    def test_the_evidence_names_the_post_that_arrived_while_the_lane_ran(self) -> None:
+        """A missing relay post should not read as an unexplained readback puzzle."""
+        loop = self.build()
+        self.lane_posts_its_own_artifact("lane-reviewer-A", HEAD_A, "reviewer-a")
+        self.runner.relay_noops = 1
+
+        result = loop.run()
+
+        self.assertEqual(result.reason, "readback-mismatch")
+        evidence = result.failures[0].evidence
+        self.assertEqual(evidence["artifacts_published_before_transport"], 1)
+        self.assertEqual(evidence["artifacts_since_transport_began"], 0)
+
+    def test_a_real_relay_post_is_retained_and_the_lane_side_copy_is_not(self) -> None:
+        """Both posts are valid and both are under the configured login.
+
+        Only one of them is this run's transport, and the run keeps that one.
+        """
+        loop = self.build()
+        self.lane_posts_its_own_artifact("lane-reviewer-A", HEAD_A, "reviewer-a")
+        self.script.add("lane-reviewer-B", reviewer_output(HEAD_A))
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        # Four comments: A's lane-side copy plus one relay post per lane.
+        self.assertEqual(len(self.remote.comments), 4)
+        lane_side = self.remote.comments[0].identifier
+        owned = self.state()["verified_artifacts"]
+        self.assertEqual(len(owned), 3)
+        self.assertNotIn(lane_side, owned)
+        self.assertNotIn(lane_side, [item.identifier for item in result.transport])
+        for item in result.transport:
+            self.assertTrue(item.identifier)
+            self.assertIn(item.identifier, owned)
+
+    def test_a_copied_artifact_that_predates_the_lane_still_never_counts(self) -> None:
+        """The pre-launch snapshot keeps doing its own job as well."""
+        loop = self.build()
+        self.remote.comment(
+            reviewer_artifact(role="reviewer-a", head=HEAD_A), author=REVIEWER_LOGIN
+        )
+        self.review_round(HEAD_A)
+        self.runner.relay_noops = 1
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+
+    def test_a_self_publishing_lane_still_attributes_from_its_launch(self) -> None:
+        """No relay means no relay window; the pre-launch snapshot is the newest one."""
+        lanes = [
+            {
+                "name": name,
+                "role": role,
+                "argv": [program, "--role", "{role}", "--head", "{head}"],
+                "artifact_author": REVIEWER_LOGIN,
+                "artifact_signature": REVIEWER_SIGNATURE,
+            }
+            for name, role, program in REVIEWER_LANES
+        ]
+        loop = self.build(reviewers=lanes)
+        for program, role in (
+            ("lane-reviewer-A", "reviewer-a"),
+            ("lane-reviewer-B", "reviewer-b"),
+            ("lane-reviewer-Auditor", "integration-auditor"),
+        ):
+            self.lane_posts_its_own_artifact(program, HEAD_A, role)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(len(self.state()["verified_artifacts"]), 3)
 
 
 if __name__ == "__main__":  # pragma: no cover

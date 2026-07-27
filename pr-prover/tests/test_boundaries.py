@@ -177,6 +177,134 @@ class GhBoundaryTests(unittest.TestCase):
             self.boundary(json.dumps({"commits": []})).commits("example/repo", 7)
 
 
+class GhReviewEvidenceTests(unittest.TestCase):
+    """The surfaces read only so a credential-free lane can be handed them.
+
+    A reviewer that cannot reach GitHub reads whatever this returns and nothing
+    else, so a first page silently presented as a whole surface is not a cosmetic
+    problem: it is a reviewer concluding there is no feedback because it was
+    handed none.
+    """
+
+    INLINE = [
+        {
+            "id": 11,
+            "user": {"login": "karanagent1"},
+            "body": "this line",
+            "path": "src/thing.py",
+            "line": 12,
+            "commit_id": HEAD_A.upper(),
+            "html_url": "https://example.invalid/c/11",
+        }
+    ]
+    CHECKS = {
+        "total_count": 1,
+        "check_runs": [
+            {"name": "tests", "status": "completed", "conclusion": "success"}
+        ],
+    }
+    ISSUES = {
+        "closingIssuesReferences": [
+            {"number": 1, "title": "mission", "state": "OPEN", "url": "https://example.invalid/1"}
+        ]
+    }
+
+    def boundary(self, *, inline=None, checks=None, issues=None) -> GhCliGitHub:
+        """A runner that answers each of the three reads with its own payload."""
+        pages = {
+            "comments?": json.dumps([self.INLINE if inline is None else inline]),
+            "check-runs?": json.dumps([self.CHECKS if checks is None else checks]),
+            "closingIssuesReferences": json.dumps(self.ISSUES if issues is None else issues),
+        }
+        self.seen: list[tuple[str, ...]] = []
+
+        class Scripted:
+            def run(inner, argv, *, cwd=None, env=None, timeout=None):
+                self.seen.append(tuple(argv))
+                joined = " ".join(argv)
+                for marker, payload in pages.items():
+                    if marker in joined:
+                        return CommandResult(
+                            argv=tuple(argv), returncode=0, stdout=payload, stderr=""
+                        )
+                raise AssertionError(f"unexpected gh call: {list(argv)}")
+
+        return GhCliGitHub(Scripted())
+
+    def test_the_three_surfaces_are_read_and_carried(self) -> None:
+        evidence = self.boundary().review_evidence("example/repo", 7, HEAD_A)
+
+        self.assertEqual(evidence.inline_comments[0].identifier, "inline:11")
+        self.assertEqual(evidence.inline_comments[0].path, "src/thing.py")
+        self.assertEqual(evidence.inline_comments[0].line, 12)
+        # Lower-cased like every other head binding this tool compares.
+        self.assertEqual(evidence.inline_comments[0].commit_id, HEAD_A)
+        self.assertEqual(evidence.check_runs[0].conclusion, "success")
+        self.assertEqual(evidence.linked_issues[0].number, 1)
+
+    def test_each_read_that_can_prove_completeness_claims_it(self) -> None:
+        evidence = self.boundary().review_evidence("example/repo", 7, HEAD_A)
+
+        self.assertTrue(evidence.inline_comments_complete)
+        self.assertTrue(evidence.check_runs_complete)
+        self.assertTrue(evidence.linked_issues_complete)
+        self.assertTrue(evidence.reviews_complete)
+        # ...and the one that cannot does not. M5 is owed by PAPI-97.
+        self.assertFalse(evidence.conversation_comments_complete)
+
+    def test_the_paginated_reads_ask_gh_to_paginate(self) -> None:
+        self.boundary().review_evidence("example/repo", 7, HEAD_A)
+        paginated = [argv for argv in self.seen if "--paginate" in argv]
+        self.assertEqual(len(paginated), 2)
+        for argv in paginated:
+            self.assertIn("--slurp", argv)
+        self.assertTrue(any(HEAD_A in part for argv in paginated for part in argv))
+
+    def test_fewer_check_runs_than_github_counted_is_not_complete(self) -> None:
+        """The one surface that states its own total, held to it."""
+        evidence = self.boundary(
+            checks={"total_count": 3, "check_runs": self.CHECKS["check_runs"]}
+        ).review_evidence("example/repo", 7, HEAD_A)
+        self.assertEqual(len(evidence.check_runs), 1)
+        self.assertFalse(evidence.check_runs_complete)
+
+    def test_a_head_with_no_checks_is_complete_rather_than_unknown(self) -> None:
+        evidence = self.boundary(
+            checks={"total_count": 0, "check_runs": []}
+        ).review_evidence("example/repo", 7, HEAD_A)
+        self.assertEqual(evidence.check_runs, ())
+        self.assertTrue(evidence.check_runs_complete)
+
+    def test_a_full_page_of_closing_issues_cannot_claim_completeness(self) -> None:
+        """A full page and a truncated one are the same response."""
+        issues = {
+            "closingIssuesReferences": [
+                {"number": index, "title": "x", "state": "OPEN"} for index in range(100)
+            ]
+        }
+        evidence = self.boundary(issues=issues).review_evidence("example/repo", 7, HEAD_A)
+        self.assertEqual(len(evidence.linked_issues), 100)
+        self.assertFalse(evidence.linked_issues_complete)
+
+    def test_a_pr_that_closes_nothing_is_complete(self) -> None:
+        evidence = self.boundary(issues={}).review_evidence("example/repo", 7, HEAD_A)
+        self.assertEqual(evidence.linked_issues, ())
+        self.assertTrue(evidence.linked_issues_complete)
+
+    def test_an_unusable_payload_fails_closed_rather_than_reading_as_empty(self) -> None:
+        for label, kwargs in (
+            ("inline comment with no author", {"inline": [{"id": 1, "body": "x"}]}),
+            ("inline comment with no id", {"inline": [{"user": {"login": "a"}, "body": "x"}]}),
+            ("check-run page that is not an object", {"checks": ["nope"]}),
+            ("check-run page with no check_runs", {"checks": {"total_count": 0}}),
+            ("closing reference with no number", {"issues": {"closingIssuesReferences": [{}]}}),
+            ("closing references that are not an array", {"issues": {"closingIssuesReferences": 3}}),
+        ):
+            with self.subTest(payload=label):
+                with self.assertRaises(GitHubError):
+                    self.boundary(**kwargs).review_evidence("example/repo", 7, HEAD_A)
+
+
 class RedactionTests(unittest.TestCase):
     def test_github_tokens_are_removed(self) -> None:
         for token in ("ghp_abcdefghijklmnopqrstuvwxyz012345", "gho_abcdefghijklmnopqrstuvwxyz012345"):

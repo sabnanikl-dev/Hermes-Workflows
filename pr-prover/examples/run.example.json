@@ -36,6 +36,7 @@
         "--base", "{base}",
         "--worktree", "{worktree}",
         "--artifact-file", "{artifact_file}",
+        "--evidence-packet", "{evidence_packet}",
         "--signature", "Reviewed by: CodexReviewer via Hermes orchestration",
         "--focus", "correctness, safety, failure behaviour, tests, and regressions"
       ],
@@ -63,6 +64,7 @@
         "--base", "{base}",
         "--worktree", "{worktree}",
         "--artifact-file", "{artifact_file}",
+        "--evidence-packet", "{evidence_packet}",
         "--signature", "Reviewed by: CodexReviewer via Hermes orchestration",
         "--focus", "architecture, maintainability, mission drift, and proportionality"
       ],
@@ -90,6 +92,7 @@
         "--base", "{base}",
         "--worktree", "{worktree}",
         "--artifact-file", "{artifact_file}",
+        "--evidence-packet", "{evidence_packet}",
         "--signature", "Reviewed by: CodexReviewer via Hermes orchestration",
         "--focus", "the shipped configuration, prompts, parsers, GitHub readback, and exact-head outcome as one end-to-end contract, including the Reviewer A and Reviewer B artifacts already published for this head"
       ],

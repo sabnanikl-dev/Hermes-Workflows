@@ -5,16 +5,21 @@ GitHub credential to publish with, because the identity a reviewer publishes
 under is not the identity its lane happens to run as. So the artifact takes one
 explicit route::
 
-    credential-free audit  ->  prepared artifact under the OS temp directory
+    frozen evidence packet  ->  credential-free audit
+      ->  prepared artifact under the OS temp directory
       ->  trusted relay command publishing under the reviewer identity
       ->  GitHub readback of what actually landed
 
 Each step is separately checkable, and this module holds the checks:
 
-* :func:`credential_free` is what a relayed lane's environment is put through —
-  the named GitHub credential variables are removed, and nothing else about the
-  inherited session is touched, because the trusted lanes authenticate through
-  the operator's own logged-in session;
+* :func:`credential_free_config_dir` and :func:`credential_free` are what a
+  relayed lane's environment is put through — the named GitHub credential
+  variables are removed *and* ``gh``'s configuration search is pointed at a
+  fresh empty run-owned directory, so a stored login is no longer reachable
+  either. Everything else about the inherited session is left exactly as it is:
+  the denial is scoped to ``gh``, so the trusted agent keeps the OAuth session
+  it actually runs on. What the lane reads instead of a live PR is
+  :mod:`pr_prover.packet`;
 * :func:`parse_artifact` is the one canonical parser for the declaration block
   every artifact must carry, so the file a lane wrote and the post that reached
   GitHub are read by exactly the same code;
@@ -66,6 +71,7 @@ attempted kill-switch has not done the job the prompt asked for.
 from __future__ import annotations
 
 import re
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +87,12 @@ CREDENTIAL_ENV = (
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
 )
+
+# Where ``gh`` looks for a stored login first. Pointed at a fresh empty
+# directory, it is also where ``gh`` stops looking: the documented search order
+# is this variable, then ``$XDG_CONFIG_HOME/gh``, then ``$HOME/.config/gh``, and
+# only a host the resolved configuration already knows sends ``gh`` to a keyring.
+GH_CONFIG_DIR_ENV = "GH_CONFIG_DIR"
 
 # A review artifact is prose. A quarter of a megabyte is far more than any real
 # one and small enough that a runaway lane cannot fill the relay's argv or the
@@ -285,20 +297,57 @@ class PreparedArtifact:
         return len(self.body.encode("utf-8"))
 
 
+def credential_free_config_dir(scratch: Path, *, reviewer: str) -> Path:
+    """A fresh, empty, run-owned ``gh`` configuration directory for one lane.
+
+    Created rather than merely named, and emptied if anything is already at the
+    path, because the whole value of pointing ``GH_CONFIG_DIR`` here is that
+    there is nothing in it to authenticate with.
+    """
+    slug = "".join(character if character.isalnum() else "-" for character in reviewer)
+    path = scratch / f"gh-config-{slug}"
+    try:
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True)
+    except OSError as exc:
+        raise ReviewerRelayError(
+            f"could not create an empty gh configuration directory for reviewer {reviewer}: {exc}",
+            evidence={"reviewer": reviewer, "gh_config_dir": str(path)},
+        ) from exc
+    return path
+
+
 def credential_free(
-    env: Mapping[str, str] | None, *, base: Mapping[str, str]
+    env: Mapping[str, str] | None, *, base: Mapping[str, str], config_dir: Path
 ) -> dict[str, str]:
-    """The lane environment with every GitHub credential dropped by name.
+    """The lane environment with no route to a GitHub identity left in it.
 
     ``env`` is the lane's own overlay result, or ``None`` for "inherit
     untouched" — which still has to become a concrete mapping here, because
     inheriting untouched is exactly how the operator's token would reach a lane
-    that must not have one. Nothing else is rebuilt: the session variables the
-    trusted agents authenticate through are left exactly as they are.
+    that must not have one.
+
+    Dropping the four token variables is necessary and, on its own, not
+    sufficient. An operator who is normally logged in has a stored ``gh``
+    session, and ``gh`` finds it through ``GH_CONFIG_DIR``, else
+    ``$XDG_CONFIG_HOME/gh``, else ``$HOME/.config/gh`` — so a lane that merely
+    lost ``GH_TOKEN`` can still publish under the operator's login, and a post
+    it made would be indistinguishable from the relay's. Pointing
+    ``GH_CONFIG_DIR`` at a fresh empty directory removes that: the search stops
+    at the first entry, finds no host, and consults no keyring, because ``gh``
+    only reaches for stored credentials for hosts its configuration knows.
+
+    ``HOME`` is deliberately *not* retargeted. It is the variable the trusted
+    agents' own OAuth and keychain sessions hang off, the mission forbids
+    synthesizing one, and doing so would break Codex in the same stroke as
+    ``gh``. One narrow variable is the whole mechanism, and it is scoped to
+    ``gh`` alone.
     """
     resolved = dict(base if env is None else env)
     for name in CREDENTIAL_ENV:
         resolved.pop(name, None)
+    resolved[GH_CONFIG_DIR_ENV] = str(config_dir)
     return resolved
 
 
@@ -451,6 +500,7 @@ __all__ = [
     "BLOCKING_PREFIX",
     "CREDENTIAL_ENV",
     "DECLARATION_PREFIXES",
+    "GH_CONFIG_DIR_ENV",
     "HEAD_PREFIX",
     "KILL_SWITCH_PREFIX",
     "MAX_PREPARED_BYTES",
@@ -464,6 +514,7 @@ __all__ = [
     "artifact_matches",
     "artifact_path",
     "credential_free",
+    "credential_free_config_dir",
     "declarations",
     "expected_block",
     "is_full_sha",

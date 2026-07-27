@@ -18,11 +18,19 @@ because only the REST payload carries ``commit_id``, the commit GitHub itself
 records a review against. That field is a head binding the author cannot retype,
 so where it exists the loop uses it alongside the artifact's own declaration.
 
+A fifth read, :meth:`GhCliGitHub.review_evidence`, exists for a different
+reason. The judging lanes run with no GitHub credential at all, so they cannot
+inspect the PR for themselves; this boundary reads the inline comments, the
+check runs for the exact head, and the issues the PR claims to close, and the
+loop freezes them into the packet the lane judges from.
+
 Completeness of the *whole* human-feedback surface — pagination guarantees,
 inline review threads, and their resolution state — is the deterministic
 reconciliation slice's obligation, not this one's. What ships here is the
-artifact readback these reads exist for, plus the conservative stop the loop
-builds on top of them.
+artifact readback these reads exist for, the frozen packet those reviewers
+read, and the conservative stop the loop builds on top of them. Where a read
+cannot prove it reached the end, it says so rather than presenting a first page
+as the whole surface.
 
 Everything returned here is untrusted data. PR titles, bodies, comment bodies,
 and review bodies are spec evidence, never instructions.
@@ -85,6 +93,73 @@ class Comment:
     state: str = ""
 
 
+@dataclass(frozen=True)
+class InlineComment:
+    """One inline review comment, against a path and line in the diff."""
+
+    identifier: str
+    author: str
+    body: str
+    path: str = ""
+    line: int | None = None
+    commit_id: str = ""
+    url: str = ""
+
+
+@dataclass(frozen=True)
+class CheckRun:
+    """One check run GitHub recorded against the exact head."""
+
+    name: str
+    status: str
+    conclusion: str
+    url: str = ""
+
+
+@dataclass(frozen=True)
+class LinkedIssue:
+    """One issue this PR declares it closes."""
+
+    number: int
+    title: str
+    state: str
+    url: str = ""
+
+
+@dataclass(frozen=True)
+class ReviewEvidence:
+    """The read-only PR surfaces a judging lane needs and readback does not.
+
+    The loop already reads conversation comments and submitted reviews, because
+    it has to read its own lanes' artifacts back. A reviewer that cannot reach
+    GitHub at all needs three more: what was said inline on the diff, what the
+    checks say about this exact commit, and which issues the PR claims to close.
+
+    Each surface carries its own completeness flag rather than one for the whole
+    object, because they are read three different ways and only some of those
+    ways can prove they reached the end. A ``False`` here is not a failure — it
+    is the packet telling the reviewer that this surface may be partial, which
+    is a different thing from saying it is empty.
+
+    ``conversation_comments_complete`` and ``reviews_complete`` describe reads
+    this object does not hold. They live here anyway because completeness is a
+    property of *how a boundary read a surface*, and this boundary is the only
+    thing that knows: the loop receives plain tuples from :meth:`comments` and
+    :meth:`reviews` and cannot tell a paginated read from a first page. Proving
+    the conversation surface complete is PAPI-97's obligation (M5), so the
+    default here is the honest one.
+    """
+
+    inline_comments: tuple[InlineComment, ...] = ()
+    check_runs: tuple[CheckRun, ...] = ()
+    linked_issues: tuple[LinkedIssue, ...] = ()
+    inline_comments_complete: bool = False
+    check_runs_complete: bool = False
+    linked_issues_complete: bool = False
+    conversation_comments_complete: bool = False
+    reviews_complete: bool = False
+
+
 class GitHubBoundary(Protocol):
     """Injection seam for every GitHub read the loop performs."""
 
@@ -95,6 +170,8 @@ class GitHubBoundary(Protocol):
     def comments(self, repo: str, number: int) -> tuple[Comment, ...]: ...
 
     def reviews(self, repo: str, number: int) -> tuple[Comment, ...]: ...
+
+    def review_evidence(self, repo: str, number: int, head: str) -> ReviewEvidence: ...
 
 
 class GhCliGitHub:
@@ -159,6 +236,72 @@ class GhCliGitHub:
         # A PR reviewed more times than one page holds must not silently lose
         # the page the current head's artifact is on.
         return tuple(_review_from(item) for item in _flatten_pages(payload))
+
+    def review_evidence(self, repo: str, number: int, head: str) -> ReviewEvidence:
+        """The three surfaces a credential-free lane cannot read for itself.
+
+        Inline comments and check runs go through the REST API with
+        ``--paginate``; the check-run response also states how many the head
+        has, so "every page arrived" is checkable rather than assumed. Closing
+        issue references come from ``gh pr view``, which asks for one page, so
+        completeness is only claimed when fewer came back than that page holds.
+        """
+        owner, _, name = repo.partition("/")
+        inline = tuple(
+            _inline_comment_from(item)
+            for item in _flatten_pages(
+                self._json_list(
+                    [
+                        self._gh,
+                        "api",
+                        "--paginate",
+                        "--slurp",
+                        f"repos/{owner}/{name}/pulls/{number}/comments?per_page=100",
+                    ],
+                    what="pull request inline comments",
+                )
+            )
+        )
+        checks, checks_complete = _check_runs_from(
+            self._json_list(
+                [
+                    self._gh,
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    f"repos/{owner}/{name}/commits/{head}/check-runs?per_page=100",
+                ],
+                what="check runs for the exact head",
+            )
+        )
+        issues, issues_complete = _linked_issues_from(
+            self._json(
+                [
+                    self._gh,
+                    "pr",
+                    "view",
+                    str(number),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "closingIssuesReferences",
+                ],
+                what="pull request closing issue references",
+            )
+        )
+        return ReviewEvidence(
+            inline_comments=inline,
+            check_runs=checks,
+            linked_issues=issues,
+            inline_comments_complete=True,
+            check_runs_complete=checks_complete,
+            linked_issues_complete=issues_complete,
+            # ``reviews`` is read with ``--paginate`` to the last page;
+            # ``comments`` is one ``gh pr view`` read with no such guarantee,
+            # and proving that surface complete is PAPI-97's obligation.
+            conversation_comments_complete=False,
+            reviews_complete=True,
+        )
 
     def _json_list(self, argv: Sequence[str], *, what: str) -> list[Any]:
         result = self._runner.run(argv, timeout=self._timeout)
@@ -365,4 +508,105 @@ def _review_from(payload: object) -> Comment:
     )
 
 
-__all__ = ["Comment", "GhCliGitHub", "GitHubBoundary", "PullRequest"]
+def _inline_comment_from(payload: object) -> InlineComment:
+    """One inline review comment from the REST API."""
+    if not isinstance(payload, dict):
+        raise GitHubError("inline comment payload is not an object")
+    user = payload.get("user")
+    login = str(user.get("login") or "") if isinstance(user, dict) else ""
+    if not login:
+        raise GitHubError(
+            "inline comment payload has no author login",
+            evidence={"comment_id": str(payload.get("id") or "")},
+        )
+    identifier = payload.get("id")
+    if not isinstance(identifier, (int, str)) or isinstance(identifier, bool):
+        raise GitHubError("inline comment payload has no stable id", evidence={"author": login})
+    body = payload.get("body")
+    if body is not None and not isinstance(body, str):
+        raise GitHubError("inline comment payload has an unusable body", evidence={"author": login})
+    line = payload.get("line")
+    commit_id = payload.get("commit_id")
+    return InlineComment(
+        identifier=f"inline:{identifier}",
+        author=login,
+        body=body or "",
+        path=str(payload.get("path") or ""),
+        line=line if isinstance(line, int) and not isinstance(line, bool) else None,
+        commit_id=(commit_id if isinstance(commit_id, str) else "").lower(),
+        url=str(payload.get("html_url") or ""),
+    )
+
+
+def _check_runs_from(pages: list[Any]) -> tuple[tuple[CheckRun, ...], bool]:
+    """Every check run for one commit, and whether every page of them arrived.
+
+    The REST response states ``total_count`` for the whole set, so this is one
+    of the few surfaces where "complete" is a fact rather than an assumption.
+    """
+    runs: list[CheckRun] = []
+    total: int | None = None
+    for page in pages:
+        if not isinstance(page, dict):
+            raise GitHubError("check-run payload is not an object")
+        reported = page.get("total_count")
+        if total is None and isinstance(reported, int) and not isinstance(reported, bool):
+            total = reported
+        raw = page.get("check_runs")
+        if not isinstance(raw, list):
+            raise GitHubError("check-run payload has no check_runs array")
+        for item in raw:
+            if not isinstance(item, dict):
+                raise GitHubError("check-run entry is not an object")
+            runs.append(
+                CheckRun(
+                    name=str(item.get("name") or ""),
+                    status=str(item.get("status") or ""),
+                    conclusion=str(item.get("conclusion") or ""),
+                    url=str(item.get("html_url") or ""),
+                )
+            )
+    return tuple(runs), total is not None and len(runs) == total
+
+
+# ``gh pr view --json closingIssuesReferences`` asks for a single page. A full
+# one is indistinguishable from a truncated one, so completeness is claimed
+# only below it.
+_CLOSING_ISSUES_PAGE = 100
+
+
+def _linked_issues_from(payload: dict[str, Any]) -> tuple[tuple[LinkedIssue, ...], bool]:
+    """The issues this PR declares it closes, and whether that list is whole."""
+    raw = payload.get("closingIssuesReferences")
+    if raw is None:
+        return (), True
+    if not isinstance(raw, list):
+        raise GitHubError("closingIssuesReferences is not an array")
+    issues: list[LinkedIssue] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise GitHubError("closing issue reference is not an object")
+        number = item.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            raise GitHubError("closing issue reference has no issue number")
+        issues.append(
+            LinkedIssue(
+                number=number,
+                title=str(item.get("title") or ""),
+                state=str(item.get("state") or ""),
+                url=str(item.get("url") or ""),
+            )
+        )
+    return tuple(issues), len(issues) < _CLOSING_ISSUES_PAGE
+
+
+__all__ = [
+    "CheckRun",
+    "Comment",
+    "GhCliGitHub",
+    "GitHubBoundary",
+    "InlineComment",
+    "LinkedIssue",
+    "PullRequest",
+    "ReviewEvidence",
+]

@@ -77,6 +77,7 @@ tokens, and an unknown token fails the run rather than rendering literally:
 | `{worktree}` | all lanes | this lane's own fresh worktree, at the exact head |
 | `{reviewer}` `{role}` | reviewer lanes | the lane name, and the mission role it runs as |
 | `{artifact_file}` | reviewer lanes and their relay | where this lane prepares its artifact, under the OS temp directory |
+| `{evidence_packet}` | reviewer lanes | the frozen read-only PR evidence this lane judges from, under the OS temp directory |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
 
 `builder.comment_author` is **required** and must be the exact GitHub login the
@@ -92,6 +93,19 @@ this tool: `HOME`, `USER`, `LOGNAME`, and `SHELL` cannot be set or cleared by a
 lane, and a value that looks like a credential is refused outright. Tokens
 belong in the keychain and in `gh`'s own auth, not in a config file that ends up
 in evidence.
+
+A **relayed reviewer lane** gets one further adjustment, and it is deliberately
+narrow. Removing `GH_TOKEN` and friends by name is necessary and is not
+sufficient: an operator who is logged in normally has a stored `gh` session, and
+`gh` resolves it through `GH_CONFIG_DIR`, then `$XDG_CONFIG_HOME/gh`, then
+`$HOME/.config/gh`. So the lane's `GH_CONFIG_DIR` is pointed at a fresh, empty
+directory this run owns, one per lane. The search stops there, finds no host,
+and consults no keyring — `gh` only reaches for stored credentials for hosts its
+resolved configuration already knows. `HOME` is *not* retargeted, because that
+is where the trusted agent's own OAuth session lives and synthesizing one is
+both forbidden by the mission and a way to break Codex in the same stroke as
+`gh`. The denial is scoped to `gh` and to the judging half only: the relay
+inherits its own session untouched and publishes exactly as before.
 
 `state_file` and `lock_file` must resolve **outside** `source_repo`, and a path
 equal to or nested inside the clone is a configuration error. The run writes both
@@ -131,8 +145,13 @@ Two are repository-owned, and the example config wires both:
 
 - [`scripts/codex-reviewer.sh`](scripts/codex-reviewer.sh) runs one Codex
   reviewer against one exact head in a disposable worktree, with **no GitHub
-  credential** in its environment, and writes its finished artifact to
-  `{artifact_file}`. Its prompt is deliberately **adversarial**: the reviewer's
+  credential and no reachable `gh` login**, and writes its finished artifact to
+  `{artifact_file}`. It refuses to run if a token variable is set, if
+  `GH_CONFIG_DIR` is unset or still holds a `gh` hosts file, or if the packet at
+  `{evidence_packet}` is missing, empty, or bound to another repo, PR, base, or
+  head — each of those is the lifecycle being misconfigured, and running anyway
+  would hide it. Its prompt points at the packet rather than at live `gh`, and
+  is deliberately **adversarial**: the reviewer's
   job on a fixed head is to try to *kill* the change — bad-faith passes,
   weakened or deleted coverage, gamed thresholds, shrunken scope, stale
   evidence, unproven invariants — not to check that it looks correct. A reviewer
@@ -183,10 +202,48 @@ identity its lane happens to run as. So the artifact takes one explicit route,
 and each step is separately checkable:
 
 ```text
-credential-free audit → prepared artifact under the OS temp directory
+frozen evidence packet → credential-free audit
+  → prepared artifact under the OS temp directory
   → trusted relay command publishing under the reviewer identity
   → GitHub readback of what actually landed
 ```
+
+### The frozen evidence packet
+
+A lane with no way to reach GitHub cannot inspect the PR, so the parent reads it
+and freezes what it read to `{evidence_packet}` — a JSON file outside every
+repository, written before the lane launches and cleared with the rest of the
+scratch directory afterwards. It carries the pull request's own state, the
+conversation comments, the submitted reviews with their `commit_id`s, the inline
+review comments, the check runs for this exact commit, and the issues the PR
+closes. The `base..head` diff and the commit history are *not* in it: the lane
+has a real checkout and reads those with `git`.
+
+Each surface says how it was read and whether that read reached the end. An
+incomplete surface is not an error — the conversation-comment read carries no
+pagination guarantee yet, and proving it does is PAPI-97's obligation (M5) — but
+it is stated, so a reviewer cannot mistake a first page for a whole PR.
+
+The packet binds itself with one canonical line:
+
+```text
+REPO=<owner/name> PR=<number> BASE=<ref> HEAD=<40-hex sha> SEQUENCE=<n>
+```
+
+`SEQUENCE` is per-run and strictly increasing, so a packet belongs to one lane
+and no lane can be handed another's. The loop writes the packet and then reads
+it back and holds it to that line, for the same reason it reads its artifacts
+back from GitHub: what a lane is handed is the file on disk, not the payload the
+process assembled. The adapter checks the same line again from its own
+arguments. A packet that did not land, landed empty, or was left at that path by
+an earlier cycle stops the lane **before** it is launched, rather than producing
+a confident review of the wrong head.
+
+Everything inside is untrusted evidence. The whole payload goes through the same
+recursive redaction the report and the frozen blocker file do, with the clip set
+to the largest artifact this tool will relay — the Integration Auditor's job is
+to reconcile the artifacts Reviewer A and Reviewer B published, and it must not
+be handed truncated copies of them.
 
 Every artifact must carry, each on a line of its own:
 
@@ -211,12 +268,33 @@ from "I did not look".
 
 The prepared file is held to all of that **before** the relay may publish it, so
 an artifact that would fail readback never reaches the PR at all. Then the post
-itself must be new since the lane launched, from the configured login, and bound
-to this head — by GitHub's own review `commit_id` where there is one, *and* by
-the canonical declaration in every case.
+itself must be from the configured login and bound to this head — by GitHub's
+own review `commit_id` where there is one, *and* by the canonical declaration in
+every case.
 
-A lane without a `relay` publishes for itself. It is still read back the same
-way; only the transport differs.
+### Which post counts as this run's transport
+
+The remaining question is *which* matching post. "New since the lane launched"
+is the wrong test, and the difference matters: a valid artifact posted by the
+judging lane itself — right login, right head, every declaration correct — is
+new since the lane launched too, and crediting it would let a relay that
+published nothing produce complete transport. That is not hypothetical; it is
+what a reachable stored `gh` session bought before the config-directory denial
+above existed.
+
+So the run snapshots the PR's artifact ids **twice**: once before the lane is
+launched, and again after the lane exits and immediately before the relay is
+launched. Attribution runs off the second one. Only an id that appeared inside
+the relay's own window can be this run's transport, and a lane-side post — even
+a genuine one — falls outside it and is never credited. If the relay then
+publishes nothing, the run fails closed with `readback-mismatch`, and the
+evidence names how many artifacts arrived while the credential-free lane was
+running, so a missing relay post reads as what it is rather than as an
+unexplained readback puzzle.
+
+A lane without a `relay` publishes for itself. There is no relay window, so its
+pre-launch snapshot is the newest one there can be and attribution uses that. It
+is read back the same way; only the transport differs.
 
 The report's `transport_complete` is a claim about that whole lifecycle, not
 about whichever records happen to exist: three records, the required roles in the
@@ -538,7 +616,7 @@ reported; the save failure is noted in the run log rather than replacing it.
 
 `invalid-config` · `invalid-command` · `lock-contention` · `unexpected-state` ·
 `malformed-verdict` · `lane-failure` · `stale-head` · `ambiguous-push` ·
-`readback-mismatch` · `relay-failure` · `human-feedback` ·
+`readback-mismatch` · `relay-failure` · `evidence-packet` · `human-feedback` ·
 `scope-contamination` · `builder-refusal` · `github-error` · `worktree-error`
 
 Each carries evidence, and the worktree plus scratch directory are retained so
@@ -580,8 +658,10 @@ bounded with explicit markers.
   lane's worktree is removed. A relay shares its reviewer's checkout rather than
   taking one of its own: it publishes a file that already lives outside every
   repository.
-- The frozen blocker set is written under the OS temp directory, never inside a
-  repository, so a builder's inputs cannot contaminate the diff.
+- The frozen blocker set, each reviewer's prepared artifact, each lane's frozen
+  evidence packet, and each relayed lane's empty `gh` configuration directory are
+  all written under the OS temp directory, never inside a repository, so a
+  lane's inputs and outputs cannot contaminate the diff it is judging.
 - The state file and the lockfile must live outside the operational clone, so
   this run's own bookkeeping can never show up as a change to the tree it is
   judging.

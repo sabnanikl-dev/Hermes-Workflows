@@ -150,12 +150,14 @@ from .findings import (
     utc_now,
 )
 from .github import Comment, GitHubBoundary, PullRequest
+from .packet import EvidencePacket, build_packet, read_packet, write_packet
 from .redaction import evidence as redact_evidence
 from .redaction import sanitize
 from .reviewers import (
     artifact_matches,
     artifact_path,
     credential_free as credential_free_env,
+    credential_free_config_dir,
     expected_block,
     read_prepared,
 )
@@ -307,6 +309,10 @@ class ProverLoop:
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
         self._failures: list[FailureRecord] = []
         self._retained: list[str] = []
+        # Strictly increasing across the whole run, so a frozen evidence packet
+        # is bound to the one lane it was written for and no lane can be handed
+        # another's — including across a second fix cycle on a re-proved head.
+        self._packet_sequence = 0
         # The head the live PR was last actually observed on. ``state.head`` is
         # the head this run bound its work to; the two agree until GitHub moves
         # underneath the run, and a fail-closed report has to be able to tell
@@ -683,6 +689,13 @@ class ProverLoop:
         # Where a credential-free lane leaves its finished artifact. Outside
         # every repository, and cleared before the lane can be launched.
         prepared_path = artifact_path(self._scratch_dir(), reviewer=reviewer.name, head=head)
+        # A relayed lane cannot reach GitHub at all, so ``gh``'s configuration
+        # search is pointed at somewhere empty this run owns.
+        gh_config = (
+            credential_free_config_dir(self._scratch_dir(), reviewer=reviewer.name)
+            if relayed
+            else None
+        )
         lane = f"reviewer {reviewer.name}"
         # This reviewer's own checkout of the exact head, which no other lane
         # ever sees. The relay shares it rather than taking a second one: it
@@ -693,6 +706,10 @@ class ProverLoop:
         with self._lane_worktree(
             f"pr{pull.number}-{head[:12]}-{_slug(reviewer.role)}", head, lane=lane
         ) as worktree:
+            # The last thing before the lane is launched: one read of the PR's
+            # published surfaces, frozen to a file for a lane that cannot read
+            # them itself, and kept as the ids that were already there.
+            packet, known = self._freeze_evidence(reviewer, pull, head)
             values = self._values(
                 pull,
                 head,
@@ -701,20 +718,17 @@ class ProverLoop:
                     "reviewer": reviewer.name,
                     "role": reviewer.role,
                     "artifact_file": str(prepared_path),
+                    "evidence_packet": str(packet.path),
                 },
             )
             argv = render_argv(reviewer.argv, values, what=f"reviewer {reviewer.name!r}")
-            # Everything already published, captured before this lane can post.
-            # This snapshot is the only thing that can later tell this lane's
-            # artifact from a post that merely resembles one.
-            known = self._artifact_identities()
             result = self._run_lane(
                 argv,
                 lane=lane,
                 cwd=worktree,
                 timeout=reviewer.timeout,
                 env=reviewer.env,
-                credential_free=relayed,
+                credential_free=gh_config,
             )
             self._reject_timed_out(result, lane=lane, head=head)
             verdict = parse_reviewer_verdict(reviewer.name, _combined(result), expected_head=head)
@@ -736,7 +750,7 @@ class ProverLoop:
                 )
             )
             if relayed:
-                self._relay_artifact(
+                attributable = self._relay_artifact(
                     reviewer,
                     head,
                     prepared_path,
@@ -747,10 +761,17 @@ class ProverLoop:
                 )
             else:
                 # A self-publishing lane prepares and publishes in one step this
-                # loop cannot see between; only the readback below is evidence.
+                # loop cannot see between; only the readback below is evidence,
+                # and the pre-launch snapshot is the newest one there can be.
                 self._mark_transport(prepared=True, published=True)
+                attributable = known
         self._read_back_reviewer(
-            reviewer, head, known, status=verdict.status, blocking=blocking
+            reviewer,
+            head,
+            attributable,
+            launched=known,
+            status=verdict.status,
+            blocking=blocking,
         )
         self._event(
             f"reviewer {reviewer.name} returned {verdict.status} with "
@@ -768,21 +789,33 @@ class ProverLoop:
         cwd: Path,
         status: str,
         blocking: int,
-    ) -> None:
+    ) -> frozenset[str]:
         """Publish a credential-free reviewer's prepared artifact, once it validates.
 
-        This is the whole transport half of the lifecycle. The lane that just
-        exited had no GitHub credential, so nothing is on the PR yet; the file
-        it wrote is held to this reviewer's signature, role line, runtime,
-        declared status and blocking count, and this exact head before the
-        configured relay command is allowed to post it. An artifact that would
-        fail readback therefore never reaches GitHub at all, and a relay that
-        cannot publish stops the run rather than leaving the next step to
-        discover an absence it cannot explain.
+        This is the whole transport half of the lifecycle. The file the lane
+        wrote is held to this reviewer's signature, role line, runtime, declared
+        status and blocking count, and this exact head before the configured
+        relay command is allowed to post it. An artifact that would fail
+        readback therefore never reaches GitHub at all, and a relay that cannot
+        publish stops the run rather than leaving the next step to discover an
+        absence it cannot explain.
+
+        What is returned is the artifact-id snapshot taken *immediately before*
+        the relay ran, and it is the set readback attributes against. The
+        pre-launch snapshot cannot do that job: it answers "did this id exist
+        before the lane started", which a valid artifact posted by the lane
+        itself also satisfies. Only an id that appeared in the window this relay
+        owns is evidence that this relay published — so a reviewer-side post,
+        however well-formed and however genuinely under the configured login,
+        can never stand in for transport that never happened.
         """
         relay = reviewer.relay
         if relay is None:  # pragma: no cover - the caller only relays what has one
-            return
+            # Everything currently published, so nothing is attributable. The
+            # conservative answer is the right one for a branch that should not
+            # be reachable: an empty set would credit whatever happens to be on
+            # the PR to a transport that never ran.
+            return self._artifact_identities()
         artifact = read_prepared(
             prepared,
             reviewer=reviewer.name,
@@ -799,6 +832,10 @@ class ProverLoop:
         )
         lane = f"relay {reviewer.name}"
         argv = render_argv(relay.argv, values, what=f"reviewer {reviewer.name!r} relay")
+        # Taken here, after the reviewer has exited and before the relay is
+        # launched, so the only ids that can be credited to this transport are
+        # the ones that appear inside the relay's own window.
+        pre_relay = self._artifact_identities()
         result = self._run_lane(argv, lane=lane, cwd=cwd, timeout=relay.timeout, env=relay.env)
         self._reject_timed_out(result, lane=lane, head=head)
         if not result.ok:
@@ -816,34 +853,43 @@ class ProverLoop:
         self._event(
             f"reviewer {reviewer.name} artifact relayed for {head} as {reviewer.artifact_author}"
         )
+        return pre_relay
 
     def _read_back_reviewer(
         self,
         reviewer: ReviewerConfig,
         head: str,
-        known: frozenset[str],
+        attributable: frozenset[str],
         *,
+        launched: frozenset[str],
         status: str,
         blocking: int,
     ) -> None:
-        """Find this reviewer's published artifact on the PR, or stop.
+        """Find the artifact this run's own transport published, or stop.
 
         A lane's stdout is only what a process said about itself, and a relay's
         exit status only what the transport said about itself; the artifact
         Karan and the next reviewer act on is the one on the PR. So it must be
-        new since this lane was launched, published under the configured login,
-        carry this lane's role and runtime on their own lines, declare the same
-        status and blocking count the lane's marker did, and be bound to this
-        exact head — by GitHub's own ``commit_id`` where a review has one, and
-        by the canonical declaration in every case.
+        new since the moment transport began, published under the configured
+        login, carry this lane's role and runtime on their own lines, declare
+        the same status and blocking count the lane's marker did, and be bound
+        to this exact head — by GitHub's own ``commit_id`` where a review has
+        one, and by the canonical declaration in every case.
 
-        The id of whatever satisfies all of that is then retained. This is the
-        only moment the run can tell this lane's artifact from a post that
-        merely resembles one, because ``known`` is what proves the id did not
-        exist before the lane was launched.
+        ``attributable`` is that moment: for a relayed lane it is the snapshot
+        taken immediately before the relay ran, and for a self-publishing lane
+        the snapshot taken before it was launched. ``launched`` is always the
+        pre-launch one, and the difference between the two is diagnostic — a
+        credential-free lane that somehow published for itself shows up as a
+        count in the evidence rather than as a silently accepted artifact.
+
+        The id of whatever satisfies all of that is then retained. It is the one
+        part of a published artifact this run proved it caused: everything in
+        the body is copyable the moment a real artifact exists.
         """
         published = self._artifacts()
-        fresh = [item for item in published if item.identifier not in known]
+        fresh = [item for item in published if item.identifier not in attributable]
+        lane_published = len(attributable - launched)
         for artifact in fresh:
             if not artifact_matches(
                 artifact,
@@ -875,7 +921,12 @@ class ProverLoop:
                     role=reviewer.role, head=head, status=status, blocking=blocking
                 ),
                 "artifacts_seen": len(published),
-                "artifacts_since_lane_launched": len(fresh),
+                "artifacts_since_transport_began": len(fresh),
+                # Nonzero means something posted to the PR while a lane that has
+                # no GitHub credential was running. Whatever it was, it is not
+                # this run's transport, and naming it is how a missing relay post
+                # stops looking like a readback puzzle.
+                "artifacts_published_before_transport": lane_published,
             },
         )
 
@@ -955,6 +1006,60 @@ class ProverLoop:
                 },
             )
 
+    # -- frozen evidence for a lane that cannot read GitHub ----------------
+    def _freeze_evidence(
+        self, reviewer: ReviewerConfig, pull: PullRequest, head: str
+    ) -> tuple[EvidencePacket, frozenset[str]]:
+        """Freeze what this lane may read, and what it must not be credited for.
+
+        One read of the PR's published surfaces answers both questions at one
+        instant: it is the evidence a lane with no GitHub credential judges
+        from, and it is the set of artifact ids that already existed before that
+        lane was launched. Reading them separately would let a packet describe a
+        PR the snapshot disagrees with.
+
+        The packet is written and then read back from disk and held to its
+        binding, for the same reason every other claim here is re-read rather
+        than assumed: what the lane is handed is the file, not the payload this
+        process assembled. A packet that did not land, landed empty, or is the
+        one an earlier cycle left at that path stops the lane before it forms a
+        confident review of the wrong head.
+        """
+        comments = self.github.comments(self.config.repo, self.config.pr)
+        reviews = self.github.reviews(self.config.repo, self.config.pr)
+        evidence = self.github.review_evidence(self.config.repo, self.config.pr, head)
+        self._packet_sequence += 1
+        sequence = self._packet_sequence
+        payload = build_packet(
+            pull=pull,
+            repo=self.config.repo,
+            head=head,
+            sequence=sequence,
+            reviewer=reviewer.name,
+            role=reviewer.role,
+            comments=comments,
+            reviews=reviews,
+            evidence=evidence,
+        )
+        path = (
+            self._scratch_dir()
+            / f"evidence-{_slug(reviewer.name)}-{head[:12]}-{sequence}.packet.json"
+        )
+        packet = write_packet(path, payload)
+        read_packet(
+            path,
+            repo=self.config.repo,
+            pr=pull.number,
+            base=pull.base_ref_name,
+            head=head,
+            sequence=sequence,
+        )
+        self._event(
+            f"reviewer {reviewer.name} handed a {packet.size}-byte frozen evidence packet "
+            f"for {head} (sha256 {packet.digest[:12]}, sequence {sequence})"
+        )
+        return packet, frozenset(item.identifier for item in (*comments, *reviews))
+
     # -- run-owned artifacts ----------------------------------------------
     def _artifacts(self) -> tuple[Comment, ...]:
         """Every published comment and review on the PR, as untrusted evidence."""
@@ -1008,16 +1113,21 @@ class ProverLoop:
         cwd: Path,
         timeout: float | None,
         env: LaneEnv,
-        credential_free: bool = False,
+        credential_free: Path | None = None,
     ) -> CommandResult:
         """Launch one lane and keep its observable state.
 
         The environment is inherited and then adjusted by the lane's own named
         overlay, so the trusted agent keeps the session it authenticates with.
-        A ``credential_free`` lane additionally has the GitHub credential
-        variables removed by name: it audits and prepares an artifact, and its
-        relay publishes. While it runs, progress is recorded; when it ends, so
-        is how it ended. Silence is written down, never converted into a failure.
+        Passing ``credential_free`` — the fresh empty ``gh`` configuration
+        directory this lane owns — additionally strips the GitHub credential
+        variables by name and points ``gh``'s configuration search at that
+        directory: the lane audits and prepares an artifact, and its relay
+        publishes. It is one parameter rather than a flag and a path so that
+        asking for a credential-free lane without having somewhere empty to
+        point it at is not expressible. While it runs, progress is recorded;
+        when it ends, so is how it ended. Silence is written down, never
+        converted into a failure.
 
         The budget passed here is the budget enforced: a lane with none named
         runs to its own completion, which is what ``unbounded`` in the run log
@@ -1025,8 +1135,10 @@ class ProverLoop:
         """
         self._event(f"{lane} launched: {argv[0]} (budget {_budget(timeout)})")
         resolved = env.apply(os.environ)
-        if credential_free:
-            resolved = credential_free_env(resolved, base=os.environ)
+        if credential_free is not None:
+            resolved = credential_free_env(
+                resolved, base=os.environ, config_dir=credential_free
+            )
         result = self.runner.run(
             argv,
             cwd=cwd,
