@@ -829,9 +829,20 @@ One more file is worth naming, because it asks a different kind of question.
 Every other module proves a seam; [`tests/test_integration_matrix.py`](tests/test_integration_matrix.py)
 proves that the seams still hold *composed*, across a sequence of heads — the
 ordered pass from inspection through to the rendered report, several
-repository-native gates at once, visual QA selected and evidenced on the exact
-head, a quiet builder distinguished from a stalled one, and the artifact
-defects that must stop a run rather than reach the pull request.
+repository-native gates at once, visual QA selected deliberately and evidenced
+on the exact head, a quiet builder distinguished from a stalled one, and the
+artifact defects that must stop a run rather than reach the pull request.
+
+"Evidenced" there is meant literally. The scripted visual lane writes real image
+files and a head-bound manifest outside the checkout it rendered from, and the
+case reads them back: the files exist, decode as images, are the size the
+manifest declares, and are recorded against the head the lane was handed. Its
+negative cases are what give that meaning — a lane that only prints a sentence
+naming the head, a declared file that is not an image, an image that is not its
+declared size, and well-formed evidence recorded against a different head are
+each refused. Producing and reading those files is test support inside that
+module; `pr_prover` itself stores and validates no images, and what a browser
+lane's screenshots *mean* remains that gate's judgement rather than this tool's.
 
 Its load-bearing case is the one a passing loop cannot check for itself. A
 builder can satisfy a gate by deleting the test that failed it, and every

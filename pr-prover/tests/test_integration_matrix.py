@@ -26,9 +26,14 @@ suite: no network, no ``gh``, no real ``git``, and no real agent.
 """
 from __future__ import annotations
 
+import json
+import struct
 import sys
 import unittest
+import zlib
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -329,14 +334,135 @@ class NativeGateMatrixTests(LoopHarness):
         )
 
 
+# -- fixture-local screenshot evidence -------------------------------------
+#
+# A visual gate's whole claim is that something was rendered and looked at. A
+# fixture that scripts the *sentence* "captured 3 screenshots" proves only that
+# a string can contain a SHA, so the deterministic visual lane below writes real
+# image files instead, and the case reads them back. Everything here is test
+# support: no image is produced, stored, or validated by ``pr_prover``, and
+# nothing outside this module imports it. PNG is written and read from ``struct``
+# and ``zlib`` because a fixture that needs a dependency to make its own evidence
+# is a fixture that ends up skipped.
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+class VisualEvidenceError(AssertionError):
+    """Evidence offered for a head that is missing, unreadable, or another head's."""
+
+
+@dataclass(frozen=True)
+class Screenshot:
+    """One image file that was found, decoded, and matched to its manifest entry."""
+
+    path: Path
+    width: int
+    height: int
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+
+def png_bytes(width: int, height: int) -> bytes:
+    """A real, decodable PNG of exactly this size: signature, IHDR, IDAT, IEND."""
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)  # 8-bit greyscale
+    scanlines = b"".join(b"\x00" + bytes([(row * 7) % 256]) * width for row in range(height))
+    return b"".join(
+        (
+            _PNG_SIGNATURE,
+            _png_chunk(b"IHDR", header),
+            _png_chunk(b"IDAT", zlib.compress(scanlines, 6)),
+            _png_chunk(b"IEND", b""),
+        )
+    )
+
+
+def read_png_size(data: bytes) -> tuple[int, int]:
+    """Answer "is this an image, and how big" — or say why it is not one.
+
+    Deliberately strict about the parts a fabricated artifact gets wrong: the
+    signature, a well-formed 13-byte ``IHDR`` whose checksum matches its own
+    bytes, and a terminating ``IEND``. Truncated, transplanted, and
+    plain-text-with-a-``.png``-suffix files all fail here rather than being
+    counted as screenshots.
+    """
+    if not data.startswith(_PNG_SIGNATURE):
+        raise VisualEvidenceError("not an image: PNG signature missing")
+    if len(data) < 33:
+        raise VisualEvidenceError("not an image: truncated before the PNG header chunk")
+    length = struct.unpack(">I", data[8:12])[0]
+    kind, payload = data[12:16], data[16:29]
+    if kind != b"IHDR" or length != 13:
+        raise VisualEvidenceError(
+            f"not an image: first chunk is {kind!r}/{length}, not a 13-byte IHDR"
+        )
+    if struct.unpack(">I", data[29:33])[0] != zlib.crc32(kind + payload) & 0xFFFFFFFF:
+        raise VisualEvidenceError("corrupt image: PNG header checksum does not match")
+    if not data.endswith(_png_chunk(b"IEND", b"")):
+        raise VisualEvidenceError("corrupt image: PNG stream does not end with IEND")
+    width, height = struct.unpack(">II", payload[:8])
+    if width <= 0 or height <= 0:
+        raise VisualEvidenceError(f"degenerate image dimensions: {width}x{height}")
+    return width, height
+
+
+def verify_screenshot_evidence(
+    manifest: Path, *, head: str, disposable_root: Path
+) -> tuple[Screenshot, ...]:
+    """Prove a manifest and its files are this head's screenshot evidence.
+
+    Every clause is one way the claim fails: no record was written at all, the
+    record answers about a different head, it declares nothing, a declared file
+    is absent, it was left in a checkout the run throws away, it is not an
+    image, or the image is not the size the record says it is.
+    """
+    if not manifest.is_file():
+        raise VisualEvidenceError(f"no screenshot manifest was written at {manifest}")
+    record = json.loads(manifest.read_text(encoding="utf-8"))
+    recorded = record.get("head")
+    if recorded != head:
+        raise VisualEvidenceError(
+            f"screenshot evidence is bound to {recorded!r}, not to {head!r}"
+        )
+    declared = record.get("screenshots") or ()
+    if not declared:
+        raise VisualEvidenceError("the screenshot manifest declares no images")
+    found: list[Screenshot] = []
+    for entry in declared:
+        path = Path(entry["path"])
+        if not path.is_file():
+            raise VisualEvidenceError(f"declared screenshot is missing: {path}")
+        if path.is_relative_to(disposable_root):
+            raise VisualEvidenceError(
+                f"screenshot was left in a disposable lane checkout: {path}"
+            )
+        width, height = read_png_size(path.read_bytes())
+        if (width, height) != (entry["width"], entry["height"]):
+            raise VisualEvidenceError(
+                f"{path.name} is {width}x{height}, but the manifest declares "
+                f"{entry['width']}x{entry['height']}"
+            )
+        found.append(Screenshot(path=path, width=width, height=height))
+    return tuple(found)
+
+
 class VisualGateEvidenceTests(LoopHarness):
     """Browser/visual QA: selected deliberately, and evidenced on the exact head.
 
     Selection is a configured property of the run rather than something inferred
     from the diff, and `config.py` already refuses the flag without a gate. What
     composition adds is that the selected visual gate really is handed the bound
-    head, really does run in a checkout of its own at that head, and that what it
-    reported is retained as this head's evidence.
+    head, really does run in a checkout of its own at that head, and that the
+    evidence it left behind is *this head's* — readable image files, of the size
+    they claim, outside the checkout the run is about to delete.
+
+    The negative cases are the reason the positive one means anything. A lane
+    that only prints a sentence containing the SHA satisfies none of them, which
+    is the visual seam's version of the anti-Goodhart case above: a gate's own
+    account of itself is not the evidence.
     """
 
     VISUAL = {
@@ -344,26 +470,89 @@ class VisualGateEvidenceTests(LoopHarness):
         "kind": "visual",
         "argv": ["lane-gate-visual", "--head", "{head}", "--worktree", "{worktree}"],
     }
-    EVIDENCE = "captured 3 screenshots at 320/768/1440 for {head}"
+    # The viewports the scripted lane renders, and the sentence it prints about
+    # them. The sentence names the manifest, so it points at the evidence rather
+    # than standing in for it.
+    VIEWPORTS = ((320, 568), (768, 1024), (1440, 900))
+    EVIDENCE = "captured {count} screenshots at 320/768/1440 for {head}; manifest {manifest}"
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Where the lane retains what it rendered: a directory the run neither
+        # owns nor cleans up, which is the point of the "outside the disposable
+        # checkout" clause below.
+        self.evidence_root = self.tmp / "visual-evidence"
+        self.manifest = self.evidence_root / "manifest.json"
+        # Filled in while the lane is live. A clean gate's checkout is removed
+        # when it returns, so "which commit was it standing on" has to be asked
+        # then, not afterwards.
+        self.lane_cwd = ""
+        self.lane_oid = ""
+
+    def render(
+        self,
+        *,
+        head: str | None = None,
+        write: bool = True,
+        corrupt: int | None = None,
+        declared: Sequence[tuple[int, int]] | None = None,
+    ) -> Callable[[], None]:
+        """What the scripted visual lane leaves behind when it runs.
+
+        The default is an honest lane: one real PNG per viewport plus a manifest
+        naming the head the lane was actually handed, all of it written outside
+        the checkout it rendered from. Each keyword withdraws exactly one
+        property — the files, one file's readability, the declared sizes, or the
+        head — so every negative case below names the single thing it removes.
+        """
+
+        def produce() -> None:
+            call = self.runner.calls[-1]
+            argv = list(call.argv)
+            bound = argv[argv.index("--head") + 1]
+            self.lane_cwd = str(Path(call.cwd).resolve())
+            self.lane_oid = self.runner.worktree_oids[self.lane_cwd]
+            if not write:
+                return
+            self.evidence_root.mkdir(parents=True, exist_ok=True)
+            sizes = list(declared or self.VIEWPORTS)
+            entries = []
+            for index, (width, height) in enumerate(self.VIEWPORTS):
+                path = self.evidence_root / f"{bound[:12]}-{width}x{height}.png"
+                path.write_bytes(
+                    b"screenshot pending; see the lane transcript"
+                    if corrupt == index
+                    else png_bytes(width, height)
+                )
+                entries.append(
+                    {"path": str(path), "width": sizes[index][0], "height": sizes[index][1]}
+                )
+            self.manifest.write_text(
+                json.dumps({"head": head or bound, "screenshots": entries}, indent=2),
+                encoding="utf-8",
+            )
+
+        return produce
+
+    def script_visual(self, **defect) -> None:
+        self.script.add(
+            "lane-gate-visual",
+            self.EVIDENCE.format(
+                count=len(self.VIEWPORTS), head=HEAD_A, manifest=self.manifest
+            ),
+            returncode=0,
+            after=self.render(**defect),
+        )
+
+    def verify(self, head: str) -> tuple[Screenshot, ...]:
+        return verify_screenshot_evidence(
+            self.manifest, head=head, disposable_root=self.config.worktree_root
+        )
 
     def test_a_required_visual_gate_is_evidenced_against_the_exact_head(self) -> None:
         loop = self.build(gates=[GATE, self.VISUAL], visual_qa_required=True)
-        # Read while the lane is live: a clean gate's checkout is removed when
-        # it returns, so "which commit was it standing on" has to be asked then.
-        checked_out: dict[str, str] = {}
-
-        def observe() -> None:
-            cwd = str(Path(self.runner.calls[-1].cwd).resolve())
-            checked_out["cwd"] = cwd
-            checked_out["oid"] = self.runner.worktree_oids[cwd]
-
         self.script.add("lane-gate-tests", "", returncode=0)
-        self.script.add(
-            "lane-gate-visual",
-            self.EVIDENCE.format(head=HEAD_A),
-            returncode=0,
-            after=observe,
-        )
+        self.script_visual()
         self.review_round(HEAD_A)
 
         result = loop.run()
@@ -371,19 +560,104 @@ class VisualGateEvidenceTests(LoopHarness):
         self.assertEqual(result.outcome, MERGE_READY)
         visual = next(gate for gate in result.gates if gate.kind == "visual")
         self.assertTrue(visual.passed)
-        # The evidence the gate produced is retained, and it is about this head.
-        self.assertIn(HEAD_A, visual.output)
         call = next(
             call for call in self.runner.calls if call.argv[0] == "lane-gate-visual"
         )
         self.assertEqual(call.argv[2], HEAD_A)
         # Its own checkout, at the bound head, shared with no other lane.
         self.assertEqual(call.argv[4], call.cwd)
-        self.assertEqual(checked_out["cwd"], str(Path(call.cwd).resolve()))
-        self.assertEqual(checked_out["oid"], HEAD_A)
+        self.assertEqual(self.lane_cwd, str(Path(call.cwd).resolve()))
+        self.assertEqual(self.lane_oid, HEAD_A)
         self.assertEqual(
             len({c.cwd for c in self.runner.calls if c.argv[0].startswith("lane-gate-")}), 2
         )
+        # The retained output is about this head and points at the record, which
+        # is all a line of stdout is allowed to be worth.
+        self.assertIn(HEAD_A, visual.output)
+        self.assertIn(str(self.manifest), visual.output)
+        # The evidence itself: files that exist, decode as images, are the size
+        # they claim, and are recorded against the head the lane was handed.
+        shots = self.verify(HEAD_A)
+        self.assertEqual(
+            [(shot.width, shot.height) for shot in shots], list(self.VIEWPORTS)
+        )
+        for shot in shots:
+            with self.subTest(shot=shot.path.name):
+                self.assertIn(HEAD_A[:12], shot.path.name)
+        # And it outlived the checkout it was rendered from — a lane's own
+        # working directory is deleted, so evidence kept there is not evidence.
+        self.assertFalse(Path(self.lane_cwd).exists())
+        self.assertEqual(result.retained_paths, ())
+
+    def test_a_sentence_naming_the_head_is_not_screenshot_evidence(self) -> None:
+        """The kill-switch every reviewer of this slice ran, as a standing case.
+
+        The gate passes, its output names the exact head, and the loop is
+        satisfied — because deciding what a browser lane's images prove is the
+        gate's job, not this tool's. What the *fixture* may accept as this
+        head's visual evidence is the question, and a claim does not answer it.
+        """
+        loop = self.build(gates=[self.VISUAL], visual_qa_required=True)
+        self.script_visual(write=False)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        visual = next(gate for gate in result.gates if gate.kind == "visual")
+        self.assertTrue(visual.passed)
+        self.assertIn(HEAD_A, visual.output)
+        with self.assertRaises(VisualEvidenceError) as caught:
+            self.verify(HEAD_A)
+        self.assertIn("no screenshot manifest", str(caught.exception))
+
+    def test_a_declared_screenshot_that_does_not_decode_is_not_evidence(self) -> None:
+        """A file of the right name and the wrong bytes is not an image."""
+        loop = self.build(gates=[self.VISUAL], visual_qa_required=True)
+        self.script_visual(corrupt=1)
+        self.review_round(HEAD_A)
+
+        loop.run()
+
+        with self.assertRaises(VisualEvidenceError) as caught:
+            self.verify(HEAD_A)
+        self.assertIn("not an image", str(caught.exception))
+
+    def test_a_screenshot_that_is_not_the_declared_size_is_not_evidence(self) -> None:
+        """Non-vacuity for the dimension check: the manifest is not self-proving."""
+        loop = self.build(gates=[self.VISUAL], visual_qa_required=True)
+        self.script_visual(declared=[(320, 568), (768, 1024), (390, 844)])
+        self.review_round(HEAD_A)
+
+        loop.run()
+
+        with self.assertRaises(VisualEvidenceError) as caught:
+            self.verify(HEAD_A)
+        self.assertIn("manifest declares 390x844", str(caught.exception))
+        # The check is discriminating rather than refusing everything: the two
+        # viewports whose declaration was honest decode to exactly what they say.
+        record = json.loads(self.manifest.read_text(encoding="utf-8"))
+        for entry in record["screenshots"][:2]:
+            with self.subTest(shot=entry["path"]):
+                self.assertEqual(
+                    read_png_size(Path(entry["path"]).read_bytes()),
+                    (entry["width"], entry["height"]),
+                )
+
+    def test_evidence_recorded_against_another_head_is_not_this_head_s(self) -> None:
+        """Real images, real sizes, wrong commit — the M1 binding, for pixels."""
+        loop = self.build(gates=[self.VISUAL], visual_qa_required=True)
+        self.script_visual(head=HEAD_B)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.head, HEAD_A)
+        with self.assertRaises(VisualEvidenceError) as caught:
+            self.verify(HEAD_A)
+        self.assertIn(f"bound to {HEAD_B!r}", str(caught.exception))
+        # The evidence is well-formed in every other respect: only the head is
+        # wrong, so the case cannot pass by accident on a missing file.
+        self.assertEqual(len(self.verify(HEAD_B)), len(self.VIEWPORTS))
 
     def test_a_visual_gate_is_not_selected_when_the_run_does_not_require_it(self) -> None:
         """Non-vacuity for the case above: selection really is the knob."""
