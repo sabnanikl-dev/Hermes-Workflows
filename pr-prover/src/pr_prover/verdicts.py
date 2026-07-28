@@ -7,7 +7,12 @@ Child output is untrusted. Anything that could be read two ways is rejected:
 * a marker that nearly matches (wrong field order, short SHA, stray leading
   whitespace) is malformed, not "close enough";
 * the head in the marker must equal the exact bound head, byte for byte;
-* the declared ``BLOCKING`` count must reconcile with the parsed findings.
+* the declared ``BLOCKING`` count must reconcile with the parsed findings;
+* a finding summary is 1 to :data:`MAX_SUMMARY` characters — exactly what the
+  prompt and the README state — and what is accepted inside that bound is kept
+  exactly as written, secret redaction aside. A parser that took one character
+  more than it asked for would then have to shorten it to store it, and a
+  record that is not the record cannot be reconciled with anything.
 
 :func:`finding_records` is the single reader for the ``FINDING:`` grammar, and it
 is deliberately not private: :mod:`pr_prover.reviewers` reads the artifact a lane
@@ -33,8 +38,15 @@ from dataclasses import dataclass
 from .errors import MalformedVerdict, ScopeContamination, StaleHead
 from .findings import SEVERITIES, Finding, FindingLocation, FindingProvenance
 from .redaction import evidence as redact_evidence
+from .redaction import scrub
 
 FULL_SHA = re.compile(r"\A[0-9a-f]{40}\Z")
+
+# How long a finding summary may be, in total characters on its own line. The
+# reviewer prompt and the README both state 1–300, so this is the number that
+# has to be exact in all three places: a parser that accepts what the prompt
+# forbids is a grammar the two surfaces do not share.
+MAX_SUMMARY = 300
 
 _DONE_CANDIDATE = re.compile(r"\ADONE\s*:", re.IGNORECASE)
 _FINDING_CANDIDATE = re.compile(r"\AFINDING\s*:", re.IGNORECASE)
@@ -47,9 +59,14 @@ _BUILDER_DONE = re.compile(
     r"\ADONE: PR=(?P<pr>\d{1,9}) BRANCH=(?P<branch>\S+) STATUS=(?P<status>success|failure) "
     r"HEAD=(?P<head>[0-9a-fA-F]{40})\Z"
 )
+# ``\S`` already spends the first of the permitted characters, so the tail is
+# one shorter than the limit. Written as ``\S.{0,300}`` it accepts 301 — a
+# record the prompt forbids, parsed anyway and then clipped into something that
+# is no longer what the lane wrote.
 _FINDING = re.compile(
     r"\AFINDING: SEVERITY=(?P<severity>blocking|non-blocking|needs-karan) "
-    r"ID=(?P<id>[a-z0-9][a-z0-9._-]{0,63}) -- (?P<summary>\S.{0,300})\Z"
+    r"ID=(?P<id>[a-z0-9][a-z0-9._-]{0,63}) -- "
+    rf"(?P<summary>\S.{{0,{MAX_SUMMARY - 1}}})\Z"
 )
 _ADDRESSED = re.compile(r"\AADDRESSED: ID=(?P<id>[a-z0-9][a-z0-9._-]{0,63})\Z")
 
@@ -173,7 +190,14 @@ def finding_records(text: str, *, lane: str) -> tuple[FindingRecord, ...]:
             FindingRecord(
                 id=identifier,
                 severity=found.group("severity"),
-                summary=redact_evidence(found.group("summary").strip(), limit=300),
+                # Scrubbed, deliberately not clipped. The grammar above already
+                # bounds this to MAX_SUMMARY characters, so there is no runaway
+                # log to truncate — and truncating anyway is how the record
+                # stops being the record. Two summaries that differ only inside
+                # a clipped window collapse to one stored value, which makes the
+                # artifact parity check below read two different claims as the
+                # same one. A secret is the only thing that may change here.
+                summary=scrub(found.group("summary")),
                 line=number,
                 excerpt=redact_evidence(line.strip(), limit=400),
             )
@@ -303,6 +327,7 @@ def parse_builder_report(
 
 __all__ = [
     "FULL_SHA",
+    "MAX_SUMMARY",
     "SEVERITIES",
     "BuilderReport",
     "FindingRecord",

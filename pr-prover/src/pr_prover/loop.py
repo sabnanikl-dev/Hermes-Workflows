@@ -801,6 +801,7 @@ class ProverLoop:
             launched=known,
             status=verdict.status,
             blocking=blocking,
+            findings=verdict.findings,
         )
         self._event(
             f"reviewer {reviewer.name} returned {verdict.status} with "
@@ -895,6 +896,7 @@ class ProverLoop:
         launched: frozenset[str],
         status: str,
         blocking: int,
+        findings: Sequence[Finding],
     ) -> None:
         """Find the artifact this run's own transport published, or stop.
 
@@ -903,9 +905,16 @@ class ProverLoop:
         Karan and the next reviewer act on is the one on the PR. So it must be
         new since the moment transport began, published under the configured
         login, carry this lane's role and runtime on their own lines, declare
-        the same status and blocking count the lane's marker did, and be bound
-        to this exact head — by GitHub's own ``commit_id`` where a review has
-        one, and by the canonical declaration in every case.
+        the same status and blocking count the lane's marker did, state the
+        lane's findings themselves one to one, and be bound to this exact head —
+        by GitHub's own ``commit_id`` where a review has one, and by the
+        canonical declaration in every case.
+
+        ``findings`` is what makes the second-to-last of those checkable. The
+        prepared file was already held to it, but that is a fact about the bytes
+        a relay was *given*; a truncation or substitution between there and the
+        PR keeps every declaration intact and loses the records. Passing the
+        count alone would credit that as complete transport.
 
         ``attributable`` is that moment: for a relayed lane it is the snapshot
         taken immediately before the relay ran, and for a self-publishing lane
@@ -930,6 +939,7 @@ class ProverLoop:
                 head=head,
                 status=status,
                 blocking=blocking,
+                findings=findings,
             ):
                 continue
             self._event(
@@ -941,11 +951,16 @@ class ProverLoop:
             return
         raise ReadbackMismatch(
             f"reviewer {reviewer.name} published no artifact carrying its configured "
-            "author, signature, role, runtime, verdict, and this exact head together",
+            "author, signature, role, runtime, verdict, findings, and this exact head "
+            "together",
             evidence={
                 "reviewer": reviewer.name,
                 "role": reviewer.role,
                 "head": head,
+                # Named, because "the findings are missing from what landed" and
+                # "the declaration block is wrong" are different diagnoses and
+                # the body itself is not repeated into the evidence.
+                "expected_findings": [finding.id for finding in findings],
                 "expected_author": reviewer.artifact_author,
                 "expected_signature": reviewer.artifact_signature,
                 "expected_block": expected_block(

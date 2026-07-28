@@ -6,7 +6,8 @@ import unittest
 import _support
 from _support import HEAD_A, HEAD_B, builder_output, reviewer_output
 from pr_prover.errors import MalformedVerdict, ScopeContamination, StaleHead
-from pr_prover.verdicts import parse_builder_report, parse_reviewer_verdict
+from pr_prover.redaction import PLACEHOLDER, clip, scrub
+from pr_prover.verdicts import MAX_SUMMARY, parse_builder_report, parse_reviewer_verdict
 
 
 class ReviewerVerdictTests(unittest.TestCase):
@@ -106,6 +107,87 @@ class ReviewerVerdictTests(unittest.TestCase):
     def test_expected_head_must_be_exact(self) -> None:
         with self.assertRaises(StaleHead):
             parse_reviewer_verdict("A", reviewer_output(HEAD_A), expected_head="abc1234")
+
+
+class FindingSummaryGrammarTests(unittest.TestCase):
+    """The summary bound the prompt states, and exact preservation inside it.
+
+    The prompt and the README tell reviewers 1 to ``MAX_SUMMARY`` characters.
+    Two separate things have to be true for that to be one grammar rather than
+    two: the parser accepts exactly that range, and what it accepts is still what
+    the lane wrote when it comes back out.
+    """
+
+    def parse(self, summary: str):
+        output = reviewer_output(HEAD_A, [("blocking", "x", summary)])
+        return parse_reviewer_verdict("A", output, expected_head=HEAD_A)
+
+    def summary_of(self, summary: str) -> str:
+        return self.parse(summary).findings[0].summary
+
+    def test_the_stated_boundary_is_the_boundary_the_parser_enforces(self) -> None:
+        """0 and one-too-many are refused; 1 and the limit itself are accepted.
+
+        ``MAX_SUMMARY + 1`` is the case that matters. It used to parse, because
+        the pattern required one character and then allowed ``MAX_SUMMARY`` more,
+        so the grammar the prompt states and the grammar the parser reads
+        disagreed by exactly one character.
+        """
+        for length in (0, MAX_SUMMARY + 1, MAX_SUMMARY + 2):
+            with self.subTest(length=length, expected="refused"):
+                with self.assertRaises(MalformedVerdict):
+                    self.parse("a" * length)
+        for length in (1, MAX_SUMMARY - 1, MAX_SUMMARY):
+            with self.subTest(length=length, expected="accepted"):
+                self.assertEqual(self.summary_of("a" * length), "a" * length)
+
+    def test_a_summary_inside_the_bound_is_preserved_character_for_character(self) -> None:
+        summary = "P1 -- the assertion no longer trips: BLOCKING=9 vs 0 (see §4, 'DONE:')"
+        self.assertEqual(self.summary_of(summary), summary)
+
+    def test_a_secret_is_the_only_thing_that_may_change(self) -> None:
+        """Redaction is not an excuse to also shorten the record.
+
+        The summary is at the limit *and* carries a credential, so scrubbing it
+        makes it longer than the limit. Clipping it back — which is what the
+        parser used to do — throws away the middle of a record the grammar had
+        just accepted. Only the secret may differ from what the lane wrote.
+        """
+        summary = _support.secret_bearing_summary("LEFTLEFTLEFT")
+        parsed = self.summary_of(summary)
+
+        self.assertEqual(parsed, scrub(summary))
+        self.assertNotIn("bearer x", parsed)
+        self.assertIn(f"bearer {PLACEHOLDER}", parsed)
+        # Non-vacuity: the scrub really did push it past the limit, so a clip
+        # would have had something to cut.
+        self.assertGreater(len(parsed), MAX_SUMMARY)
+        self.assertNotIn("elided", parsed)
+        # Everything ahead of the credential is byte-identical, and the
+        # credential itself is the placeholder rather than a truncation.
+        self.assertTrue(parsed.startswith(summary[: -len("Authorization: bearer x")]))
+        self.assertTrue(parsed.endswith(f"Authorization: bearer {PLACEHOLDER}"))
+
+    def test_two_records_that_clipping_collapsed_stay_two_records(self) -> None:
+        """The mutation the off-by-one made possible, stated as its consequence.
+
+        Both summaries are exactly at the limit and differ only inside the region
+        clipping would elide. The first assertion proves this pair is genuinely
+        in that class — computed here, not asserted from arithmetic — so the rest
+        is a real probe: the parser must not turn two different findings into the
+        same stored summary, because the artifact comparison that reconciles a
+        lane with what it published can only be as exact as this value is.
+        """
+        left = _support.secret_bearing_summary("LEFTLEFTLEFT")
+        right = _support.secret_bearing_summary("RGHTRGHTRGHT")
+        self.assertNotEqual(left, right)
+        self.assertEqual(
+            clip(scrub(left), limit=MAX_SUMMARY),
+            clip(scrub(right), limit=MAX_SUMMARY),
+            "the pair no longer collapses under a clip, so this proves nothing",
+        )
+
+        self.assertNotEqual(self.summary_of(left), self.summary_of(right))
 
 
 class BuilderReportTests(unittest.TestCase):

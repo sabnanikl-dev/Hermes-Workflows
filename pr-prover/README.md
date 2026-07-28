@@ -597,7 +597,13 @@ ADDRESSED: ID=<slug>
 characters, the first a lowercase letter or digit and the rest lowercase
 letters, digits, `.`, `_`, or `-`, unique within the lane's output; the
 separator is exactly two hyphens with one space on each side; and `<summary>`
-is 1–300 characters on that line alone.
+is 1–300 characters on that line alone — exactly 1–300, and a summary inside
+that bound comes back out character for character. A parser that took one more
+character than the prompt asked for would then have to shorten it to store it,
+and two summaries that differ only inside the discarded part become one stored
+value, which is the difference the one-to-one comparison below is trying to see.
+An actual credential in a summary is redacted, and that is the only thing that
+may differ from what the lane wrote.
 
 That grammar is stated verbatim in the prompt the reviewer adapter generates,
 and the two are held together by a round trip rather than by care: a fixture the
@@ -631,6 +637,16 @@ exactly once with the same severity and the same summary, with nothing extra
 beside it. Order is not part of it; identity, count, severity, and text are. A
 missing, extra, duplicated, malformed, renamed, or rewritten record stops the run
 as a relay failure, and nothing reaches the pull request.
+
+That check runs twice, on the two surfaces it has to be true of. Validating the
+prepared file proves what the relay was *handed*; it says nothing about what
+landed. A truncation or substitution between the file and the pull request keeps
+the whole declaration block intact — the configured author and signature, the
+role, the runtime, the exact head, `STATUS=fail`, `BLOCKING=1` — and loses the
+records, so the readback that decides whether this run may call its transport
+complete parses the published body with the same grammar and reconciles it
+against the same findings. A published artifact that declares a blocker and
+states none of them is a readback failure, not transport.
 
 ### Every finding carries its provenance
 

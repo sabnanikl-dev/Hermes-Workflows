@@ -30,10 +30,12 @@ from _support import (
     make_finding,
     reviewer_artifact,
     reviewer_output,
+    secret_bearing_summary,
 )
 from pr_prover.errors import ReviewerRelayError
 from pr_prover.github import Comment
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN
+from pr_prover.redaction import scrub
 from pr_prover.reviewers import (
     CREDENTIAL_ENV,
     GH_CONFIG_DIR_ENV,
@@ -305,6 +307,37 @@ class PreparedArtifactTests(unittest.TestCase):
                 self.assertIn(expected, caught.exception.message)
                 self.assertEqual(caught.exception.reason, "relay-failure")
 
+    def test_a_rewritten_summary_that_clipping_used_to_hide_is_still_a_rewrite(self) -> None:
+        """Parity is only as exact as the value it compares.
+
+        Both summaries sit exactly at the grammar's limit and differ only inside
+        the region a clipped record discarded, so while the parser clipped them
+        this artifact restated the lane's finding as a different one and
+        reconciled anyway.
+        """
+        reported = secret_bearing_summary("LEFTLEFTLEFT")
+        substituted = secret_bearing_summary("RGHTRGHTRGHT")
+        self.assertNotEqual(reported, substituted)
+        lane = [make_finding("long-record", summary=scrub(reported))]
+
+        def artifact(summary: str) -> str:
+            return reviewer_artifact(
+                role="reviewer-a",
+                head=HEAD_A,
+                status="fail",
+                blocking=1,
+                findings=[("blocking", "long-record", summary)],
+            )
+
+        validated = self.prepare(
+            artifact(reported), status="fail", blocking=1, findings=lane
+        )
+        self.assertEqual([record.id for record in validated.findings], ["long-record"])
+
+        with self.assertRaises(ReviewerRelayError) as caught:
+            self.prepare(artifact(substituted), status="fail", blocking=1, findings=lane)
+        self.assertIn("summary for long-record", caught.exception.message)
+
     def test_the_artifact_path_is_cleared_before_a_lane_can_write_to_it(self) -> None:
         """A file an earlier lane left is never mistaken for this lane's work."""
         stale = self.tmp / "reviewer-A-aaaaaaaaaaaa.artifact.md"
@@ -394,6 +427,7 @@ class PublishedArtifactTests(unittest.TestCase):
             head=HEAD_A,
             status="pass",
             blocking=0,
+            findings=(),
         )
 
     def test_a_conforming_comment_matches(self) -> None:
@@ -414,6 +448,139 @@ class PublishedArtifactTests(unittest.TestCase):
 
     def test_a_review_with_no_commit_id_falls_back_to_the_declaration(self) -> None:
         self.assertTrue(self.matches(self.artifact(kind="review", commit_id="")))
+
+
+class PublishedFindingReadbackTests(unittest.TestCase):
+    """What GitHub actually shows, held to the findings the lane reported.
+
+    Validating the prepared file proves what a relay was handed. Between there
+    and the pull request the bytes can still be truncated, substituted, or
+    rewritten, and every one of those keeps the declaration block — author,
+    signature, role, runtime, head, ``STATUS=fail``, ``BLOCKING=1`` — perfectly
+    intact. So the published body is read with the same grammar and reconciled
+    against the same findings, and each row below is a body that used to read
+    back as this run's own complete transport.
+    """
+
+    lane = (
+        make_finding("null-deref", summary="crashes on empty input"),
+        make_finding("bad-copy", "non-blocking", summary="the copy contradicts the contract"),
+    )
+    good = ("blocking", "null-deref", "crashes on empty input")
+    other = ("non-blocking", "bad-copy", "the copy contradicts the contract")
+
+    def published(self, findings, **overrides) -> Comment:
+        fields = {
+            "identifier": "IC_1",
+            "author": REVIEWER_LOGIN,
+            "body": reviewer_artifact(
+                role="reviewer-a",
+                head=HEAD_A,
+                status="fail",
+                blocking=1,
+                findings=findings,
+            ),
+            "kind": "comment",
+        }
+        fields.update(overrides)
+        return Comment(**fields)
+
+    def matches(self, findings, **overrides) -> bool:
+        return artifact_matches(
+            self.published(findings, **overrides),
+            author=REVIEWER_LOGIN,
+            signature=REVIEWER_SIGNATURE,
+            role="reviewer-a",
+            head=HEAD_A,
+            status="fail",
+            blocking=1,
+            findings=self.lane,
+        )
+
+    def test_the_review_the_lane_reported_reads_back(self) -> None:
+        """Non-vacuity for every case below: parity is satisfiable, and this is it."""
+        self.assertTrue(self.matches([self.good, self.other]))
+
+    def test_a_published_body_that_declares_a_blocker_and_states_none_is_refused(self) -> None:
+        """The exact shape the readback predicate used to credit.
+
+        ``STATUS=fail``, ``BLOCKING=1``, the configured author and signature, the
+        exact head — and not one word of what the blocker was. The relay reported
+        success, and what is on the pull request is unusable.
+        """
+        self.assertFalse(self.matches([]))
+
+    def test_every_way_the_published_body_can_lose_the_lanes_findings_is_refused(self) -> None:
+        """One table, because the published body is judged by the prepared file's predicate."""
+        for label, findings in (
+            ("a missing record", [self.good]),
+            (
+                "an extra record",
+                [self.good, self.other, ("non-blocking", "invented", "nobody reported this")],
+            ),
+            (
+                "a renamed id",
+                [self.good, ("non-blocking", "renamed", "the copy contradicts the contract")],
+            ),
+            (
+                "a rewritten summary",
+                [self.good, ("non-blocking", "bad-copy", "a summary the lane never wrote")],
+            ),
+            (
+                "a re-severed finding",
+                [self.good, ("needs-karan", "bad-copy", "the copy contradicts the contract")],
+            ),
+            ("a duplicated record", [self.good, self.other, self.other]),
+            ("a malformed record", [self.good, self.other, ("blocking", "x", "")]),
+            (
+                "the grammar quoted back as an example",
+                [self.good, self.other, ("<severity>", "<id>", "<summary>")],
+            ),
+        ):
+            with self.subTest(published=label):
+                self.assertFalse(self.matches(findings))
+
+    def test_a_published_summary_rewritten_where_clipping_hid_it_is_refused(self) -> None:
+        """The off-by-one's consequence on the surface that decides transport.
+
+        Both summaries are exactly at the grammar's limit and differ only inside
+        the region a clipped record threw away, so while the parser clipped them
+        this substitution read back as the lane's own finding. It is a
+        substitution, and readback has to see it.
+        """
+        reported = secret_bearing_summary("LEFTLEFTLEFT")
+        substituted = secret_bearing_summary("RGHTRGHTRGHT")
+        self.assertNotEqual(reported, substituted)
+        lane = (make_finding("long-record", summary=scrub(reported)),)
+
+        def published(summary: str) -> Comment:
+            return Comment(
+                identifier="IC_1",
+                author=REVIEWER_LOGIN,
+                body=reviewer_artifact(
+                    role="reviewer-a",
+                    head=HEAD_A,
+                    status="fail",
+                    blocking=1,
+                    findings=[("blocking", "long-record", summary)],
+                ),
+                kind="comment",
+            )
+
+        def matches(summary: str) -> bool:
+            return artifact_matches(
+                published(summary),
+                author=REVIEWER_LOGIN,
+                signature=REVIEWER_SIGNATURE,
+                role="reviewer-a",
+                head=HEAD_A,
+                status="fail",
+                blocking=1,
+                findings=lane,
+            )
+
+        self.assertTrue(matches(reported), "the record the lane reported must still read back")
+        self.assertFalse(matches(substituted))
 
 
 class RelayLifecycleLoopTests(LoopHarness):
@@ -509,6 +676,53 @@ class RelayLifecycleLoopTests(LoopHarness):
         self.assertEqual(result.outcome, NEEDS_KARAN)
         self.assertEqual(result.reason, "readback-mismatch")
         self.assertEqual(result.evidence["evidence"]["expected_author"], REVIEWER_LOGIN)
+
+    def test_a_relay_that_publishes_a_body_without_the_lanes_findings_fails_readback(
+        self,
+    ) -> None:
+        """The production path, not the predicate: transport succeeded, the record did not.
+
+        The lane wrote a conforming artifact and the prepared-file check passed
+        it, because the file *was* conforming. What the relay put on the pull
+        request is that file with its ``FINDING:`` lines removed — declarations
+        untouched, ``STATUS=fail`` and ``BLOCKING=1`` still agreeing with the
+        marker, and nothing left for the Integration Auditor or Karan to act on.
+        Only reading the published body back can tell, and the run must stop
+        rather than credit this as its own complete transport.
+        """
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.runner.relay_body = lambda body: "".join(
+            f"{line}\n"
+            for line in body.splitlines()
+            if not line.startswith("FINDING:")
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        self.assertEqual(result.evidence["evidence"]["expected_findings"], ["null-deref"])
+        # Prepared and published both happened; only the readback failed. That
+        # distinction is the diagnosis.
+        self.assertTrue(result.transport[0].prepared)
+        self.assertTrue(result.transport[0].published)
+        self.assertFalse(result.transport[0].read_back)
+
+    def test_a_relay_that_publishes_a_rewritten_finding_fails_readback(self) -> None:
+        """Substitution, not truncation: a blocker the lane never reported."""
+        loop = self.build()
+        self.review_round(HEAD_A, [BLOCKER])
+        self.runner.relay_body = lambda body: body.replace(
+            "ID=null-deref -- crashes on empty input",
+            "ID=null-deref -- a summary the lane never wrote",
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "readback-mismatch")
+        self.assertEqual(len(self.remote.comments), 1)
 
     def test_a_reviewer_artifact_for_the_previous_head_does_not_count(self) -> None:
         """Stale evidence is the thing a per-head lifecycle exists to refuse."""

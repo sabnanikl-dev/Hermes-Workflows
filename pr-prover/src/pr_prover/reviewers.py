@@ -27,7 +27,10 @@ Each step is separately checkable, and this module holds the checks:
   later apply, minus the two only GitHub can answer (who posted it, and whether
   the id is new). A lane that fell over silently therefore stops the run instead
   of putting something unusable on the PR under the reviewer's name;
-* :func:`artifact_matches` is the published-artifact predicate itself.
+* :func:`artifact_matches` is the published-artifact predicate itself, and it
+  applies the same finding-parity check to the body GitHub actually shows.
+  Validating the prepared file proves what the relay was handed; only reading
+  the published body back proves what landed.
 
 Nothing here brokers, mints, or forwards a credential. The relay is an ordinary
 configured argv array that runs under whatever GitHub session it already has.
@@ -69,7 +72,9 @@ lines actually present, and every finding the lane reported appears exactly once
 with the same severity and summary, with nothing extra beside it. An artifact
 that announces nine blockers and states none of them satisfies every
 declaration check above and still leaves the Integration Auditor and Karan
-nothing to reconcile, so it is refused before a relay can publish it.
+nothing to reconcile, so it is refused before a relay can publish it — and
+refused again, by the same comparison, if the body that reached GitHub is not
+the body that was validated.
 
 ``KILL-SWITCH:`` is the adversarial mandate made checkable. A reviewer's job on
 a fix cycle is to try to *kill* the builder's fix — to hunt for a bad-faith
@@ -572,8 +577,34 @@ def read_prepared(
     return PreparedArtifact(path=path, body=body, claim=reading.claim, findings=records)
 
 
+def published_findings(body: str) -> tuple[FindingRecord, ...] | None:
+    """A published body's ``FINDING:`` records, or ``None`` if the grammar refuses them.
+
+    The same reader as the lane's final message and the prepared file, so the
+    surface GitHub actually shows is not the one place the grammar goes soft.
+
+    Non-raising, because :func:`artifact_matches` is a predicate applied to every
+    artifact that appeared on the PR during a transport window, not only to the
+    one the lane owed. A body whose finding lines the grammar refuses is simply
+    not that artifact; the loop reports the resulting absence with its own
+    evidence rather than having an unrelated comment abort the search.
+    """
+    try:
+        return finding_records(body, lane="the published artifact")
+    except MalformedVerdict:
+        return None
+
+
 def artifact_matches(
-    artifact: Any, *, author: str, signature: str, role: str, head: str, status: str, blocking: int
+    artifact: Any,
+    *,
+    author: str,
+    signature: str,
+    role: str,
+    head: str,
+    status: str,
+    blocking: int,
+    findings: Sequence[Finding],
 ) -> bool:
     """Is this published comment or review the artifact that lane owed?
 
@@ -581,6 +612,17 @@ def artifact_matches(
     Where GitHub records a review's own ``commit_id`` it must agree too: that is
     the one head binding an author cannot retype, so it is checked *in addition
     to* the canonical body declaration rather than instead of it.
+
+    And the published body's ``FINDING:`` records have to be the lane's findings,
+    one to one, by the same :func:`finding_parity` the prepared file is held to.
+    Validating the prepared file proves what a relay was *given*; only this
+    proves what landed. A relay-side truncation or substitution that keeps the
+    declaration block intact — ``STATUS=fail``, ``BLOCKING=1``, and not one
+    record of what the blocker was — otherwise satisfies every check above,
+    which would credit complete transport for a PR that no longer carries the
+    findings the Integration Auditor and Karan have to act on. ``findings`` is
+    therefore required rather than defaulted: a caller that cannot say what the
+    lane reported cannot be allowed to skip the comparison by omission.
     """
     if artifact.author != author:
         return False
@@ -592,6 +634,11 @@ def artifact_matches(
     if artifact_disagreement(
         reading.claim, role=role, head=head, status=status, blocking=blocking
     ):
+        return False
+    records = published_findings(artifact.body)
+    if records is None:
+        return False
+    if finding_parity(records, findings, declared=blocking):
         return False
     commit_id = getattr(artifact, "commit_id", "")
     return not commit_id or commit_id == head
@@ -635,5 +682,6 @@ __all__ = [
     "finding_parity",
     "is_full_sha",
     "parse_artifact",
+    "published_findings",
     "read_prepared",
 ]
