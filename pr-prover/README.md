@@ -78,7 +78,7 @@ tokens, and an unknown token fails the run rather than rendering literally:
 | `{branch}` `{base}` `{head}` | all lanes | from the **live** PR, never from config alone |
 | `{worktree}` | all lanes | this lane's own fresh worktree, at the exact head |
 | `{reviewer}` `{role}` | reviewer lanes | the lane name, and the mission role it runs as |
-| `{artifact_file}` | reviewer lanes and their relay | where this lane prepares its artifact, under the OS temp directory |
+| `{artifact_file}` | reviewer lanes and their relay | where this lane prepares its artifact, under the OS temp directory — the relay is given the redacted copy of that file, not the lane's own bytes |
 | `{evidence_packet}` | reviewer lanes | the frozen read-only PR evidence this lane judges from, under the OS temp directory |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
 
@@ -128,6 +128,8 @@ unaffected; `worktree_root` is held to the same rule where worktrees are created
 Gates take `"kind": "baseline"` (default) or `"kind": "visual"`. Visual gates
 run only when `visual_qa_required` is `true`; setting that flag without a visual
 gate is a configuration error, so browser/visual QA is never silently skipped.
+What a visual gate then owes is [a semantic
+answer](#a-visual-gate-answers-about-what-was-rendered), not a file.
 
 `check-config` also prints **advisories**: a lane with no timeout, or a builder
 budget too short for a real fix cycle. They are notes rather than errors, because
@@ -168,6 +170,37 @@ Two are repository-owned, and the example config wires both:
   weakened or deleted coverage, gamed thresholds, shrunken scope, stale
   evidence, unproven invariants — not to check that it looks correct. A reviewer
   that sets out to confirm shares the builder's framing and its blind spot.
+
+  **Its verdict travels by Codex's final-message channel, not by its output.**
+  `codex exec` narrates while it works, and that narration includes the prompt it
+  was handed — which is where the marker grammar is necessarily written down, so
+  an entirely honest run prints text that reads exactly like a verdict. The
+  adapter therefore runs `codex exec --output-last-message <file>` and puts only
+  that file on its stdout. The narration is kept, because a lane that fell over
+  is diagnosed from it, but it is re-emitted on stderr with every line prefixed
+  `codex| ` so no line of it can begin with a marker keyword. A final message
+  that is missing, unreadable, or empty is a loud failure and not a lane that
+  quietly found nothing, and Codex's own exit status is passed through unchanged
+  so the [marker-versus-exit-status](#the-marker-is-not-the-whole-verdict) check
+  still has both halves to compare.
+
+  **The rest of the run is pinned, not inherited.** The artifact this lane
+  publishes declares which runtime reviewed the head, so the launch states the
+  properties that declaration is about rather than accepting whatever default is
+  in effect: `--ephemeral`, so nothing is persisted and the next cycle starts
+  from the live PR rather than from a session that remembers the last one; the
+  reviewer `--model` and its reasoning effort, so `RUNTIME=` is a property of
+  the launch; `--sandbox workspace-write`, because a read-only lane cannot write
+  the one artifact it is being asked for; and `--add-dir` naming only the
+  artifact directory, so the file the lane is meant to leave behind is one it is
+  actually permitted to create and no other location is added. That directory is
+  checked to exist and to be **outside the worktree** before write access to it
+  is granted, because a lane's own scratch output landing in the reviewed tree
+  is indistinguishable from the contamination the post-lane check exists to
+  catch. None of this is a security boundary: ambient user configuration is
+  still loaded, this is a trusted inherited session, and what proves the
+  checkout was left alone is the contamination check rather than the write
+  scope.
 - [`scripts/claude-builder.sh`](scripts/claude-builder.sh) runs the trusted
   Claude builder in that cycle's own worktree. It is **pointer-first**: it names
   the blockers file, `AGENTS.md`, `MISSION.md`, and the live PR rather than
@@ -182,9 +215,64 @@ Neither adapter is a security boundary. Both are ordinary hygiene for launching
 a trusted agent reliably, and both are covered by
 [`tests/test_adapters.py`](tests/test_adapters.py), which runs them for real
 against stub binaries — a double cannot catch a mistyped flag or a guard that
-never fires.
+never fires. The reviewer's stub is deliberately *Codex-shaped* rather than
+cooperative: it echoes the prompt back the way the real CLI does, so its
+narration genuinely contains marker-shaped lines, and it reads the artifact path
+out of the prompt and creates that file before it returns, the way the CLI does.
+A stub that printed one clean marker would agree with the adapter that was wrong,
+and a proof whose artifacts were written by the test process afterwards would
+show that the validator works while saying nothing about whether a reviewer lane
+leaves one behind.
+
+The ordered three-role lifecycle is proved the same way, through the real thing:
+`OrderedRelayLifecycleTests` configures the three shipped reviewer lanes exactly
+as [`examples/run.example.json`](examples/run.example.json) does and runs
+`loop.run()`, so the adapter is really executed, the artifact it writes is the
+one the *loop's* configured relay publishes, and the order, the attribution
+snapshot, and the GitHub readback are the loop's own. A local loop over three
+adapter calls with the validator invoked directly proves the adapter three
+times; it cannot prove that the loop runs the three required roles in order or
+relays what each of them actually wrote.
 
 Gates remain the operator's own commands.
+
+## A visual gate answers about what was rendered
+
+A visual gate that checks its screenshots exist, are PNGs, and are the right
+size has proved that files were written. It has not proved that anything in them
+can be read, and those are different claims — a rendering can satisfy every one
+of the first while omitting the print detail a page exists to show. So the
+obligation on a configured visual gate is **semantic**: it must report a
+per-assertion outcome for the properties the run requires, bound to the exact
+head, and it must fail when one of them is absent even though every expected
+PNG and PDF is present and well-formed.
+
+`pr-prover` does not learn those properties. Which detail bodies a print page
+owes, which table columns must stay labelled once a header row is hidden, and
+which text is small enough to need a contrast floor are facts about one site;
+a tool that knew them would be a browser and accessibility framework wearing a
+merge-readiness tool's name, which
+[`MISSION.md`](MISSION.md#explicit-non-goals) rules out. They belong to the
+**operator-owned configured gate**, which `pr-prover` selects, hands the bound
+head and a checkout of its own, and blocks the head on when it exits nonzero.
+
+What *is* repository-owned is the shape of the obligation and the proof that it
+bites, in
+[`tests/test_visual_semantics.py`](tests/test_visual_semantics.py):
+
+| The gate must prove | How the proof avoids taking its word for it |
+|---|---|
+| required collapsed detail bodies reach the print output | the strings are pulled out of the PDF's own page content streams |
+| mobile failure-table values keep an accessible field label | every required column must be measured *and* carry a non-empty label; an unmentioned column fails |
+| required small operational text is legible | the WCAG contrast ratio is recomputed from the colours the gate recorded, or an explicitly approved design token is named |
+
+Screenshots and PDFs stay as human evidence and are still required — they are
+what a person looks at when the verdict is contested — but on their own they are
+never sufficient, and there is a case asserting exactly that: a rendering with
+all nine images and three PDFs intact, and all three defects present, does not
+pass. The one honest exception is written as one: no amount of decoding a PNG
+recovers a cell's accessible name, so the label check enforces that the
+measurement was taken for every required column rather than believing a summary.
 
 ## Lanes are launched, watched, and ended
 
@@ -216,6 +304,7 @@ and each step is separately checkable:
 ```text
 frozen evidence packet → credential-free audit
   → prepared artifact under the OS temp directory
+  → redacted copy of it, revalidated and written beside it
   → trusted relay command publishing under the reviewer identity
   → GitHub readback of what actually landed
 ```
@@ -325,6 +414,36 @@ an artifact that would fail readback never reaches the PR at all. Then the post
 itself must be from the configured login and bound to this head — by GitHub's
 own review `commit_id` where there is one, *and* by the canonical declaration in
 every case.
+
+### What the relay actually publishes
+
+Not the reviewer's own bytes. An artifact is child output, and the artifact is
+the one surface this tool **publishes**, under a name that is not the lane's — a
+reviewer that quotes an `Authorization` header back as evidence, pastes a
+command transcript, or dumps its environment to show what it ran with has
+written a credential into that document. Nothing downstream catches it: parsing
+scrubs the *records* it extracts, in memory, and hands on the body it read them
+out of exactly as it found it, so readback re-parses, re-scrubs, and agrees.
+
+So the body is scrubbed once, whole, by the same `redaction.scrub` every other
+surface goes through, and the result is written to its own path beside the
+original. That copy is what `{artifact_file}` resolves to for the relay, and it
+is revalidated first — signature, declarations, verdict, and one-to-one finding
+parity — on its own bytes, because a check applied to bytes nobody publishes
+proves nothing about the bytes that are.
+
+Only the credential-shaped runs change; every other character survives, which is
+why this uses `scrub` and not the clipping `sanitize`/`evidence` the report and
+the packet use. A review clipped to fit an evidence budget would lose the
+argument it exists to make.
+
+Redaction is a text substitution, so it can also change what a document says: it
+can consume a signature that looked like a credential, grow a body past the size
+bound, or lengthen a `FINDING:` line that was already at the grammar's limit
+past what the readback parser accepts. Each of those stops the run **before**
+anything is published, on the same rule as everything else here — never publish
+what readback would reject. The reviewer's original file stays on disk as local
+input for the rest of the run, and is never a publication path.
 
 ### Which post counts as this run's transport
 
@@ -505,11 +624,60 @@ with one line per blocker it fixed:
 ADDRESSED: ID=<slug>
 ```
 
+`SEVERITY=` is one of exactly those three lowercase words; `ID=` is 1–64
+characters, the first a lowercase letter or digit and the rest lowercase
+letters, digits, `.`, `_`, or `-`, unique within the lane's output; the
+separator is exactly two hyphens with one space on each side; and `<summary>`
+is 1–300 characters on that line alone — exactly 1–300, and a summary inside
+that bound comes back out character for character. A parser that took one more
+character than the prompt asked for would then have to shorten it to store it,
+and two summaries that differ only inside the discarded part become one stored
+value, which is the difference the one-to-one comparison below is trying to see.
+An actual credential in a summary is redacted, and that is the only thing that
+may differ from what the lane wrote.
+
+That grammar is stated verbatim in the prompt the reviewer adapter generates,
+and the two are held together by a round trip rather than by care: a fixture the
+shape of the nine-blocker artifact the PAPI-96 pilot produced is written the way
+the prompt asks for it and parsed by the parser that will judge it. A prompt
+that describes findings in prose while the parser reads a grammar is how a
+reviewer declares nine blockers over a count of zero, which is the second way
+that pilot stopped.
+
 Parsing is unforgiving on purpose. Exactly one `DONE:` line may appear, it must
 be the final non-empty line, the SHA must equal the bound head byte for byte,
-and `BLOCKING=<count>` must reconcile with the findings above it. Lane output is
-untrusted, so a body that quotes or forges a marker fails the run closed instead
-of being read as a verdict.
+and `BLOCKING=<count>` must reconcile with the findings above it — which in turn
+must equal the `BLOCKING=` the published artifact declares. Lane output is
+untrusted, so a body that quotes or forges a marker, repeats a finding id, or
+echoes the grammar back as an example fails the run closed instead of being read
+as a verdict.
+
+A count is not a record, so the artifact is held to the findings as well as to
+the count. `BLOCKING=9` says how many blockers there were; the artifact's own
+`FINDING:` lines say what they were, and an artifact that declares the first
+while carrying none of the second passes every declaration check above and still
+leaves the Integration Auditor and Karan nothing to reconcile — the mirror image
+of the pilot failure where the reviewer declared nine and the parser counted
+zero. So before a relay is allowed to publish anything, the artifact's finding
+lines are read by
+[`verdicts.finding_records`](src/pr_prover/verdicts.py) — the same function that
+read the lane's final message, not a second reader that could drift from it —
+and reconciled one to one with the findings that lane reported: the declared
+count is the number of blocking lines actually present, and every id appears
+exactly once with the same severity and the same summary, with nothing extra
+beside it. Order is not part of it; identity, count, severity, and text are. A
+missing, extra, duplicated, malformed, renamed, or rewritten record stops the run
+as a relay failure, and nothing reaches the pull request.
+
+That check runs twice, on the two surfaces it has to be true of. Validating the
+prepared file proves what the relay was *handed*; it says nothing about what
+landed. A truncation or substitution between the file and the pull request keeps
+the whole declaration block intact — the configured author and signature, the
+role, the runtime, the exact head, `STATUS=fail`, `BLOCKING=1` — and loses the
+records, so the readback that decides whether this run may call its transport
+complete parses the published body with the same grammar and reconciles it
+against the same findings. A published artifact that declares a blocker and
+states none of them is a readback failure, not transport.
 
 ### Every finding carries its provenance
 

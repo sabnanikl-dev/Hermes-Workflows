@@ -12,7 +12,10 @@ every run rather than an option. A reviewer lane call writes a conforming
 artifact to its ``--artifact-file``, and the relay program publishes that file to
 the remote under the configured reviewer login. Both are defaults a test can
 override: :attr:`FakeRunner.reviewer_artifact` replaces the body a lane writes,
-and :attr:`FakeRunner.relay_failures` makes the transport half fail.
+:attr:`FakeRunner.relay_body` replaces the body the relay publishes — the two
+are separate on purpose, because a transport that posts something other than
+what it was handed is exactly what validating the prepared file cannot see — and
+:attr:`FakeRunner.relay_failures` makes the transport half fail.
 """
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ from pr_prover.commands import (
     validate_argv,
 )
 from pr_prover.config import RunConfig
+from pr_prover.errors import MalformedVerdict
 from pr_prover.findings import Finding, FindingLocation, FindingProvenance
 from pr_prover.github import (
     CheckRun,
@@ -46,6 +50,7 @@ from pr_prover.github import (
     ReviewEvidence,
     ReviewThread,
 )
+from pr_prover.verdicts import MAX_SUMMARY, finding_records
 
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
@@ -82,9 +87,16 @@ def reviewer_artifact(
     runtime: str = REVIEWER_RUNTIME,
     signature: str = REVIEWER_SIGNATURE,
     kill_switches: Sequence[str] = ("tried to find a weakened test; found none",),
+    findings: Sequence[tuple[str, str, str]] = (),
     extra: str = "",
 ) -> str:
-    """One conforming reviewer artifact body."""
+    """One conforming reviewer artifact body.
+
+    ``findings`` are the same ``(severity, id, summary)`` triples
+    :func:`reviewer_output` builds a lane's final message from, written in the
+    grammar the parser reads. A real artifact restates the findings its lane
+    reported, and the relay holds it to exactly that, so the double does too.
+    """
     lines = [
         f"ROLE={role}",
         f"RUNTIME={runtime}",
@@ -92,6 +104,10 @@ def reviewer_artifact(
         f"STATUS={status}",
         f"BLOCKING={blocking}",
         *(f"KILL-SWITCH: {entry}" for entry in kill_switches),
+        *(
+            f"FINDING: SEVERITY={severity} ID={identifier} -- {summary}"
+            for severity, identifier, summary in findings
+        ),
         signature,
     ]
     if extra:
@@ -101,6 +117,39 @@ def reviewer_artifact(
 # ``push(parent=...)`` default: the pushed commit sits on the head it replaced,
 # which is what an ordinary non-destructive push does.
 _INHERIT = object()
+
+
+# -- the finding-summary boundary -----------------------------------------
+# Where the varying region sits inside a maximum-length summary. Chosen to land
+# inside the window clipping to MAX_SUMMARY would elide, not in either end it
+# keeps — which is what makes two summaries built with different markers a real
+# collapse pair rather than merely two long strings.
+_VARY_AT = 150
+
+
+def secret_bearing_summary(marker: str) -> str:
+    """One exactly-``MAX_SUMMARY`` summary carrying a real secret, varying at ``marker``.
+
+    Two summaries built with different equal-length markers differ only in a
+    region that clipping to ``MAX_SUMMARY`` throws away. That matters because
+    scrubbing the secret makes the text *longer* than the limit, so a parser that
+    clips after scrubbing does not merely shorten the record — it collapses two
+    different records into one stored value, and a one-to-one comparison against
+    a stored value that lost the difference cannot tell them apart.
+
+    The tests assert both halves of that rather than trusting this construction:
+    that the pair really does collapse under the old clip, and that the shipped
+    parser keeps them distinct.
+    """
+    prefix = "the lane pasted a header: "
+    secret = " Authorization: bearer x"
+    head_filler = _VARY_AT - len(prefix)
+    tail_filler = MAX_SUMMARY - _VARY_AT - len(marker) - len(secret)
+    if head_filler < 0 or tail_filler < 0:  # pragma: no cover - marker is a constant
+        raise AssertionError(f"marker {marker!r} does not fit one summary")
+    summary = f"{prefix}{'z' * head_filler}{marker}{'z' * tail_filler}{secret}"
+    assert len(summary) == MAX_SUMMARY, len(summary)
+    return summary
 
 
 # -- lane output builders -------------------------------------------------
@@ -549,6 +598,12 @@ class FakeRunner:
         # a callable takes ``(argv, status, blocking)`` and returns a body, and
         # returning ``None`` from it models a lane that wrote nothing at all.
         self.reviewer_artifact: Callable[..., str | None] | None = None
+        # What the relay actually publishes, given the prepared bytes it was
+        # handed. ``None`` publishes the file unchanged. A callable models
+        # relay-side truncation or substitution: the transport reports success
+        # and a *different* body lands on the pull request, which is the one
+        # thing validating the prepared file cannot rule out.
+        self.relay_body: Callable[[str], str] | None = None
         # How many relay calls fail before one succeeds.
         self.relay_failures = 0
         # How many relay calls report success while publishing nothing. This is
@@ -632,6 +687,7 @@ class FakeRunner:
                 head=_flag(argv, "--head"),
                 status=status,
                 blocking=blocking,
+                findings=_findings_of(result.stdout),
             )
         if body is None:
             return
@@ -647,7 +703,10 @@ class FakeRunner:
             self.relay_noops -= 1
             return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
         source = Path(_flag(argv, "--file"))
-        self.remote.comment(source.read_text(encoding="utf-8"), author=self.relay_author)
+        body = source.read_text(encoding="utf-8")
+        if self.relay_body is not None:
+            body = self.relay_body(body)
+        self.remote.comment(body, author=self.relay_author)
         return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
 
     # -- git --------------------------------------------------------------
@@ -741,6 +800,21 @@ def _flag(argv: Sequence[str], name: str) -> str:
         if item == name:
             return argv[index + 1]
     return ""
+
+
+def _findings_of(stdout: str) -> tuple[tuple[str, str, str], ...]:
+    """The findings a lane's marker declared, read with the shipped grammar.
+
+    Tolerant on purpose. A test that scripts a deliberately malformed lane is
+    making a point about the parser the *loop* runs, and this double must not
+    raise before the loop ever gets there — so an output the grammar refuses
+    contributes no artifact findings and the loop stops where it should.
+    """
+    try:
+        records = finding_records(stdout, lane="scripted reviewer lane")
+    except MalformedVerdict:
+        return ()
+    return tuple((record.severity, record.id, record.summary) for record in records)
 
 
 def _verdict_of(stdout: str) -> tuple[str, int]:

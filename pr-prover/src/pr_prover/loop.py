@@ -175,7 +175,9 @@ from .reviewers import (
     credential_free as credential_free_env,
     credential_free_config_dir,
     expected_block,
+    publication_copy,
     read_prepared,
+    relay_source,
 )
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
@@ -786,6 +788,7 @@ class ProverLoop:
                     cwd=worktree,
                     status=verdict.status,
                     blocking=blocking,
+                    findings=verdict.findings,
                 )
             else:
                 # A self-publishing lane prepares and publishes in one step this
@@ -800,6 +803,7 @@ class ProverLoop:
             launched=known,
             status=verdict.status,
             blocking=blocking,
+            findings=verdict.findings,
         )
         self._event(
             f"reviewer {reviewer.name} returned {verdict.status} with "
@@ -817,16 +821,26 @@ class ProverLoop:
         cwd: Path,
         status: str,
         blocking: int,
+        findings: Sequence[Finding],
     ) -> frozenset[str]:
         """Publish a credential-free reviewer's prepared artifact, once it validates.
 
         This is the whole transport half of the lifecycle. The file the lane
         wrote is held to this reviewer's signature, role line, runtime, declared
-        status and blocking count, and this exact head before the configured
-        relay command is allowed to post it. An artifact that would fail
-        readback therefore never reaches GitHub at all, and a relay that cannot
-        publish stops the run rather than leaving the next step to discover an
-        absence it cannot explain.
+        status and blocking count, the findings the lane actually reported, and
+        this exact head before the configured relay command is allowed to post
+        it. An artifact that would fail readback therefore never reaches GitHub
+        at all, and a relay that cannot publish stops the run rather than
+        leaving the next step to discover an absence it cannot explain.
+
+        What the relay publishes is the *redacted* copy of that file, not the
+        reviewer's own bytes. An artifact is child output, and a lane that
+        quoted a header or pasted a transcript into it has written a credential
+        into the one document this tool publishes under somebody's name — which
+        no later step catches, because parsing scrubs the records it extracts
+        and passes the body through untouched. The copy is scrubbed whole,
+        revalidated against everything the original was, and written to its own
+        path; the original stays local input.
 
         What is returned is the artifact-id snapshot taken *immediately before*
         the relay ran, and it is the set readback attributes against. The
@@ -844,14 +858,20 @@ class ProverLoop:
             # be reachable: an empty set would credit whatever happens to be on
             # the PR to a transport that never ran.
             return self._artifact_identities()
-        artifact = read_prepared(
-            prepared,
+        artifact = publication_copy(
+            read_prepared(
+                prepared,
+                reviewer=reviewer.name,
+                role=reviewer.role,
+                signature=reviewer.artifact_signature,
+                head=head,
+                status=status,
+                blocking=blocking,
+                findings=findings,
+            ),
             reviewer=reviewer.name,
-            role=reviewer.role,
             signature=reviewer.artifact_signature,
-            head=head,
-            status=status,
-            blocking=blocking,
+            findings=findings,
         )
         self._mark_transport(prepared=True)
         self._event(
@@ -859,7 +879,16 @@ class ProverLoop:
             f"as {artifact.claim.runtime} with no GitHub credential in its lane"
         )
         lane = f"relay {reviewer.name}"
-        argv = render_argv(relay.argv, values, what=f"reviewer {reviewer.name!r} relay")
+        # The lane was pointed at its own file; the relay is pointed at the
+        # redacted copy of it. Same placeholder, and deliberately not the same
+        # path: what a reviewer writes is untrusted child output, and this is
+        # the step that publishes it under the reviewer's name.
+        published_file = relay_source(artifact, reviewer=reviewer.name)
+        argv = render_argv(
+            relay.argv,
+            {**values, "artifact_file": str(published_file)},
+            what=f"reviewer {reviewer.name!r} relay",
+        )
         # Taken here, after the reviewer has exited and before the relay is
         # launched, so the only ids that can be credited to this transport are
         # the ones that appear inside the relay's own window.
@@ -872,7 +901,7 @@ class ProverLoop:
                 evidence={
                     "reviewer": reviewer.name,
                     "head": head,
-                    "artifact_file": str(prepared),
+                    "artifact_file": str(published_file),
                     "returncode": result.returncode,
                     "output": redact_evidence(_combined(result), limit=2000),
                 },
@@ -892,6 +921,7 @@ class ProverLoop:
         launched: frozenset[str],
         status: str,
         blocking: int,
+        findings: Sequence[Finding],
     ) -> None:
         """Find the artifact this run's own transport published, or stop.
 
@@ -900,9 +930,16 @@ class ProverLoop:
         Karan and the next reviewer act on is the one on the PR. So it must be
         new since the moment transport began, published under the configured
         login, carry this lane's role and runtime on their own lines, declare
-        the same status and blocking count the lane's marker did, and be bound
-        to this exact head — by GitHub's own ``commit_id`` where a review has
-        one, and by the canonical declaration in every case.
+        the same status and blocking count the lane's marker did, state the
+        lane's findings themselves one to one, and be bound to this exact head —
+        by GitHub's own ``commit_id`` where a review has one, and by the
+        canonical declaration in every case.
+
+        ``findings`` is what makes the second-to-last of those checkable. The
+        prepared file was already held to it, but that is a fact about the bytes
+        a relay was *given*; a truncation or substitution between there and the
+        PR keeps every declaration intact and loses the records. Passing the
+        count alone would credit that as complete transport.
 
         ``attributable`` is that moment: for a relayed lane it is the snapshot
         taken immediately before the relay ran, and for a self-publishing lane
@@ -927,6 +964,7 @@ class ProverLoop:
                 head=head,
                 status=status,
                 blocking=blocking,
+                findings=findings,
             ):
                 continue
             self._event(
@@ -938,11 +976,16 @@ class ProverLoop:
             return
         raise ReadbackMismatch(
             f"reviewer {reviewer.name} published no artifact carrying its configured "
-            "author, signature, role, runtime, verdict, and this exact head together",
+            "author, signature, role, runtime, verdict, findings, and this exact head "
+            "together",
             evidence={
                 "reviewer": reviewer.name,
                 "role": reviewer.role,
                 "head": head,
+                # Named, because "the findings are missing from what landed" and
+                # "the declaration block is wrong" are different diagnoses and
+                # the body itself is not repeated into the evidence.
+                "expected_findings": [finding.id for finding in findings],
                 "expected_author": reviewer.artifact_author,
                 "expected_signature": reviewer.artifact_signature,
                 "expected_block": expected_block(

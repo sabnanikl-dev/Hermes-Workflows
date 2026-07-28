@@ -10,10 +10,27 @@
 # under the reviewer identity. Nothing here posts, and nothing here needs a
 # token — or can get one.
 #
-# Codex's own stdout passes straight through, so its last non-empty line is read
-# by pr-prover as the lane verdict:
+# Codex's process output is not its answer. A real `codex exec` run narrates
+# what it is doing, and that narration routinely includes the prompt it was
+# given — so the marker examples this adapter writes into the prompt come back
+# out as ordinary progress text. pr-prover reads a lane's output for exactly one
+# DONE: line, which means passing that narration through does not merely add
+# noise: it manufactures extra verdict candidates and stops the run.
+#
+# So the two are separated here. Codex writes its finished answer to the file
+# named by --output-last-message, and only that file is printed on this script's
+# stdout, where pr-prover reads:
 #
 #     DONE: STATUS=pass|fail BLOCKING=<count> HEAD=<40-hex sha>
+#
+# The narration is kept — it is the best evidence there is about a lane that
+# failed — but it is re-emitted on stderr with every line prefixed, so no line
+# of it can begin with a marker keyword and none of it can be read as a verdict.
+#
+# The rest of the run is pinned rather than inherited: ephemeral execution, the
+# reviewer model, its reasoning effort, the write scope, and write access to the
+# external artifact directory are all stated at the launch below, because each
+# one is a property the published artifact makes a claim about.
 #
 # Set PR_PROVER_CODEX to invoke a Codex binary that is not on PATH as "codex".
 set -eu
@@ -104,6 +121,32 @@ command -v "$codex" >/dev/null 2>&1 || {
 	echo "$0: no Codex CLI found (looked for '$codex'; set PR_PROVER_CODEX)" >&2
 	exit 127
 }
+
+# The one file this lane is meant to leave behind, and the directory Codex has
+# to be granted write access to in order to create it. Both are checked before
+# a model is spent: a lane told to write somewhere that does not exist produces
+# a review nobody can relay, and a lane granted write access *inside* the
+# checkout would make its own scratch output indistinguishable from the
+# contamination the post-lane check exists to catch.
+artifact_dir=$(dirname "$artifact_file")
+[ -d "$artifact_dir" ] || {
+	echo "$0: the artifact directory does not exist: $artifact_dir" >&2
+	exit 66
+}
+worktree_real=$(cd "$worktree" && pwd -P) || {
+	echo "$0: could not resolve the worktree path: $worktree" >&2
+	exit 66
+}
+artifact_dir_real=$(cd "$artifact_dir" && pwd -P) || {
+	echo "$0: could not resolve the artifact directory: $artifact_dir" >&2
+	exit 66
+}
+case "$artifact_dir_real" in
+"$worktree_real" | "$worktree_real"/*)
+	echo "$0: the artifact path is inside the reviewed worktree ($artifact_file); this lane's own output must land outside the checkout it is checked for having modified" >&2
+	exit 66
+	;;
+esac
 
 rm -f "$artifact_file"
 
@@ -219,15 +262,154 @@ second or conflicting HEAD= line is rejected before anything is published. The
 same rule applies to ROLE=, RUNTIME=, STATUS=, and BLOCKING=, and STATUS must
 agree with BLOCKING: pass means zero.
 
-State every blocking finding with file and line. Then print, as the last
-non-empty line of your own stdout, exactly:
+State every blocking finding in the artifact with its file and line.
+
+Your final message is the only thing read as this lane's verdict. Nothing you
+print along the way is parsed, so put the whole machine-readable result in that
+final message and nowhere else.
+
+The final message must carry one line per finding, in exactly this grammar:
+
+  FINDING: SEVERITY=<severity> ID=<id> -- <summary>
+
+read strictly, one finding per line, with nothing else on the line:
+
+  FINDING:    literally that, at the very start of the line, no indentation
+  SEVERITY=   exactly one of: blocking, non-blocking, needs-karan
+              (lowercase, no other value is accepted)
+  ID=         a short unique slug for this finding: 1 to 64 characters, the
+              first a lowercase letter or digit, the rest lowercase letters,
+              digits, '.', '_' or '-'
+  --          exactly two hyphens, with exactly one space on each side
+  <summary>   a one-line summary, 1 to 300 characters, no line break in it
+
+Each id must be unique within your final message; a repeated id is rejected.
+Write no FINDING: line for a finding you are not reporting, and do not restate
+this grammar or quote an example FINDING: line back — a line that starts with
+FINDING: and does not match the grammar above is a malformed verdict and stops
+the run.
+
+Then print, as the last non-empty line of your final message, exactly:
 
   DONE: STATUS=pass|fail BLOCKING=<number of blocking findings> HEAD=${head}
+
+These have to agree with each other and with your artifact, one to one:
+BLOCKING= is the number of FINDING: lines whose SEVERITY= is blocking, the
+BLOCKING= line in your artifact is that same number, STATUS=pass is correct
+only when that number is zero, and STATUS=fail only when it is one or more.
+Nothing may follow the DONE: line, and there must be exactly one of it.
 PROMPT
 
 prompt=$(cat "$prompt_file")
 rm -f "$prompt_file"
 trap - EXIT HUP INT TERM
 
+# Two scratch files, both under the OS temp directory and never inside the
+# worktree: this lane is checked afterwards for having modified the exact-head
+# checkout it was given, and writing its own working files there would be
+# indistinguishable from the contamination that check exists to catch. The
+# review artifact --artifact-file names is the one file this lane is meant to
+# leave behind; these two are cleaned up before it exits.
+final_message=$(mktemp "${TMPDIR:-/tmp}/pr-prover-reviewer-final.XXXXXX") || {
+	echo "$0: could not create a temporary file for the final message" >&2
+	exit 73
+}
+diagnostics=$(mktemp "${TMPDIR:-/tmp}/pr-prover-reviewer-diagnostics.XXXXXX") || {
+	rm -f "$final_message"
+	echo "$0: could not create a temporary file for the lane diagnostics" >&2
+	exit 73
+}
+trap 'rm -f "$final_message" "$diagnostics"' EXIT HUP INT TERM
+
+# mktemp reserves the name by creating the file, which would make "Codex never
+# wrote a final message" indistinguishable from "Codex wrote an empty one". They
+# are different diagnoses — an unsupported --output-last-message against a model
+# that returned nothing — so the placeholder is cleared and the file's existence
+# afterwards is Codex's own answer.
+rm -f "$final_message"
+
 cd "$worktree"
-exec "$codex" exec "$prompt"
+
+# Codex's narration goes to the file, not to this script's streams. `set -e` is
+# lifted across the call on purpose: a reviewer that found blockers is entitled
+# to exit nonzero, and its verdict still has to be read and reported rather than
+# aborting the adapter here.
+#
+# Every property of the run this lane's evidence depends on is stated here
+# rather than left to whatever default happens to be in effect. "Which model
+# reviewed this head, under how much reasoning, with write access to what, and
+# did anything survive the run" are all claims the artifact makes, and a launch
+# that does not pin them lets the artifact declare a runtime the process never
+# had:
+#
+#   --ephemeral   nothing is persisted. A run is one exact-head audit, and the
+#                 next cycle starts from the live PR rather than from a session
+#                 that remembers the last one.
+#   --model       the reviewer runtime this repository reviews with. The
+#                 artifact's RUNTIME= line is then a property of the launch.
+#   --config      reasoning effort, pinned for the same reason as the model. The
+#                 value is passed bare, exactly as written, because it is one of
+#                 the effort names the CLI accepts as a scalar; nothing here adds
+#                 quoting the shell would strip anyway.
+#   --sandbox     workspace-write, because a read-only lane cannot write the one
+#                 artifact it is being asked for. This is not a security
+#                 boundary and is not relied on as one: what proves the checkout
+#                 was left alone is pr-prover's post-lane contamination check.
+#   --add-dir     the artifact directory, which is outside the worktree — so the
+#                 file this lane is meant to leave behind is one it is actually
+#                 permitted to create, and no other location is added.
+#
+# Ambient user configuration is deliberately still loaded: this is a trusted
+# inherited session, the flags above override the settings that matter, and
+# synthesizing an environment is not this tool's business.
+set +e
+"$codex" exec \
+	--ephemeral \
+	--model gpt-5.6-sol \
+	--config model_reasoning_effort=medium \
+	--sandbox workspace-write \
+	--add-dir "$artifact_dir" \
+	--output-last-message "$final_message" \
+	"$prompt" >"$diagnostics" 2>&1
+codex_status=$?
+set -e
+
+# The narration, kept as evidence and neutralised as input. The prefix is what
+# makes it safe: pr-prover recognises a marker only at the start of a line, so a
+# prompt echo containing "DONE: ..." or "FINDING: ..." can no longer add a
+# verdict candidate to this lane's output. It goes to stderr, which is not the
+# stream the marker is read from.
+if [ -s "$diagnostics" ]; then
+	echo "$0: codex exec diagnostics follow, one prefixed line each:" >&2
+	sed 's/^/codex| /' "$diagnostics" >&2
+fi
+
+# From here the final message is the verdict, so every way it can fail to be one
+# is refused out loud rather than passed on as an empty or partial answer. An
+# absent file is also how an unsupported --output-last-message shows up: Codex
+# rejects the flag, writes nothing, and this says so instead of reporting a lane
+# that quietly produced no findings.
+if [ ! -f "$final_message" ]; then
+	echo "$0: codex exec wrote no final message to $final_message (exit $codex_status); refusing to report a verdict" >&2
+	exit 65
+fi
+if [ ! -r "$final_message" ]; then
+	echo "$0: codex exec's final message at $final_message is not readable (exit $codex_status)" >&2
+	exit 65
+fi
+# Emptiness is tested by content rather than by size, so a file holding nothing
+# but a newline is refused here with the reason, instead of reaching the parser
+# as a lane that mysteriously emitted no marker.
+if ! grep -q '[^[:space:]]' "$final_message"; then
+	echo "$0: codex exec's final message is empty (exit $codex_status); an empty answer is not a verdict" >&2
+	exit 65
+fi
+
+# The verdict, and nothing else, on stdout.
+cat "$final_message"
+
+# Codex's own exit status is preserved rather than replaced. pr-prover requires
+# a clean process behind a "pass" verdict, so a run that failed underneath a
+# final message claiming success has to still look failed from out here for that
+# check to have anything to catch.
+exit "$codex_status"
