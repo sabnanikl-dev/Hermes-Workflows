@@ -32,9 +32,12 @@ quietly proves less than it claims.
 A reviewer may publish its own artifact, or — the shipped default — declare a
 ``relay``: the reviewer writes its finished artifact to ``{artifact_file}`` with
 no GitHub credential in its environment, and the separately configured relay
-argv publishes that file under the reviewer identity. The relay is an ordinary
-command; it is given no credential by this tool and uses whatever ``gh`` session
-it already has.
+argv publishes it under the reviewer identity. The relay is an ordinary command;
+it is given no credential by this tool and uses whatever ``gh`` session it
+already has. Its own ``{artifact_file}`` resolves to the *redacted* copy of what
+the lane wrote — see :func:`pr_prover.reviewers.publication_copy` — because an
+artifact is child output and the relay is what publishes it under a name that is
+not the lane's.
 
 A relayed lane's argv must also receive ``{evidence_packet}``. Having no GitHub
 identity is not a detail it can work around — it cannot read the PR at all — so
@@ -258,8 +261,8 @@ class ReviewerConfig:
     another's.
 
     With a ``relay``, the lane itself is credential-free: it writes its artifact
-    to ``{artifact_file}`` and the relay publishes it. Without one, the lane
-    publishes for itself, which is also supported.
+    to ``{artifact_file}`` and the relay publishes the redacted copy of it.
+    Without one, the lane publishes for itself, which is also supported.
     """
 
     name: str

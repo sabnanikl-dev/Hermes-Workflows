@@ -175,7 +175,9 @@ from .reviewers import (
     credential_free as credential_free_env,
     credential_free_config_dir,
     expected_block,
+    publication_copy,
     read_prepared,
+    relay_source,
 )
 from .state import MAX_ATTEMPTS, RunLock, RunState
 from .verdicts import (
@@ -831,6 +833,15 @@ class ProverLoop:
         at all, and a relay that cannot publish stops the run rather than
         leaving the next step to discover an absence it cannot explain.
 
+        What the relay publishes is the *redacted* copy of that file, not the
+        reviewer's own bytes. An artifact is child output, and a lane that
+        quoted a header or pasted a transcript into it has written a credential
+        into the one document this tool publishes under somebody's name — which
+        no later step catches, because parsing scrubs the records it extracts
+        and passes the body through untouched. The copy is scrubbed whole,
+        revalidated against everything the original was, and written to its own
+        path; the original stays local input.
+
         What is returned is the artifact-id snapshot taken *immediately before*
         the relay ran, and it is the set readback attributes against. The
         pre-launch snapshot cannot do that job: it answers "did this id exist
@@ -847,14 +858,19 @@ class ProverLoop:
             # be reachable: an empty set would credit whatever happens to be on
             # the PR to a transport that never ran.
             return self._artifact_identities()
-        artifact = read_prepared(
-            prepared,
+        artifact = publication_copy(
+            read_prepared(
+                prepared,
+                reviewer=reviewer.name,
+                role=reviewer.role,
+                signature=reviewer.artifact_signature,
+                head=head,
+                status=status,
+                blocking=blocking,
+                findings=findings,
+            ),
             reviewer=reviewer.name,
-            role=reviewer.role,
             signature=reviewer.artifact_signature,
-            head=head,
-            status=status,
-            blocking=blocking,
             findings=findings,
         )
         self._mark_transport(prepared=True)
@@ -863,7 +879,16 @@ class ProverLoop:
             f"as {artifact.claim.runtime} with no GitHub credential in its lane"
         )
         lane = f"relay {reviewer.name}"
-        argv = render_argv(relay.argv, values, what=f"reviewer {reviewer.name!r} relay")
+        # The lane was pointed at its own file; the relay is pointed at the
+        # redacted copy of it. Same placeholder, and deliberately not the same
+        # path: what a reviewer writes is untrusted child output, and this is
+        # the step that publishes it under the reviewer's name.
+        published_file = relay_source(artifact, reviewer=reviewer.name)
+        argv = render_argv(
+            relay.argv,
+            {**values, "artifact_file": str(published_file)},
+            what=f"reviewer {reviewer.name!r} relay",
+        )
         # Taken here, after the reviewer has exited and before the relay is
         # launched, so the only ids that can be credited to this transport are
         # the ones that appear inside the relay's own window.
@@ -876,7 +901,7 @@ class ProverLoop:
                 evidence={
                     "reviewer": reviewer.name,
                     "head": head,
-                    "artifact_file": str(prepared),
+                    "artifact_file": str(published_file),
                     "returncode": result.returncode,
                     "output": redact_evidence(_combined(result), limit=2000),
                 },

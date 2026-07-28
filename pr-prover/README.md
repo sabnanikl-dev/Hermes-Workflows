@@ -78,7 +78,7 @@ tokens, and an unknown token fails the run rather than rendering literally:
 | `{branch}` `{base}` `{head}` | all lanes | from the **live** PR, never from config alone |
 | `{worktree}` | all lanes | this lane's own fresh worktree, at the exact head |
 | `{reviewer}` `{role}` | reviewer lanes | the lane name, and the mission role it runs as |
-| `{artifact_file}` | reviewer lanes and their relay | where this lane prepares its artifact, under the OS temp directory |
+| `{artifact_file}` | reviewer lanes and their relay | where this lane prepares its artifact, under the OS temp directory — the relay is given the redacted copy of that file, not the lane's own bytes |
 | `{evidence_packet}` | reviewer lanes | the frozen read-only PR evidence this lane judges from, under the OS temp directory |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
 
@@ -304,6 +304,7 @@ and each step is separately checkable:
 ```text
 frozen evidence packet → credential-free audit
   → prepared artifact under the OS temp directory
+  → redacted copy of it, revalidated and written beside it
   → trusted relay command publishing under the reviewer identity
   → GitHub readback of what actually landed
 ```
@@ -413,6 +414,36 @@ an artifact that would fail readback never reaches the PR at all. Then the post
 itself must be from the configured login and bound to this head — by GitHub's
 own review `commit_id` where there is one, *and* by the canonical declaration in
 every case.
+
+### What the relay actually publishes
+
+Not the reviewer's own bytes. An artifact is child output, and the artifact is
+the one surface this tool **publishes**, under a name that is not the lane's — a
+reviewer that quotes an `Authorization` header back as evidence, pastes a
+command transcript, or dumps its environment to show what it ran with has
+written a credential into that document. Nothing downstream catches it: parsing
+scrubs the *records* it extracts, in memory, and hands on the body it read them
+out of exactly as it found it, so readback re-parses, re-scrubs, and agrees.
+
+So the body is scrubbed once, whole, by the same `redaction.scrub` every other
+surface goes through, and the result is written to its own path beside the
+original. That copy is what `{artifact_file}` resolves to for the relay, and it
+is revalidated first — signature, declarations, verdict, and one-to-one finding
+parity — on its own bytes, because a check applied to bytes nobody publishes
+proves nothing about the bytes that are.
+
+Only the credential-shaped runs change; every other character survives, which is
+why this uses `scrub` and not the clipping `sanitize`/`evidence` the report and
+the packet use. A review clipped to fit an evidence budget would lose the
+argument it exists to make.
+
+Redaction is a text substitution, so it can also change what a document says: it
+can consume a signature that looked like a credential, grow a body past the size
+bound, or lengthen a `FINDING:` line that was already at the grammar's limit
+past what the readback parser accepts. Each of those stops the run **before**
+anything is published, on the same rule as everything else here — never publish
+what readback would reject. The reviewer's original file stays on disk as local
+input for the rest of the run, and is never a publication path.
 
 ### Which post counts as this run's transport
 

@@ -7,6 +7,7 @@ explicit route::
 
     frozen evidence packet  ->  credential-free audit
       ->  prepared artifact under the OS temp directory
+      ->  redacted publication copy of it, revalidated and written beside it
       ->  trusted relay command publishing under the reviewer identity
       ->  GitHub readback of what actually landed
 
@@ -27,6 +28,16 @@ Each step is separately checkable, and this module holds the checks:
   later apply, minus the two only GitHub can answer (who posted it, and whether
   the id is new). A lane that fell over silently therefore stops the run instead
   of putting something unusable on the PR under the reviewer's name;
+* :func:`publication_copy` is what a relay is actually pointed at, and
+  :func:`relay_source` is the only place the path it publishes comes from. The
+  bytes a lane wrote are untrusted input like any other child output: a reviewer
+  that pasted a command transcript, a header, or an environment dump into its
+  own artifact has written a credential into a file whose whole purpose is to be
+  published under the reviewer's name, and no later check catches it — parsing
+  scrubs the *records* it extracts, in memory, and leaves the body it parsed
+  them out of exactly as it found it. So the body is scrubbed once, whole, and
+  the redacted result is written beside the original, revalidated, and relayed;
+  the reviewer's own bytes stay local input and are never a publication path;
 * :func:`artifact_matches` is the published-artifact predicate itself, and it
   applies the same finding-parity check to the body GitHub actually shows.
   Validating the prepared file proves what the relay was handed; only reading
@@ -86,6 +97,7 @@ attempted kill-switch has not done the job the prompt asked for.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from collections.abc import Mapping, Sequence
@@ -95,6 +107,7 @@ from typing import Any
 
 from .errors import MalformedVerdict, ReviewerRelayError
 from .findings import Finding
+from .redaction import scrub
 from .verdicts import FindingRecord, finding_records
 
 # The variable names that carry a GitHub credential. A reviewer lane in the
@@ -116,6 +129,10 @@ GH_CONFIG_DIR_ENV = "GH_CONFIG_DIR"
 # one and small enough that a runaway lane cannot fill the relay's argv or the
 # report with it.
 MAX_PREPARED_BYTES = 262_144
+
+# What marks the redacted copy of an artifact apart from the reviewer's own
+# file. Only one of the two may ever be published, so they never share a name.
+PUBLICATION_SUFFIX = ".sanitized"
 
 # The declaration keys, and the line shape each one is matched as.
 ROLE_PREFIX = "ROLE="
@@ -306,7 +323,9 @@ def artifact_disagreement(
     return ""
 
 
-def artifact_findings(body: str, *, reviewer: str) -> tuple[FindingRecord, ...]:
+def artifact_findings(
+    body: str, *, reviewer: str, surface: str = "prepared artifact"
+) -> tuple[FindingRecord, ...]:
     """The artifact's own ``FINDING:`` lines, read by the verdict parser's grammar.
 
     Deliberately not a second reader. The prompt states one grammar, the lane's
@@ -314,13 +333,17 @@ def artifact_findings(body: str, *, reviewer: str) -> tuple[FindingRecord, ...]:
     in a shape the parser would refuse is not a record the next reviewer or
     Karan can reconcile — so it is read by the same function and refused for the
     same reasons, expressed as the relay failure it actually is.
+
+    ``surface`` names which copy of the artifact is being read, because the same
+    grammar is applied twice: to the file the lane wrote, and again to the
+    redacted body that is what a relay may publish.
     """
-    lane = f"reviewer {reviewer}'s prepared artifact"
+    lane = f"reviewer {reviewer}'s {surface}"
     try:
         return finding_records(body, lane=lane)
     except MalformedVerdict as exc:
         raise ReviewerRelayError(
-            f"reviewer {reviewer}'s prepared artifact carries a {FINDING_PREFIX} line the "
+            f"reviewer {reviewer}'s {surface} carries a {FINDING_PREFIX} line the "
             f"verdict grammar refuses: {exc.message}",
             evidence={"reviewer": reviewer, **exc.evidence},
         ) from exc
@@ -386,6 +409,13 @@ class PreparedArtifact:
     # findings. Kept rather than discarded so a caller that needs the record
     # reads the validated one instead of re-parsing the body.
     findings: tuple[FindingRecord, ...] = ()
+    # Has this body been through the redaction every published surface owes?
+    # False is what a lane wrote: valid, checked against everything this run
+    # knows, and still the reviewer's own untrusted bytes. Only
+    # :func:`publication_copy` sets it, and only :func:`relay_source` reads it,
+    # so "which of these two artifacts may be published" is a question with one
+    # answer rather than a convention each call site has to remember.
+    sanitized: bool = False
 
     @property
     def size(self) -> int:
@@ -525,15 +555,51 @@ def read_prepared(
         raise ReviewerRelayError(
             f"reviewer {reviewer}'s prepared artifact is not UTF-8 text", evidence=evidence
         ) from exc
+    claim, records = _validated(
+        body,
+        reviewer=reviewer,
+        surface="prepared artifact",
+        role=role,
+        signature=signature,
+        head=head,
+        status=status,
+        blocking=blocking,
+        findings=findings,
+        evidence=evidence,
+    )
+    return PreparedArtifact(path=path, body=body, claim=claim, findings=records)
+
+
+def _validated(
+    body: str,
+    *,
+    reviewer: str,
+    surface: str,
+    role: str,
+    signature: str,
+    head: str,
+    status: str,
+    blocking: int,
+    findings: Sequence[Finding],
+    evidence: Mapping[str, Any],
+) -> tuple[ArtifactClaim, tuple[FindingRecord, ...]]:
+    """Hold one artifact body to everything this run knows about the review.
+
+    One function rather than one per copy. The file a lane wrote and the
+    redacted body a relay may publish are the same claim about the same head, so
+    holding them to two validators is how the published one quietly becomes the
+    one that was checked less. ``surface`` is only what the refusals call the
+    copy in front of them.
+    """
     if signature not in body:
         raise ReviewerRelayError(
-            f"reviewer {reviewer}'s prepared artifact does not carry its configured signature",
+            f"reviewer {reviewer}'s {surface} does not carry its configured signature",
             evidence={**evidence, "expected_signature": signature},
         )
     reading = parse_artifact(body)
     if reading.claim is None:
         raise ReviewerRelayError(
-            f"reviewer {reviewer}'s prepared artifact is not a well-formed review "
+            f"reviewer {reviewer}'s {surface} is not a well-formed review "
             f"artifact: {reading.note}",
             evidence={
                 **evidence,
@@ -548,7 +614,7 @@ def read_prepared(
     )
     if disagreement:
         raise ReviewerRelayError(
-            f"reviewer {reviewer}'s prepared artifact does not report the review this "
+            f"reviewer {reviewer}'s {surface} does not report the review this "
             f"lane just produced: {disagreement}",
             evidence={
                 **evidence,
@@ -560,11 +626,11 @@ def read_prepared(
                 "lane_blocking": blocking,
             },
         )
-    records = artifact_findings(body, reviewer=reviewer)
+    records = artifact_findings(body, reviewer=reviewer, surface=surface)
     mismatch = finding_parity(records, findings, declared=blocking)
     if mismatch:
         raise ReviewerRelayError(
-            f"reviewer {reviewer}'s prepared artifact does not carry the findings this "
+            f"reviewer {reviewer}'s {surface} does not carry the findings this "
             f"lane reported: {mismatch}",
             evidence={
                 **evidence,
@@ -574,7 +640,177 @@ def read_prepared(
                 "lane_finding_count": len(findings),
             },
         )
-    return PreparedArtifact(path=path, body=body, claim=reading.claim, findings=records)
+    return reading.claim, records
+
+
+def publication_path(prepared: Path) -> Path:
+    """Where one artifact's redacted, publication-eligible copy is written.
+
+    Beside the file the lane wrote, in the same run-owned scratch directory that
+    is cleared with the rest of the run, and never the same path: the reviewer's
+    own bytes stay readable as local input for as long as the run needs them,
+    and no caller can confuse the two by holding the wrong one.
+    """
+    return prepared.with_name(f"{prepared.stem}{PUBLICATION_SUFFIX}{prepared.suffix}")
+
+
+def publication_copy(
+    prepared: PreparedArtifact,
+    *,
+    reviewer: str,
+    signature: str,
+    findings: Sequence[Finding],
+) -> PreparedArtifact:
+    """The redacted artifact a relay may publish, written and revalidated.
+
+    A reviewer lane's artifact is child output, and child output is where a
+    credential from the environment turns up: a pasted command transcript, an
+    ``Authorization`` header quoted back as evidence, an environment dump
+    offered as proof of what the lane ran with. Every other surface this tool
+    produces goes through :func:`pr_prover.redaction.scrub` before anybody can
+    read it. The artifact is the one surface that is *published*, under the
+    reviewer's name, on the pull request — and it used to be the reviewer's
+    original bytes that were handed to the relay. Parsing does not save it:
+    :func:`pr_prover.verdicts.finding_records` scrubs the summaries it extracts,
+    in memory, and the body those were read out of is passed on untouched. So a
+    credential-shaped value in an artifact reached GitHub and then read back
+    clean, because readback re-parsed and re-scrubbed the same way.
+
+    This is the fix, and it is deliberately the whole body: scrub once, in one
+    place, over everything a relay could publish, rather than per known field.
+
+    :func:`pr_prover.redaction.scrub` is what does it, not ``sanitize`` or
+    ``evidence`` — those clip as well as scrub, and clipping is exactly wrong
+    here. A review is prose Karan and the next reviewer read; eliding the middle
+    of it to fit an evidence budget would lose the argument the artifact exists
+    to make. Every non-secret character survives; only a recognized
+    credential-shaped substring becomes :data:`pr_prover.redaction.PLACEHOLDER`.
+
+    Then the redacted body is held to the same standard the original was, on the
+    reasoning that a check applied to bytes nobody publishes proves nothing
+    about the bytes that are. Redaction is a text substitution, and a text
+    substitution can change what a document says: it can consume a signature
+    that happened to look like a credential, and it can lengthen a line — the
+    placeholder is longer than a short secret — past the one-line grammar the
+    ``FINDING:`` records are read by. Both make an artifact this run must not
+    publish, and both stop the run here rather than at readback, which is the
+    same rule :func:`read_prepared` already works by: never publish something
+    readback would reject.
+    """
+    target = publication_path(prepared.path)
+    evidence: dict[str, Any] = {
+        "reviewer": reviewer,
+        "role": prepared.claim.role,
+        "head": prepared.claim.head,
+        "artifact_file": str(prepared.path),
+        "publication_file": str(target),
+    }
+    try:
+        body = scrub(prepared.body)
+    except Exception as exc:  # pragma: no cover - a regex substitution over str
+        # Fail closed rather than fall back to the unredacted body: "the
+        # sanitizer did not run" is the one condition under which publishing is
+        # least acceptable, not most.
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s artifact could not be redacted for publication: {exc}",
+            evidence={**evidence, "error": type(exc).__name__},
+        ) from exc
+    data = body.encode("utf-8")
+    if len(data) > MAX_PREPARED_BYTES:
+        # Reachable in one direction only: redaction can grow a body, because
+        # the placeholder is longer than the short secrets it replaces.
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s redacted artifact is larger than an artifact can be",
+            evidence={**evidence, "bytes": len(data), "limit": MAX_PREPARED_BYTES},
+        )
+    claim, records = _validated(
+        body,
+        reviewer=reviewer,
+        surface="redacted artifact",
+        role=prepared.claim.role,
+        signature=signature,
+        head=prepared.claim.head,
+        status=prepared.claim.status,
+        blocking=prepared.claim.blocking,
+        findings=findings,
+        evidence=evidence,
+    )
+    _write_publication_copy(target, data, reviewer=reviewer, evidence=evidence)
+    return PreparedArtifact(
+        path=target, body=body, claim=claim, findings=records, sanitized=True
+    )
+
+
+def _write_publication_copy(
+    target: Path, data: bytes, *, reviewer: str, evidence: Mapping[str, Any]
+) -> None:
+    """Write the redacted body to its own path, or stop the run.
+
+    Exclusive creation, so the path is never opened through something that was
+    already there: a symlink planted at it is removed rather than followed, and
+    anything that reappears between clearing the path and creating it loses the
+    race by failing rather than by being written through. What lands is then
+    read back, because a partial write is a truncated review published under the
+    reviewer's name, and the check that it is a regular file is repeated
+    afterwards for the same reason.
+    """
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s publication path could not be cleared: {exc}",
+            evidence={**evidence, "error": type(exc).__name__},
+        ) from exc
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        with os.fdopen(os.open(target, flags, 0o600), "wb") as stream:
+            stream.write(data)
+    except OSError as exc:
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s redacted artifact could not be written for "
+            f"publication: {exc}",
+            evidence={**evidence, "error": type(exc).__name__},
+        ) from exc
+    if target.is_symlink() or not target.is_file():
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s publication path is not the regular file that was "
+            "just written to it",
+            evidence=dict(evidence),
+        )
+    try:
+        written = target.read_bytes()
+    except OSError as exc:
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s redacted artifact could not be read back after it "
+            f"was written: {exc}",
+            evidence={**evidence, "error": type(exc).__name__},
+        ) from exc
+    if written != data:
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s publication path does not hold the redacted artifact "
+            "that was written to it",
+            evidence={**evidence, "written_bytes": len(written), "redacted_bytes": len(data)},
+        )
+
+
+def relay_source(artifact: PreparedArtifact, *, reviewer: str) -> Path:
+    """The only path a relay may be pointed at.
+
+    The lifecycle now holds two artifacts for one review — what the lane wrote,
+    and the redacted copy of it — and exactly one of them may be published. That
+    is an invariant, so it is checked here, at the single point where a path
+    becomes the argument a transport runs with, rather than left as something
+    every future call site is trusted to remember.
+    """
+    if not artifact.sanitized:
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s own artifact bytes were about to be relayed; only "
+            "the redacted publication copy may be published",
+            evidence={"reviewer": reviewer, "artifact_file": str(artifact.path)},
+        )
+    return artifact.path
 
 
 def published_findings(body: str) -> tuple[FindingRecord, ...] | None:
@@ -665,6 +901,7 @@ __all__ = [
     "HEAD_PREFIX",
     "KILL_SWITCH_PREFIX",
     "MAX_PREPARED_BYTES",
+    "PUBLICATION_SUFFIX",
     "ROLE_PREFIX",
     "RUNTIME_PREFIX",
     "STATUS_PREFIX",
@@ -682,6 +919,9 @@ __all__ = [
     "finding_parity",
     "is_full_sha",
     "parse_artifact",
+    "publication_copy",
+    "publication_path",
     "published_findings",
     "read_prepared",
+    "relay_source",
 ]
