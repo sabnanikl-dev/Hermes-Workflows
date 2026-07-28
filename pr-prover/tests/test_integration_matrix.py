@@ -374,7 +374,9 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
 
 
-def png_bytes(width: int, height: int, *, idat_parts: int = 1) -> bytes:
+def png_bytes(
+    width: int, height: int, *, idat_parts: int = 1, ancillary: bool = False
+) -> bytes:
     """A real, decodable PNG of exactly this size: signature, IHDR, IDAT, IEND.
 
     ``idat_parts`` splits the one compressed image stream across that many
@@ -382,17 +384,27 @@ def png_bytes(width: int, height: int, *, idat_parts: int = 1) -> bytes:
     larger than its buffer. It is a legal stream, so it is the control that
     stops the ordering rules below from being satisfied by simply demanding a
     single ``IDAT``.
+
+    ``ancillary`` wraps the ``IDAT`` run in chunks the reader does not recognise
+    and PNG requires it to skip. It is legal too, so it is the control that stops
+    the type-code rules below from being satisfied by refusing every chunk this
+    fixture does not itself generate — which would refuse ordinary encoder
+    output while still calling itself a decoder.
     """
     header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)  # 8-bit greyscale
     scanlines = b"".join(b"\x00" + bytes([(row * 7) % 256]) * width for row in range(height))
     body = zlib.compress(scanlines, 6)
     step = -(-len(body) // idat_parts)  # ceil, so every part carries bytes
     parts = [body[start : start + step] for start in range(0, len(body), step)]
+    before = _png_chunk(b"tEXt", b"note\x00scripted visual lane") if ancillary else b""
+    after = _png_chunk(b"tIME", struct.pack(">HBBBBB", 2026, 7, 28, 0, 0, 0)) if ancillary else b""
     return b"".join(
         (
             _PNG_SIGNATURE,
             _png_chunk(b"IHDR", header),
+            before,
             b"".join(_png_chunk(b"IDAT", part) for part in parts),
+            after,
             _png_chunk(b"IEND", b""),
         )
     )
@@ -445,10 +457,11 @@ def damaged_png_bytes(width: int, height: int, defect: str) -> bytes:
     These are the streams a reader that stops at the header accepts and a
     decoder refuses, so they are what makes the decoding above non-vacuous.
     Each one withdraws a single property while leaving every property the
-    previous reader checked intact. The last three withdraw only *order*: every
-    chunk in them is well-formed and checksummed and their image data decodes,
-    which is precisely why a reader that gathers payloads without reading the
-    grammar around them cannot tell they are not pictures.
+    previous reader checked intact. Five of them withdraw only *grammar* —
+    which chunks a PNG may contain, in what order, and under what type codes:
+    every chunk in them is well-formed and checksummed and their image data
+    decodes, which is precisely why a reader that gathers payloads without
+    reading the grammar around them cannot tell they are not pictures.
     """
     header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
     scanlines = b"".join(b"\x00" + bytes([(row * 7) % 256]) * width for row in range(height))
@@ -490,6 +503,17 @@ def damaged_png_bytes(width: int, height: int, defect: str) -> bytes:
     elif defect == "unknown-critical":
         # A chunk a decoder is forbidden to skip and cannot understand.
         middle = _png_chunk(b"ABCD", b"unreadable") + _png_chunk(b"IDAT", body)
+    elif defect == "illegal-type":
+        # Four bytes that are not a type code at all: '@' is not a letter, so
+        # the critical bit a reader reads from its case is meaningless — and a
+        # reader that classifies by case alone files it as skippable ancillary
+        # data, which is the escape hatch an invalid code must never open.
+        middle = _png_chunk(b"@BCD", b"unreadable") + _png_chunk(b"IDAT", body)
+    elif defect == "reserved-bit-type":
+        # Four letters this time, but PNG reserves the third byte's bit and
+        # spells it uppercase; lowercase there is an invalid code however well
+        # the rest of the stream checksums and decodes.
+        middle = _png_chunk(b"aBcD", b"unreadable") + _png_chunk(b"IDAT", body)
     elif defect == "wrong-format":
         # Same dimensions, a depth and interlace this fixture never generates.
         ihdr = _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 16, 0, 0, 0, 1))
@@ -507,10 +531,11 @@ def read_png_size(data: bytes) -> tuple[int, int]:
     Strict about every part a fabricated or damaged artifact gets wrong. The
     signature and the complete chunk stream are checked first, including each
     chunk's bounds and checksum and the absence of trailing bytes; then the
-    stream must be *grammatical* — exactly one 13-byte ``IHDR`` and it first,
-    one or more ``IDAT`` chunks and those consecutive, exactly one empty
-    ``IEND`` and it last, and no critical chunk this format does not define,
-    because a chunk a decoder may not skip and cannot read is not a picture.
+    stream must be *grammatical* — every chunk type a legal four-letter code,
+    exactly one 13-byte ``IHDR`` and it first, one or more ``IDAT`` chunks and
+    those consecutive, exactly one empty ``IEND`` and it last, and no critical
+    chunk this format does not define, because a chunk a decoder may not skip
+    and cannot read is not a picture.
     Then the header must be the format this fixture generates — 8-bit greyscale,
     standard compression and filtering, non-interlaced, positive dimensions. Then
     the image data itself is *decoded*: every ``IDAT`` payload concatenated,
@@ -526,6 +551,21 @@ def read_png_size(data: bytes) -> tuple[int, int]:
         raise VisualEvidenceError("not an image: PNG signature missing")
     chunks = _png_chunks(data)
     kinds = [kind for kind, _ in chunks]
+    # Every property below — critical or ancillary, private, reserved,
+    # safe-to-copy — is a bit read from the case of one of these four bytes, so
+    # the bytes have to *be* a type code before any of it means anything. PNG
+    # defines one as four ASCII letters, with the reserved third byte spelled
+    # uppercase. Read the critical bit off bytes that are not letters and an
+    # illegal code becomes a skippable-ancillary escape hatch.
+    for name in kinds:
+        if len(name) != 4 or not name.isalpha():
+            raise VisualEvidenceError(
+                f"corrupt image: {name!r} is not a PNG chunk type: four ASCII letters"
+            )
+        if not name[2:3].isupper():
+            raise VisualEvidenceError(
+                f"corrupt image: PNG chunk type {name!r} has a lowercase reserved third byte"
+            )
     kind, payload = chunks[0]
     if kind != b"IHDR" or len(payload) != 13:
         raise VisualEvidenceError(
@@ -917,6 +957,72 @@ class VisualGateEvidenceTests(LoopHarness):
                 self.assertIn(reason, str(caught.exception))
         # Non-vacuity: the rules refuse those three without refusing pictures.
         self.assertEqual(read_png_size(png_bytes(32, 24)), (32, 24))
+
+    def test_png_streams_whose_chunk_type_codes_are_illegal_are_refused(self) -> None:
+        """Four bytes that were never a type code, read for their property bits.
+
+        A PNG chunk type is four ASCII letters, and the case of each carries one
+        property: critical or ancillary, private, reserved, safe-to-copy. Read
+        those bits without first asking whether the bytes are letters and an
+        illegal code becomes an escape hatch — ``@BCD`` is not uppercase because
+        ``@`` is not a letter at all, so a critical-bit test spelled
+        ``name[:1].isupper()`` files a chunk no decoder can identify as skippable
+        ancillary data, and ``aBcD`` walks through the same door while also
+        breaking the reserved bit PNG requires to be zero.
+
+        Both streams are otherwise impeccable: signature, 13-byte ``IHDR``,
+        honest dimensions, one ``IDAT``, trailing ``IEND``, every chunk within
+        its declared bounds and matching its own checksum, and image data that
+        decompresses to exactly the scanlines the header declares. Only the type
+        codes can refuse them, which is why the same shape with a legal
+        ancillary code in that slot must still be accepted.
+        """
+        for defect, reason in (
+            ("illegal-type", "b'@BCD' is not a PNG chunk type"),
+            ("reserved-bit-type", "b'aBcD' has a lowercase reserved third byte"),
+        ):
+            with self.subTest(defect=defect):
+                data = damaged_png_bytes(32, 24, defect)
+                # Everything the earlier layers look at is intact, so the
+                # refusal below can only be the type-code rule speaking.
+                self.assertTrue(data.startswith(_PNG_SIGNATURE))
+                self.assertEqual(struct.unpack(">II", data[16:24]), (32, 24))
+                self.assertTrue(data.endswith(_png_chunk(b"IEND", b"")))
+                chunks = _png_chunks(data)  # bounds and every checksum verified
+                payloads = b"".join(body for kind, body in chunks if kind == b"IDAT")
+                self.assertEqual(len(zlib.decompress(payloads)), 24 * (1 + 32))
+                with self.assertRaises(VisualEvidenceError) as caught:
+                    read_png_size(data)
+                self.assertIn(reason, str(caught.exception))
+        # Non-vacuity: an unrecognised chunk in that same slot, spelled legally,
+        # is a chunk to skip rather than a reason to refuse a picture.
+        self.assertEqual(read_png_size(png_bytes(32, 24, ancillary=True)), (32, 24))
+
+    def test_valid_unknown_ancillary_chunks_around_the_idat_run_are_evidence(self) -> None:
+        """The honest control for the type-code rules: unknown is not illegal.
+
+        PNG requires a decoder to skip ancillary chunks it does not recognise,
+        and they are legal anywhere between ``IHDR`` and ``IEND`` except inside
+        the ``IDAT`` run. Without this case the rules above could be satisfied by
+        a reader that refused every chunk this fixture does not itself generate —
+        which would refuse ordinary encoder output while claiming to decode.
+        """
+        wrapped = png_bytes(32, 24, ancillary=True)
+        self.assertEqual(
+            [kind for kind, _ in _png_chunks(wrapped)],
+            [b"IHDR", b"tEXt", b"IDAT", b"tIME", b"IEND"],
+        )
+        self.assertEqual(read_png_size(wrapped), (32, 24))
+        # Legal beside the other legal framing detail, too: a split image
+        # stream with unrecognised chunks on either side of the run.
+        split = png_bytes(32, 24, idat_parts=3, ancillary=True)
+        self.assertEqual([kind for kind, _ in _png_chunks(split)].count(b"IDAT"), 3)
+        self.assertEqual(read_png_size(split), (32, 24))
+        # Discriminating, not blanket: inside the run is the one place they may
+        # not sit, and that stream is still refused.
+        with self.assertRaises(VisualEvidenceError) as caught:
+            read_png_size(damaged_png_bytes(32, 24, "interleaved-idat"))
+        self.assertIn("IDAT chunks are not consecutive", str(caught.exception))
         self.assertEqual(read_png_size(png_bytes(32, 24, idat_parts=2)), (32, 24))
 
     def test_a_screenshot_that_is_not_the_declared_size_is_not_evidence(self) -> None:
