@@ -301,12 +301,22 @@ class FakeRemote:
             cursor = self.parents.get(cursor)
         return False
 
+    def next_comment_identifier(self) -> str:
+        """The immutable id the next comment recorded here will carry.
+
+        A test that has to name a post *before* the run publishes it — an
+        operator pinning an id a lane has not written yet — asks the double
+        rather than typing a literal beside it, so the two cannot drift apart
+        into a test that quietly proves nothing.
+        """
+        return f"IC_comment{self._next_comment_id}"
+
     def comment(
         self, body: str, *, author: str = BUILDER_LOGIN, created_at: str | None = None
     ) -> Comment:
         """Append a comment with a fresh, never-reused GitHub-style node id."""
         posted = Comment(
-            identifier=f"IC_comment{self._next_comment_id}",
+            identifier=self.next_comment_identifier(),
             author=author,
             body=body,
             created_at=self._stamp() if created_at is None else created_at,

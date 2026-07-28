@@ -186,6 +186,31 @@ PINNED_RUN_ARTIFACT = comment(
     author=REVIEWER_LOGIN,
     created_at=at(2),
 )
+# The same post after somebody rewrote it into nothing but a perfectly formed
+# acknowledgement. Ownership lapses here on purpose — the body is no longer what
+# readback verified, so the post re-enters human classification — and the rows
+# below hold the half that must *not* lapse with it: the id is still one this run
+# published, so it can spend nothing however it now reads and whatever is pinned.
+EDITED_RUN_ARTIFACT = comment(
+    PINNED_RUN_ARTIFACT.identifier, ack("c1"), author=REVIEWER_LOGIN, created_at=at(2)
+)
+# A run-published review, and the same review after its state was changed. The
+# state is the other field ownership digests, so this is the review-surface form
+# of the same edit.
+PUBLISHED_REVIEW = review(
+    "review:owned3",
+    ack("c1"),
+    author=REVIEWER_LOGIN,
+    state="COMMENTED",
+    created_at=at(2),
+)
+RESTATED_REVIEW = review(
+    PUBLISHED_REVIEW.identifier,
+    PUBLISHED_REVIEW.body,
+    author=REVIEWER_LOGIN,
+    state="APPROVED",
+    created_at=at(2),
+)
 
 TRUTH_TABLE: tuple[Case, ...] = (
     # -- the acknowledgement works ----------------------------------------
@@ -483,6 +508,32 @@ TRUTH_TABLE: tuple[Case, ...] = (
         note=(
             "an artifact that did not exist until a lane published it cannot be "
             "one an operator read beforehand, so no config reaches it"
+        ),
+    ),
+    Case(
+        name="editing a pinned run artifact into a valid acknowledgement clears nothing",
+        comments=(RAISED, EDITED_RUN_ARTIFACT),
+        owned=(PINNED_RUN_ARTIFACT,),
+        pinned=(PINNED_RUN_ARTIFACT.identifier,),
+        unresolved=("c1", PINNED_RUN_ARTIFACT.identifier),
+        cleared=(),
+        note=(
+            "both halves of identity at once: the edit costs the post its "
+            "ownership, so it is read as feedback again, and it costs it nothing "
+            "of the denial, because the id is still one this run published"
+        ),
+    ),
+    Case(
+        name="changing a pinned run review's state does not authorize it either",
+        comments=(RAISED,),
+        reviews=(RESTATED_REVIEW,),
+        owned=(PUBLISHED_REVIEW,),
+        pinned=(PUBLISHED_REVIEW.identifier,),
+        unresolved=("c1",),
+        cleared=(),
+        note=(
+            "the review surface form of the same edit; its own decisive state "
+            "resolves it, and the human comment it names is untouched"
         ),
     ),
     Case(
@@ -938,6 +989,67 @@ class PublicationEvidenceTests(unittest.TestCase):
 
     def test_an_id_this_run_never_published_is_never_owned(self) -> None:
         self.assertFalse(owning(OWNED_ARTIFACT).owns(comment("other", "hi")))
+
+
+class AcknowledgementAuthorityTests(unittest.TestCase):
+    """The two identity questions, held apart where they used to be one.
+
+    ``owns`` asks whether a post is still this run's verified evidence, and it is
+    *meant* to go false when somebody edits one — that is how a rewritten
+    artifact re-enters human classification. ``published`` asks whether this run
+    wrote the post at all, which no edit can change, and that is the question
+    acknowledgement authority has to ask. Asking ``owns`` for both is what let an
+    edited lane artifact spend an acknowledgement line: the edit that cost it its
+    ownership handed it the authority the ownership was denying it.
+    """
+
+    def edited(self, item: Comment, body: str) -> Comment:
+        """The same post, same id and author, with somebody else's body."""
+        return Comment(
+            identifier=item.identifier,
+            author=item.author,
+            body=body,
+            url=item.url,
+            kind=item.kind,
+            state=item.state,
+            created_at=item.created_at,
+        )
+
+    def test_a_verified_artifact_may_not_acknowledge(self) -> None:
+        self.assertFalse(owning(OWNED_ARTIFACT).may_acknowledge(OWNED_ARTIFACT))
+
+    def test_pinning_a_verified_artifact_does_not_change_that(self) -> None:
+        artifacts = owning(OWNED_ARTIFACT, pinned=(OWNED_ARTIFACT.identifier,))
+        self.assertFalse(artifacts.may_acknowledge(OWNED_ARTIFACT))
+
+    def test_an_edit_drops_ownership_but_not_publication(self) -> None:
+        changed = self.edited(OWNED_ARTIFACT, ack("c1"))
+        artifacts = owning(OWNED_ARTIFACT)
+        self.assertTrue(artifacts.published(OWNED_ARTIFACT))
+        self.assertFalse(artifacts.owns(changed), "the edit has to break ownership")
+        self.assertTrue(artifacts.published(changed), "an id is not editable")
+
+    def test_an_edited_artifact_may_not_acknowledge_even_when_pinned(self) -> None:
+        """The reported defect, at the smallest scale it can be stated."""
+        changed = self.edited(OWNED_ARTIFACT, ack("c1"))
+        artifacts = owning(OWNED_ARTIFACT, pinned=(OWNED_ARTIFACT.identifier,))
+        self.assertFalse(artifacts.may_acknowledge(changed))
+
+    def test_a_changed_review_state_does_not_restore_authority(self) -> None:
+        artifacts = owning(PUBLISHED_REVIEW, pinned=(PUBLISHED_REVIEW.identifier,))
+        self.assertFalse(artifacts.owns(RESTATED_REVIEW))
+        self.assertFalse(artifacts.may_acknowledge(RESTATED_REVIEW))
+
+    def test_an_ordinary_human_post_still_may_acknowledge(self) -> None:
+        self.assertTrue(owning(OWNED_ARTIFACT).may_acknowledge(RAISED))
+
+    def test_a_pinned_post_this_run_never_published_still_may(self) -> None:
+        """The seam this slice adds is untouched by the stricter denial."""
+        historical = comment("c2", ack("c1"), author=BUILDER_LOGIN, created_at=at(2))
+        self.assertTrue(
+            owning(OWNED_ARTIFACT, pinned=("c2",)).may_acknowledge(historical)
+        )
+        self.assertFalse(owning(OWNED_ARTIFACT).may_acknowledge(historical))
 
 
 class ReviewThreadReadTests(unittest.TestCase):

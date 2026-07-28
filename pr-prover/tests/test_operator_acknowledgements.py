@@ -15,11 +15,14 @@ the tests here are written to hold it to being exactly that:
 * the strict default is unchanged. Absent, empty, or naming other posts, a
   publisher-authored acknowledgement clears nothing;
 * an id authorizes one post, never a login. The same account's next comment is
-  refused, and so is the same account's post with one byte changed;
+  refused, and editing the pinned post re-judges every line in it;
 * a pinned post is not exempt from anything else. Grammar, chronology, the one
   unresolved-to-cleared transition, residual prose, and the surfaces GitHub
   resolves natively all still decide;
-* nothing a lane published during the run can be reached by a pin at all.
+* nothing this run published can be reached by a pin at all, and no edit to one
+  of those posts changes that — the refusal is by immutable id, while ownership,
+  which is content-bound, is allowed to lapse so the rewritten post is read as
+  feedback again.
 
 The loop cases drive :meth:`ProverLoop.run` over the real config → loop →
 ``RunArtifacts`` → feedback path rather than calling the reconciler directly,
@@ -499,6 +502,161 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
             joined = " ".join(call.argv)
             self.assertNotIn(RESIDUAL_PROSE, joined)
             self.assertNotIn(FIRST_PROSE, joined)
+
+
+class EditedRunPublishedArtifactTests(PinnedShapeHarness):
+    """An id this run published stays refused, however the post is later edited.
+
+    Ownership is deliberately content-bound: edit a verified artifact and it
+    stops being the evidence readback proved, so it re-enters human
+    classification. Acknowledgement authority must not be bound to the same
+    answer, because then the edit that costs a lane artifact its ownership hands
+    it the authority the ownership was denying it — pin the id and a lane's own
+    post, rewritten into a perfectly valid acknowledgement line, clears a human's
+    stop.
+
+    So these drive the whole shape through the real config → loop →
+    ``RunArtifacts`` → feedback path, on an artifact the loop itself published
+    and verified during the run rather than one a test asserted was owned.
+    """
+
+    def rewrite(self, identifier: str, body: str) -> None:
+        """Edit one already-published post, keeping every field GitHub owns.
+
+        Same immutable id, same author, same timestamp, different body — which
+        is exactly what GitHub's edit button does, and the reason an id alone
+        cannot say what a post currently holds.
+        """
+        for index, posted in enumerate(self.remote.comments):
+            if posted.identifier != identifier:
+                continue
+            self.remote.comments[index] = Comment(
+                identifier=posted.identifier,
+                author=posted.author,
+                body=body,
+                url=posted.url,
+                created_at=posted.created_at,
+            )
+            return
+        raise AssertionError(f"nothing published on this PR carries the id {identifier}")
+
+    def pin_the_first_artifact(self) -> str:
+        """Build a loop whose config pins the id Reviewer A is about to publish.
+
+        The id is read off the double instead of typed, and the run asserts
+        afterwards that the pinned id really is the artifact the lane published,
+        so this cannot decay into a test that pins a string nothing ever uses.
+        """
+        self.artifact_id = self.remote.next_comment_identifier()
+        return self.artifact_id
+
+    def assert_was_a_run_publication(self) -> None:
+        published = [
+            item.identifier
+            for item in self.remote.comments
+            if item.author == REVIEWER_LOGIN
+        ]
+        self.assertEqual(len(published), len(REVIEWER_LANES))
+        self.assertEqual(
+            published[0],
+            self.artifact_id,
+            "the pinned id is not the artifact Reviewer A published",
+        )
+
+    def test_an_edited_lane_artifact_clears_nothing_even_when_its_id_is_pinned(self) -> None:
+        """The reported defect, end to end: valid ACK grammar, pinned, refused."""
+        self.seed()
+        stray = self.remote.comment("and the rollback plan is still missing", author=HUMAN)
+        artifact_id = self.pin_the_first_artifact()
+        loop = self.build(
+            operator_acknowledgements=[
+                self.mapped.identifier,
+                self.pure.identifier,
+                artifact_id,
+            ]
+        )
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
+        # Reviewer A's artifact is published and verified by now. While Reviewer
+        # B runs, it is rewritten into nothing but a valid acknowledgement of the
+        # one human comment nothing else answers.
+        self.script.add(
+            "lane-reviewer-B",
+            reviewer_output(HEAD_A),
+            after=lambda: self.rewrite(artifact_id, ack(stray.identifier)),
+        )
+
+        result = loop.run()
+
+        self.assert_stopped_before_any_fix(result)
+        self.assert_was_a_run_publication()
+        # The human comment the edited artifact named is still unresolved, and
+        # the edited artifact is itself feedback again — the two halves of the
+        # identity contract, in one run.
+        self.assertNotIn(stray.identifier, self.acknowledged(result))
+        self.assertNotIn(artifact_id, self.acknowledged(result))
+        self.assertIn(stray.identifier, self.unresolved_ids(result))
+        self.assertIn(artifact_id, self.unresolved_ids(result))
+        self.assertIn(
+            artifact_id,
+            result.evidence["evidence"]["operator_pinned_acknowledgements"],
+            "the stop must still show the operator what was pinned",
+        )
+
+    def test_the_edit_does_not_cost_the_genuinely_pinned_posts_their_authority(self) -> None:
+        """The same run's control: only the run-published id lost anything.
+
+        The two posts the operator really did read before launch clear exactly
+        what they always cleared. What stops the run is the untouched human
+        comment and the rewritten artifact, not a seam that has quietly closed.
+        """
+        self.seed()
+        stray = self.remote.comment("and the rollback plan is still missing", author=HUMAN)
+        artifact_id = self.pin_the_first_artifact()
+        loop = self.build(
+            operator_acknowledgements=[
+                self.mapped.identifier,
+                self.pure.identifier,
+                artifact_id,
+            ]
+        )
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
+        self.script.add(
+            "lane-reviewer-B",
+            reviewer_output(HEAD_A),
+            after=lambda: self.rewrite(artifact_id, ack(stray.identifier)),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(
+            self.acknowledged(result),
+            [self.first.identifier, self.second.identifier, self.mapped.identifier],
+        )
+        self.assertEqual(
+            self.unresolved_ids(result), [stray.identifier, artifact_id]
+        )
+
+    def test_an_unpinned_edited_lane_artifact_is_refused_the_same_way(self) -> None:
+        """Nothing here depends on the pin; the id is what is refused."""
+        self.seed()
+        stray = self.remote.comment("and the rollback plan is still missing", author=HUMAN)
+        artifact_id = self.pin_the_first_artifact()
+        loop = self.build(
+            operator_acknowledgements=[self.mapped.identifier, self.pure.identifier]
+        )
+        self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
+        self.script.add(
+            "lane-reviewer-B",
+            reviewer_output(HEAD_A),
+            after=lambda: self.rewrite(artifact_id, ack(stray.identifier)),
+        )
+
+        result = loop.run()
+
+        self.assert_stopped_before_any_fix(result)
+        self.assert_was_a_run_publication()
+        self.assertNotIn(stray.identifier, self.acknowledged(result))
+        self.assertIn(stray.identifier, self.unresolved_ids(result))
 
 
 class UnpinnedFixCycleTests(PinnedShapeHarness):

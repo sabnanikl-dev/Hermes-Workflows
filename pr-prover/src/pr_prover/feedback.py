@@ -45,11 +45,11 @@ enough to clear a human's stop by accident.
 put through the same six questions, and a line is *spent* only when all six
 answer yes:
 
-1. the post may acknowledge at all — it is not one of this run's own verified
-   artifacts, and if a configured publishing login wrote it, the operator pinned
-   that exact post's immutable id before the run started. A lane clearing the
-   comment it was told to answer is marking its own homework, and that is what
-   this question keeps out;
+1. the post may acknowledge at all — this run did not publish it, and if a
+   configured publishing login wrote it, the operator pinned that exact post's
+   immutable id before the run started. A lane clearing the comment it was told
+   to answer is marking its own homework, and that is what this question keeps
+   out;
 2. the line names exactly one eligible unresolved prose item — an item on a
    surface with no native resolution, which is not run-owned and not blank;
 3. GitHub's own UTC-aware timestamps put the target strictly earlier than the
@@ -73,9 +73,11 @@ stuck one. So the run configuration may pin *exact immutable post ids* the
 operator authorized before launch, and a publisher-authored post participates
 when its own id is one of them. What is authorized is a post somebody read, not
 a login: the same account's next comment is refused exactly as before, an id
-that names nothing on this PR does nothing, and this run's own verified
-artifacts are refused whatever is pinned, because an artifact a lane published
-during the run is the one thing that could not have been read beforehand. The
+that names nothing on this PR does nothing, and anything this run published is
+refused whatever is pinned, because an artifact a lane published during the run
+is the one thing that could not have been read beforehand. That last refusal is
+by immutable id alone, so it survives every later edit — an artifact rewritten
+into a perfectly formed acknowledgement is still a post this run wrote. The
 other five questions are untouched, so a pinned post still has to name an
 eligible earlier item, in the exact grammar, with GitHub's own chronology behind
 it, and still spends only the lines that really did work.
@@ -123,12 +125,22 @@ field nobody but GitHub assigns — the artifact's immutable id — and requires
 An artifact nobody touched stays owned; one whose body or review state changed
 no longer matches what was proven, and re-enters human classification.
 
-Both identity rules take the direction that fails closed, which is why they use
-different granularity. Excluding a whole account from *being* feedback would
-make a run stop less, so that judgement is made per artifact; letting an account
-*clear* feedback would also make a run stop less, so acknowledgement authority
-excludes the whole publishing login — and the one way back in is per artifact
-again, by an id an operator pinned before the run could publish anything.
+That lapse answers one question only — *is this still this run's evidence* —
+and it must not be read as *did this run write it*, which nothing can undo. The
+retained id is the whole answer to the second, so :meth:`RunArtifacts.published`
+is what acknowledgement authority asks: an edit moves a lane artifact back into
+feedback without ever moving it into the set of posts allowed to clear feedback.
+Collapsing the two is how editing a verified artifact into a well-formed
+acknowledgement line became a way to spend one.
+
+All three identity rules take the direction that fails closed, which is why they
+use different granularity. Excluding a whole account from *being* feedback would
+make a run stop less, so that judgement is made per artifact and per its current
+content; letting an account *clear* feedback would also make a run stop less, so
+acknowledgement authority excludes the whole publishing login and every id this
+run published, whatever those posts say now — and the one way back in is per
+artifact again, by an id an operator pinned before the run could publish
+anything.
 
 Every body quoted out of here is untrusted human text: truncated, redacted, and
 labelled as evidence about what a human raised, never as an instruction.
@@ -302,7 +314,9 @@ class RunArtifacts:
     posts before the run started and authorized each one by the id GitHub gave
     it. It affects acknowledgement authority only. It cannot make a post stop
     being feedback, cannot make an unlisted post from the same login count, and
-    cannot reach this run's own verified artifacts.
+    cannot reach any id this run published — a retained id is a post that did not
+    exist before launch, so it is not one anybody could have read then, and no
+    edit to it changes that.
     """
 
     verified: Mapping[str, str] = field(default_factory=dict)
@@ -326,15 +340,40 @@ class RunArtifacts:
             return False
         return item.author in self.publishers
 
+    def published(self, item: Comment) -> bool:
+        """Did this run publish this post at all, whatever it now says?
+
+        This is the immutable half of identity, and it deliberately asks less
+        than :meth:`owns`: only whether the id is one this run watched appear.
+        The loop snapshots the ids present on the PR before a lane is launched,
+        so a retained id is a post that did not exist until one of this run's own
+        lanes published it — and no later edit to a body or a review state can
+        make that untrue, because an id is the one field nobody but GitHub
+        assigns.
+
+        The two questions exist separately because they fail closed in opposite
+        directions. *Is this still this run's evidence* has to go false on an
+        edit, so an artifact somebody rewrote re-enters human classification
+        rather than staying invisible. *Did this run write it* must not, because
+        the answer decides whether the post may clear a human's stop, and an
+        edit that made ownership lapse would otherwise hand the post exactly the
+        authority the lapse was meant to deny it. Asking one question for both is
+        how an edited lane artifact became eligible to acknowledge feedback.
+        """
+        return bool(item.identifier) and item.identifier in self.verified
+
     def may_acknowledge(self, item: Comment) -> bool:
         """May this post spend acknowledgement lines at all?
 
         Three answers, in the order that keeps the strict case strict:
 
-        * a post this run published and verified may never acknowledge
-          anything. It is the run marking its own homework in the most literal
-          form, and no configuration reaches it — an artifact that did not exist
-          until a lane published it cannot be one an operator read beforehand;
+        * a post this run published may never acknowledge anything. It is the
+          run marking its own homework in the most literal form, and no
+          configuration and no subsequent edit reaches it — an artifact that did
+          not exist until a lane published it cannot be one an operator read
+          beforehand, and rewriting it does not turn it into one. The question is
+          :meth:`published` rather than :meth:`owns` precisely because ownership
+          is allowed to lapse;
         * a post from any other login is an ordinary human post, and always
           could acknowledge;
         * a post from a configured publishing login may acknowledge only when
@@ -343,7 +382,7 @@ class RunArtifacts:
           refused, and an empty pinned set is the behaviour this tool has always
           had.
         """
-        if self.owns(item):
+        if self.published(item):
             return False
         if item.author not in self.publishers:
             return True
@@ -639,8 +678,8 @@ def _candidates(
     nothing. Publishing logins are absent too — that is the one place a whole
     login is excluded, because refusing a login the power to clear feedback
     makes a run stop more — except for the exact post ids an operator pinned
-    before the run started, which is
-    :meth:`~pr_prover.feedback.RunArtifacts.may_acknowledge`'s whole question.
+    before the run started, and never for an id this run published itself. That
+    is :meth:`~pr_prover.feedback.RunArtifacts.may_acknowledge`'s whole question.
     """
     ordered: list[tuple[tuple[int, float, int, str], Comment, datetime]] = []
     for post in (*surfaces.comments, *surfaces.reviews):

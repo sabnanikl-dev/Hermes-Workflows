@@ -618,19 +618,25 @@ its own id is listed there. What that authorizes is one post the operator read
 before launch — never a login, never a shape, never a pattern. Concretely:
 
 - **absent or `[]` is the strict default**, unchanged in every respect;
-- the same account's *next* post is refused, and so is the same post with one
-  byte changed, because what was pinned was an id and an id names one body;
+- the same account's *next* post is refused. What is pinned is one id, and
+  nothing about the account carries over to anything else it writes;
 - a pinned post is exempt from nothing else. The exact line grammar,
   immutable-id matching, chronology, the single unresolved-to-cleared
   transition, residual prose, and native review/thread resolution all still
   decide, so a mixed post spends its valid lines and its own remaining prose
-  stays unresolved until a *separately* pinned later post clears that id;
+  stays unresolved until a *separately* pinned later post clears that id. Edit a
+  pinned post and each line is judged again on those same rules — a line that
+  stops parsing stops clearing anything;
 - a pinned post is still feedback in its own right — pinning grants
   acknowledgement authority, not an exemption from being read;
-- **nothing a lane published during the run can be reached by a pin.** A
-  verified run artifact is refused whatever the config says, because an artifact
-  that did not exist until a lane posted it cannot be one an operator read
-  beforehand;
+- **nothing this run published can be reached by a pin, whatever it says now.**
+  A lane artifact is refused because of the immutable id it carries, not because
+  of the body it currently holds: an artifact that did not exist until a lane
+  posted it cannot be one an operator read beforehand, and rewriting it does not
+  turn it into one. Editing a verified artifact does cost it its *ownership* —
+  that is how a rewritten artifact goes back to being read as feedback — and the
+  two answers are kept separate precisely so that lapse cannot hand it the
+  authority the denial exists to withhold;
 - an id that names nothing on the PR does nothing, silently and safely.
 
 There is no login allowlist, no approval service, no token or signature
