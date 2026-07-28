@@ -346,6 +346,9 @@ class NativeGateMatrixTests(LoopHarness):
 # is a fixture that ends up skipped.
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# The five filter types PNG defines for a scanline. Anything else in that byte
+# means the decoded bytes are not scanlines, whatever the header claimed.
+_PNG_FILTERS = frozenset(range(5))
 
 
 class VisualEvidenceError(AssertionError):
@@ -380,32 +383,154 @@ def png_bytes(width: int, height: int) -> bytes:
     )
 
 
+def _png_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
+    """The complete chunk stream, or the first reason it is not one.
+
+    Walked with exact bounds: a chunk needs its 8-byte header, exactly the
+    payload it declares, and its own trailing checksum. A declared length that
+    runs past the end of the file, a checksum computed over other bytes, and
+    anything appended after ``IEND`` are each caught here rather than skipped
+    over on the way to a dimension the header happens to claim.
+    """
+    chunks: list[tuple[bytes, bytes]] = []
+    offset = len(_PNG_SIGNATURE)
+    while True:
+        if offset + 8 > len(data):
+            raise VisualEvidenceError(
+                "corrupt image: PNG chunk stream ends without IEND"
+            )
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        kind = data[offset + 4 : offset + 8]
+        end = offset + 8 + length
+        if end + 4 > len(data):
+            raise VisualEvidenceError(
+                f"corrupt image: {kind!r} chunk declares {length} bytes, "
+                f"but only {max(len(data) - offset - 12, 0)} remain"
+            )
+        payload = data[offset + 8 : end]
+        declared = struct.unpack(">I", data[end : end + 4])[0]
+        if declared != zlib.crc32(kind + payload) & 0xFFFFFFFF:
+            raise VisualEvidenceError(
+                f"corrupt image: {kind!r} chunk checksum does not match its bytes"
+            )
+        chunks.append((kind, payload))
+        offset = end + 4
+        if kind == b"IEND":
+            break
+    if offset != len(data):
+        raise VisualEvidenceError(
+            f"corrupt image: {len(data) - offset} bytes follow the PNG IEND chunk"
+        )
+    return chunks
+
+
+def damaged_png_bytes(width: int, height: int, defect: str) -> bytes:
+    """A PNG that keeps its signature, header, dimensions, and IEND — and lies.
+
+    These are the streams a reader that stops at the header accepts and a
+    decoder refuses, so they are what makes the decoding above non-vacuous.
+    Each one withdraws a single property while leaving every property the
+    previous reader checked intact.
+    """
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    scanlines = b"".join(b"\x00" + bytes([(row * 7) % 256]) * width for row in range(height))
+    ihdr, iend = _png_chunk(b"IHDR", header), _png_chunk(b"IEND", b"")
+    body = zlib.compress(scanlines, 6)
+    if defect == "corrupt-idat":
+        # The reviewers' own probe: image data flipped, checksum recomputed over
+        # the damaged bytes, so only decompression can tell.
+        payload = bytes([body[0] ^ 0xFF]) + body[1:]
+        middle = _png_chunk(b"IDAT", payload)
+    elif defect == "truncated-idat":
+        middle = _png_chunk(b"IDAT", body[: len(body) // 2])
+    elif defect == "no-idat":
+        middle = _png_chunk(b"tEXt", b"note\x00screenshot pending")
+    elif defect == "invalid-crc":
+        middle = _png_chunk(b"IDAT", body)[:-4] + struct.pack(">I", 0)
+    elif defect == "truncated-chunk":
+        middle = struct.pack(">I", 100) + b"IDAT" + body[:1] + struct.pack(">I", 0)
+    elif defect == "short-scanlines":
+        middle = _png_chunk(b"IDAT", zlib.compress(scanlines[: -(1 + width)], 6))
+    elif defect == "bad-filter":
+        rows = bytearray(scanlines)
+        rows[0] = 9
+        middle = _png_chunk(b"IDAT", zlib.compress(bytes(rows), 6))
+    elif defect == "wrong-format":
+        # Same dimensions, a depth and interlace this fixture never generates.
+        ihdr = _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 16, 0, 0, 0, 1))
+        middle = _png_chunk(b"IDAT", body)
+    elif defect == "trailing-bytes":
+        return _PNG_SIGNATURE + ihdr + _png_chunk(b"IDAT", body) + iend + b"appended"
+    else:  # pragma: no cover - a defect name the cases below do not use
+        raise ValueError(f"unknown PNG defect: {defect}")
+    return _PNG_SIGNATURE + ihdr + middle + iend
+
+
 def read_png_size(data: bytes) -> tuple[int, int]:
     """Answer "is this an image, and how big" — or say why it is not one.
 
-    Deliberately strict about the parts a fabricated artifact gets wrong: the
-    signature, a well-formed 13-byte ``IHDR`` whose checksum matches its own
-    bytes, and a terminating ``IEND``. Truncated, transplanted, and
-    plain-text-with-a-``.png``-suffix files all fail here rather than being
-    counted as screenshots.
+    Strict about every part a fabricated or damaged artifact gets wrong. The
+    signature and the complete chunk stream are checked first, including each
+    chunk's bounds and checksum and the absence of trailing bytes; then the
+    header must be the format this fixture generates — 8-bit greyscale, standard
+    compression and filtering, non-interlaced, positive dimensions. Then the
+    image data itself is *decoded*: every ``IDAT`` payload concatenated,
+    decompressed to completion with nothing left unconsumed, and required to be
+    exactly ``height`` scanlines of ``1 + width`` bytes, each introduced by a
+    filter byte PNG defines. Truncated, transplanted, structurally impossible,
+    and plain-text-with-a-``.png``-suffix files all fail here rather than being
+    counted as screenshots, and so does a file whose header is impeccable and
+    whose pixels are noise.
     """
     if not data.startswith(_PNG_SIGNATURE):
         raise VisualEvidenceError("not an image: PNG signature missing")
-    if len(data) < 33:
-        raise VisualEvidenceError("not an image: truncated before the PNG header chunk")
-    length = struct.unpack(">I", data[8:12])[0]
-    kind, payload = data[12:16], data[16:29]
-    if kind != b"IHDR" or length != 13:
+    chunks = _png_chunks(data)
+    kind, payload = chunks[0]
+    if kind != b"IHDR" or len(payload) != 13:
         raise VisualEvidenceError(
-            f"not an image: first chunk is {kind!r}/{length}, not a 13-byte IHDR"
+            f"not an image: first chunk is {kind!r}/{len(payload)}, not a 13-byte IHDR"
         )
-    if struct.unpack(">I", data[29:33])[0] != zlib.crc32(kind + payload) & 0xFFFFFFFF:
-        raise VisualEvidenceError("corrupt image: PNG header checksum does not match")
-    if not data.endswith(_png_chunk(b"IEND", b"")):
+    if chunks[-1] != (b"IEND", b""):
         raise VisualEvidenceError("corrupt image: PNG stream does not end with IEND")
-    width, height = struct.unpack(">II", payload[:8])
+    if any(chunk[0] == b"IEND" for chunk in chunks[:-1]):
+        raise VisualEvidenceError("corrupt image: PNG stream has more than one IEND")
+    width, height, depth, colour, compression, filtering, interlace = struct.unpack(
+        ">IIBBBBB", payload
+    )
     if width <= 0 or height <= 0:
         raise VisualEvidenceError(f"degenerate image dimensions: {width}x{height}")
+    if (depth, colour, compression, filtering, interlace) != (8, 0, 0, 0, 0):
+        raise VisualEvidenceError(
+            "not the generated image format: expected 8-bit greyscale, standard "
+            "compression and filtering, non-interlaced; got "
+            f"{depth}/{colour}/{compression}/{filtering}/{interlace}"
+        )
+    image_data = [body for name, body in chunks if name == b"IDAT"]
+    if not image_data:
+        raise VisualEvidenceError("corrupt image: PNG stream carries no IDAT image data")
+    compressed = b"".join(image_data)
+    decompressor = zlib.decompressobj()
+    try:
+        raw = decompressor.decompress(compressed)
+        raw += decompressor.flush()
+    except zlib.error as error:
+        raise VisualEvidenceError(f"corrupt image: PNG image data does not decompress: {error}")
+    if not decompressor.eof:
+        raise VisualEvidenceError("corrupt image: PNG image data ends mid-stream")
+    if decompressor.unused_data or decompressor.unconsumed_tail:
+        raise VisualEvidenceError("corrupt image: trailing bytes after the PNG image data")
+    stride = 1 + width
+    if len(raw) != height * stride:
+        raise VisualEvidenceError(
+            f"corrupt image: decoded {len(raw)} bytes, but {width}x{height} needs "
+            f"{height * stride}"
+        )
+    for row in range(height):
+        filter_byte = raw[row * stride]
+        if filter_byte not in _PNG_FILTERS:
+            raise VisualEvidenceError(
+                f"corrupt image: scanline {row} declares filter {filter_byte}"
+            )
     return width, height
 
 
@@ -495,6 +620,7 @@ class VisualGateEvidenceTests(LoopHarness):
         head: str | None = None,
         write: bool = True,
         corrupt: int | None = None,
+        damaged: str | None = None,
         declared: Sequence[tuple[int, int]] | None = None,
     ) -> Callable[[], None]:
         """What the scripted visual lane leaves behind when it runs.
@@ -502,8 +628,11 @@ class VisualGateEvidenceTests(LoopHarness):
         The default is an honest lane: one real PNG per viewport plus a manifest
         naming the head the lane was actually handed, all of it written outside
         the checkout it rendered from. Each keyword withdraws exactly one
-        property — the files, one file's readability, the declared sizes, or the
-        head — so every negative case below names the single thing it removes.
+        property — the files, one file's readability, one file's decodability,
+        the declared sizes, or the head — so every negative case below names the
+        single thing it removes. ``damaged`` is the subtler of the two
+        unreadable cases: the second viewport keeps its signature, header,
+        dimensions, and IEND, and carries the named defect underneath them.
         """
 
         def produce() -> None:
@@ -519,11 +648,13 @@ class VisualGateEvidenceTests(LoopHarness):
             entries = []
             for index, (width, height) in enumerate(self.VIEWPORTS):
                 path = self.evidence_root / f"{bound[:12]}-{width}x{height}.png"
-                path.write_bytes(
-                    b"screenshot pending; see the lane transcript"
-                    if corrupt == index
-                    else png_bytes(width, height)
-                )
+                if corrupt == index:
+                    image = b"screenshot pending; see the lane transcript"
+                elif damaged is not None and index == 1:
+                    image = damaged_png_bytes(width, height, damaged)
+                else:
+                    image = png_bytes(width, height)
+                path.write_bytes(image)
                 entries.append(
                     {"path": str(path), "width": sizes[index][0], "height": sizes[index][1]}
                 )
@@ -621,6 +752,69 @@ class VisualGateEvidenceTests(LoopHarness):
         with self.assertRaises(VisualEvidenceError) as caught:
             self.verify(HEAD_A)
         self.assertIn("not an image", str(caught.exception))
+
+    def test_a_declared_screenshot_whose_image_data_is_corrupt_is_not_evidence(self) -> None:
+        """The reviewers' kill-switch: a perfect header over unreadable pixels.
+
+        The file above is refused at the signature, which is the easy half of
+        the question. This one keeps the signature, a valid 13-byte ``IHDR``
+        with the declared dimensions, and a terminating ``IEND``, and corrupts
+        only the compressed image data — checksum recomputed, so nothing short
+        of decoding it can tell. A reader that answers "how big" from the header
+        reports 768x1024 here; the file is not an image.
+        """
+        loop = self.build(gates=[self.VISUAL], visual_qa_required=True)
+        self.script_visual(damaged="corrupt-idat")
+        self.review_round(HEAD_A)
+
+        loop.run()
+
+        with self.assertRaises(VisualEvidenceError) as caught:
+            self.verify(HEAD_A)
+        self.assertIn("does not decompress", str(caught.exception))
+        # Discriminating, not blanket: the header the refusal saw was honest,
+        # and the viewports rendered normally still decode to what they claim.
+        record = json.loads(self.manifest.read_text(encoding="utf-8"))
+        damaged = Path(record["screenshots"][1]["path"]).read_bytes()
+        self.assertTrue(damaged.startswith(_PNG_SIGNATURE))
+        self.assertEqual(struct.unpack(">II", damaged[16:24]), (768, 1024))
+        self.assertTrue(damaged.endswith(_png_chunk(b"IEND", b"")))
+        for entry in (record["screenshots"][0], record["screenshots"][2]):
+            with self.subTest(shot=entry["path"]):
+                self.assertEqual(
+                    read_png_size(Path(entry["path"]).read_bytes()),
+                    (entry["width"], entry["height"]),
+                )
+
+    def test_png_streams_that_survive_a_header_check_are_still_refused(self) -> None:
+        """The rest of that family, one defect at a time.
+
+        Every stream here keeps the signature, the header's dimensions, and a
+        trailing ``IEND``: what each withdraws is a property only a complete
+        walk of the chunk stream, or an actual decode, can ask about. The honest
+        control is what keeps the list from being satisfied by refusing
+        everything.
+        """
+        self.assertEqual(read_png_size(png_bytes(32, 24)), (32, 24))
+        for defect, reason in (
+            ("corrupt-idat", "does not decompress"),
+            ("truncated-idat", "ends mid-stream"),
+            ("no-idat", "carries no IDAT"),
+            ("invalid-crc", "checksum does not match"),
+            ("truncated-chunk", "chunk declares 100 bytes"),
+            ("trailing-bytes", "bytes follow the PNG IEND chunk"),
+            ("short-scanlines", "decoded"),
+            ("bad-filter", "declares filter 9"),
+            ("wrong-format", "expected 8-bit greyscale"),
+        ):
+            with self.subTest(defect=defect):
+                data = damaged_png_bytes(32, 24, defect)
+                self.assertTrue(data.startswith(_PNG_SIGNATURE))
+                self.assertEqual(struct.unpack(">II", data[16:24]), (32, 24))
+                self.assertIn(_png_chunk(b"IEND", b""), data)
+                with self.assertRaises(VisualEvidenceError) as caught:
+                    read_png_size(data)
+                self.assertIn(reason, str(caught.exception))
 
     def test_a_screenshot_that_is_not_the_declared_size_is_not_evidence(self) -> None:
         """Non-vacuity for the dimension check: the manifest is not self-proving."""

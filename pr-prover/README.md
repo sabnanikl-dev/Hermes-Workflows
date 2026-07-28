@@ -833,16 +833,22 @@ repository-native gates at once, visual QA selected deliberately and evidenced
 on the exact head, a quiet builder distinguished from a stalled one, and the
 artifact defects that must stop a run rather than reach the pull request.
 
-"Evidenced" there is meant literally. The scripted visual lane writes real image
-files and a head-bound manifest outside the checkout it rendered from, and the
-case reads them back: the files exist, decode as images, are the size the
-manifest declares, and are recorded against the head the lane was handed. Its
-negative cases are what give that meaning — a lane that only prints a sentence
-naming the head, a declared file that is not an image, an image that is not its
-declared size, and well-formed evidence recorded against a different head are
-each refused. Producing and reading those files is test support inside that
-module; `pr_prover` itself stores and validates no images, and what a browser
-lane's screenshots *mean* remains that gate's judgement rather than this tool's.
+"Evidenced" there is meant literally, and "decode" is meant literally too. The
+scripted visual lane writes real image files and a head-bound manifest outside
+the checkout it rendered from, and the case reads them back: the files exist,
+are the size the manifest declares, are recorded against the head the lane was
+handed, and decode — the complete chunk stream walked with exact bounds and
+checksums, no bytes after `IEND`, the generated header format required, and the
+image data concatenated, decompressed to completion, and checked to be exactly
+the scanlines those dimensions need. Its negative cases are what give that
+meaning — a lane that only prints a sentence naming the head, a declared file
+that is not an image, one whose header is impeccable and whose image data is
+corrupt, truncated, absent, mis-checksummed, or over-declared, an image that is
+not its declared size, and well-formed evidence recorded against a different
+head are each refused. Producing and reading those files is test support inside
+that module; `pr_prover` itself stores and validates no images, and what a
+browser lane's screenshots *mean* remains that gate's judgement rather than this
+tool's.
 
 Its load-bearing case is the one a passing loop cannot check for itself. A
 builder can satisfy a gate by deleting the test that failed it, and every
