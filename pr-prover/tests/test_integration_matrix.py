@@ -349,6 +349,11 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # The five filter types PNG defines for a scanline. Anything else in that byte
 # means the decoded bytes are not scanlines, whatever the header claimed.
 _PNG_FILTERS = frozenset(range(5))
+# The only critical chunks a stream of the kind this fixture generates may carry.
+# A critical chunk is one a decoder is forbidden to skip (uppercase first byte),
+# so an unrecognised one means the bytes are not the image they claim to be —
+# and `PLTE`, critical but illegal in a greyscale image, is excluded on purpose.
+_PNG_CRITICAL = frozenset({b"IHDR", b"IDAT", b"IEND"})
 
 
 class VisualEvidenceError(AssertionError):
@@ -369,15 +374,25 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
 
 
-def png_bytes(width: int, height: int) -> bytes:
-    """A real, decodable PNG of exactly this size: signature, IHDR, IDAT, IEND."""
+def png_bytes(width: int, height: int, *, idat_parts: int = 1) -> bytes:
+    """A real, decodable PNG of exactly this size: signature, IHDR, IDAT, IEND.
+
+    ``idat_parts`` splits the one compressed image stream across that many
+    consecutive ``IDAT`` chunks, which is what a real encoder does for anything
+    larger than its buffer. It is a legal stream, so it is the control that
+    stops the ordering rules below from being satisfied by simply demanding a
+    single ``IDAT``.
+    """
     header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)  # 8-bit greyscale
     scanlines = b"".join(b"\x00" + bytes([(row * 7) % 256]) * width for row in range(height))
+    body = zlib.compress(scanlines, 6)
+    step = -(-len(body) // idat_parts)  # ceil, so every part carries bytes
+    parts = [body[start : start + step] for start in range(0, len(body), step)]
     return b"".join(
         (
             _PNG_SIGNATURE,
             _png_chunk(b"IHDR", header),
-            _png_chunk(b"IDAT", zlib.compress(scanlines, 6)),
+            b"".join(_png_chunk(b"IDAT", part) for part in parts),
             _png_chunk(b"IEND", b""),
         )
     )
@@ -430,7 +445,10 @@ def damaged_png_bytes(width: int, height: int, defect: str) -> bytes:
     These are the streams a reader that stops at the header accepts and a
     decoder refuses, so they are what makes the decoding above non-vacuous.
     Each one withdraws a single property while leaving every property the
-    previous reader checked intact.
+    previous reader checked intact. The last three withdraw only *order*: every
+    chunk in them is well-formed and checksummed and their image data decodes,
+    which is precisely why a reader that gathers payloads without reading the
+    grammar around them cannot tell they are not pictures.
     """
     header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
     scanlines = b"".join(b"\x00" + bytes([(row * 7) % 256]) * width for row in range(height))
@@ -455,6 +473,23 @@ def damaged_png_bytes(width: int, height: int, defect: str) -> bytes:
         rows = bytearray(scanlines)
         rows[0] = 9
         middle = _png_chunk(b"IDAT", zlib.compress(bytes(rows), 6))
+    elif defect == "duplicate-ihdr":
+        # Two headers, both well-formed and identical. Every byte checksums, the
+        # image data decodes; the stream is still not a PNG.
+        middle = ihdr + _png_chunk(b"IDAT", body)
+    elif defect == "interleaved-idat":
+        # The image stream split the legal way and then interrupted the illegal
+        # one. Concatenating the payloads decompresses perfectly, so nothing but
+        # the ordering rule can refuse it.
+        half = len(body) // 2
+        middle = (
+            _png_chunk(b"IDAT", body[:half])
+            + _png_chunk(b"tEXt", b"note\x00rendered in two passes")
+            + _png_chunk(b"IDAT", body[half:])
+        )
+    elif defect == "unknown-critical":
+        # A chunk a decoder is forbidden to skip and cannot understand.
+        middle = _png_chunk(b"ABCD", b"unreadable") + _png_chunk(b"IDAT", body)
     elif defect == "wrong-format":
         # Same dimensions, a depth and interlace this fixture never generates.
         ihdr = _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 16, 0, 0, 0, 1))
@@ -472,28 +507,44 @@ def read_png_size(data: bytes) -> tuple[int, int]:
     Strict about every part a fabricated or damaged artifact gets wrong. The
     signature and the complete chunk stream are checked first, including each
     chunk's bounds and checksum and the absence of trailing bytes; then the
-    header must be the format this fixture generates — 8-bit greyscale, standard
-    compression and filtering, non-interlaced, positive dimensions. Then the
-    image data itself is *decoded*: every ``IDAT`` payload concatenated,
+    stream must be *grammatical* — exactly one 13-byte ``IHDR`` and it first,
+    one or more ``IDAT`` chunks and those consecutive, exactly one empty
+    ``IEND`` and it last, and no critical chunk this format does not define,
+    because a chunk a decoder may not skip and cannot read is not a picture.
+    Then the header must be the format this fixture generates — 8-bit greyscale,
+    standard compression and filtering, non-interlaced, positive dimensions. Then
+    the image data itself is *decoded*: every ``IDAT`` payload concatenated,
     decompressed to completion with nothing left unconsumed, and required to be
     exactly ``height`` scanlines of ``1 + width`` bytes, each introduced by a
     filter byte PNG defines. Truncated, transplanted, structurally impossible,
-    and plain-text-with-a-``.png``-suffix files all fail here rather than being
-    counted as screenshots, and so does a file whose header is impeccable and
-    whose pixels are noise.
+    mis-ordered, and plain-text-with-a-``.png``-suffix files all fail here rather
+    than being counted as screenshots, and so does a file whose header is
+    impeccable and whose pixels are noise. A legally split image stream — one
+    compressed stream across consecutive ``IDAT`` chunks — is still accepted.
     """
     if not data.startswith(_PNG_SIGNATURE):
         raise VisualEvidenceError("not an image: PNG signature missing")
     chunks = _png_chunks(data)
+    kinds = [kind for kind, _ in chunks]
     kind, payload = chunks[0]
     if kind != b"IHDR" or len(payload) != 13:
         raise VisualEvidenceError(
             f"not an image: first chunk is {kind!r}/{len(payload)}, not a 13-byte IHDR"
         )
+    if kinds.count(b"IHDR") != 1:
+        raise VisualEvidenceError(
+            f"corrupt image: PNG stream carries {kinds.count(b'IHDR')} IHDR chunks, "
+            "not exactly one"
+        )
     if chunks[-1] != (b"IEND", b""):
         raise VisualEvidenceError("corrupt image: PNG stream does not end with IEND")
-    if any(chunk[0] == b"IEND" for chunk in chunks[:-1]):
+    if kinds.count(b"IEND") != 1:
         raise VisualEvidenceError("corrupt image: PNG stream has more than one IEND")
+    unknown = [name for name in kinds if name[:1].isupper() and name not in _PNG_CRITICAL]
+    if unknown:
+        raise VisualEvidenceError(
+            f"corrupt image: PNG stream carries an unknown critical chunk {unknown[0]!r}"
+        )
     width, height, depth, colour, compression, filtering, interlace = struct.unpack(
         ">IIBBBBB", payload
     )
@@ -505,10 +556,14 @@ def read_png_size(data: bytes) -> tuple[int, int]:
             "compression and filtering, non-interlaced; got "
             f"{depth}/{colour}/{compression}/{filtering}/{interlace}"
         )
-    image_data = [body for name, body in chunks if name == b"IDAT"]
-    if not image_data:
+    at = [index for index, name in enumerate(kinds) if name == b"IDAT"]
+    if not at:
         raise VisualEvidenceError("corrupt image: PNG stream carries no IDAT image data")
-    compressed = b"".join(image_data)
+    if at[-1] - at[0] != len(at) - 1:
+        raise VisualEvidenceError(
+            f"corrupt image: the {len(at)} PNG IDAT chunks are not consecutive"
+        )
+    compressed = b"".join(chunks[index][1] for index in at)
     decompressor = zlib.decompressobj()
     try:
         raw = decompressor.decompress(compressed)
@@ -815,6 +870,54 @@ class VisualGateEvidenceTests(LoopHarness):
                 with self.assertRaises(VisualEvidenceError) as caught:
                     read_png_size(data)
                 self.assertIn(reason, str(caught.exception))
+
+    def test_an_image_stream_split_across_consecutive_idat_chunks_is_evidence(self) -> None:
+        """The honest control for the ordering rules: splitting is legal.
+
+        A real encoder emits the one compressed image stream in as many
+        consecutive ``IDAT`` chunks as its buffer requires, and every one of
+        them is a screenshot. Without this case the rules below could be
+        satisfied by a reader that simply demanded a single ``IDAT`` — which
+        would refuse ordinary images while still calling itself a decoder.
+        """
+        split = png_bytes(32, 24, idat_parts=3)
+        self.assertEqual([kind for kind, _ in _png_chunks(split)].count(b"IDAT"), 3)
+        self.assertEqual(read_png_size(split), (32, 24))
+        # Same picture either way: the split is a framing detail, not a defect.
+        self.assertEqual(read_png_size(png_bytes(32, 24)), (32, 24))
+
+    def test_png_streams_whose_chunk_order_is_illegal_are_refused(self) -> None:
+        """Well-formed chunks in an order no PNG may have.
+
+        The family above withdraws bytes; this one withdraws only the grammar
+        holding them. Every chunk here carries its own valid checksum and the
+        image data still decompresses to exactly the scanlines the header
+        declares, so each stream passes bounds, checksum, format, and decode and
+        is refused solely for what a PNG is allowed to *contain* and in what
+        order — which is what a reader that gathers ``IDAT`` payloads wherever
+        it finds them cannot ask.
+        """
+        for defect, reason in (
+            ("duplicate-ihdr", "carries 2 IHDR chunks"),
+            ("interleaved-idat", "IDAT chunks are not consecutive"),
+            ("unknown-critical", "unknown critical chunk b'ABCD'"),
+        ):
+            with self.subTest(defect=defect):
+                data = damaged_png_bytes(32, 24, defect)
+                # Everything the earlier checks look at is intact, so the
+                # refusal below can only be the ordering rule speaking.
+                self.assertTrue(data.startswith(_PNG_SIGNATURE))
+                self.assertEqual(struct.unpack(">II", data[16:24]), (32, 24))
+                self.assertTrue(data.endswith(_png_chunk(b"IEND", b"")))
+                chunks = _png_chunks(data)  # bounds and every checksum verified
+                payloads = b"".join(body for kind, body in chunks if kind == b"IDAT")
+                self.assertEqual(len(zlib.decompress(payloads)), 24 * (1 + 32))
+                with self.assertRaises(VisualEvidenceError) as caught:
+                    read_png_size(data)
+                self.assertIn(reason, str(caught.exception))
+        # Non-vacuity: the rules refuse those three without refusing pictures.
+        self.assertEqual(read_png_size(png_bytes(32, 24)), (32, 24))
+        self.assertEqual(read_png_size(png_bytes(32, 24, idat_parts=2)), (32, 24))
 
     def test_a_screenshot_that_is_not_the_declared_size_is_not_evidence(self) -> None:
         """Non-vacuity for the dimension check: the manifest is not self-proving."""

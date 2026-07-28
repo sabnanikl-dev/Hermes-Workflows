@@ -838,14 +838,18 @@ scripted visual lane writes real image files and a head-bound manifest outside
 the checkout it rendered from, and the case reads them back: the files exist,
 are the size the manifest declares, are recorded against the head the lane was
 handed, and decode — the complete chunk stream walked with exact bounds and
-checksums, no bytes after `IEND`, the generated header format required, and the
-image data concatenated, decompressed to completion, and checked to be exactly
-the scanlines those dimensions need. Its negative cases are what give that
-meaning — a lane that only prints a sentence naming the head, a declared file
-that is not an image, one whose header is impeccable and whose image data is
-corrupt, truncated, absent, mis-checksummed, or over-declared, an image that is
-not its declared size, and well-formed evidence recorded against a different
-head are each refused. Producing and reading those files is test support inside
+checksums, no bytes after `IEND`, the chunk order the format requires (one
+13-byte `IHDR` first, one or more consecutive `IDAT`, one empty `IEND` last, and
+no unknown critical chunk), the generated header format required, and the image
+data concatenated, decompressed to completion, and checked to be exactly the
+scanlines those dimensions need. Its negative cases are what give that meaning —
+a lane that only prints a sentence naming the head, a declared file that is not
+an image, one whose header is impeccable and whose image data is corrupt,
+truncated, absent, mis-checksummed, or over-declared, one whose chunks are
+well-formed in an order no PNG may have, an image that is not its declared size,
+and well-formed evidence recorded against a different head are each refused —
+while an ordinary image whose compressed stream is split across consecutive
+`IDAT` chunks is still accepted. Producing and reading those files is test support inside
 that module; `pr_prover` itself stores and validates no images, and what a
 browser lane's screenshots *mean* remains that gate's judgement rather than this
 tool's.
