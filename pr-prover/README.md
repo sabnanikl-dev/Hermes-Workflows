@@ -128,6 +128,8 @@ unaffected; `worktree_root` is held to the same rule where worktrees are created
 Gates take `"kind": "baseline"` (default) or `"kind": "visual"`. Visual gates
 run only when `visual_qa_required` is `true`; setting that flag without a visual
 gate is a configuration error, so browser/visual QA is never silently skipped.
+What a visual gate then owes is [a semantic
+answer](#a-visual-gate-answers-about-what-was-rendered), not a file.
 
 `check-config` also prints **advisories**: a lane with no timeout, or a builder
 budget too short for a real fix cycle. They are notes rather than errors, because
@@ -168,6 +170,19 @@ Two are repository-owned, and the example config wires both:
   weakened or deleted coverage, gamed thresholds, shrunken scope, stale
   evidence, unproven invariants — not to check that it looks correct. A reviewer
   that sets out to confirm shares the builder's framing and its blind spot.
+
+  **Its verdict travels by Codex's final-message channel, not by its output.**
+  `codex exec` narrates while it works, and that narration includes the prompt it
+  was handed — which is where the marker grammar is necessarily written down, so
+  an entirely honest run prints text that reads exactly like a verdict. The
+  adapter therefore runs `codex exec --output-last-message <file>` and puts only
+  that file on its stdout. The narration is kept, because a lane that fell over
+  is diagnosed from it, but it is re-emitted on stderr with every line prefixed
+  `codex| ` so no line of it can begin with a marker keyword. A final message
+  that is missing, unreadable, or empty is a loud failure and not a lane that
+  quietly found nothing, and Codex's own exit status is passed through unchanged
+  so the [marker-versus-exit-status](#the-marker-is-not-the-whole-verdict) check
+  still has both halves to compare.
 - [`scripts/claude-builder.sh`](scripts/claude-builder.sh) runs the trusted
   Claude builder in that cycle's own worktree. It is **pointer-first**: it names
   the blockers file, `AGENTS.md`, `MISSION.md`, and the live PR rather than
@@ -182,9 +197,50 @@ Neither adapter is a security boundary. Both are ordinary hygiene for launching
 a trusted agent reliably, and both are covered by
 [`tests/test_adapters.py`](tests/test_adapters.py), which runs them for real
 against stub binaries — a double cannot catch a mistyped flag or a guard that
-never fires.
+never fires. The reviewer's stub is deliberately *Codex-shaped* rather than
+cooperative: it echoes the prompt back the way the real CLI does, so its
+narration genuinely contains marker-shaped lines. A stub that printed one clean
+marker would agree with the adapter that was wrong.
 
 Gates remain the operator's own commands.
+
+## A visual gate answers about what was rendered
+
+A visual gate that checks its screenshots exist, are PNGs, and are the right
+size has proved that files were written. It has not proved that anything in them
+can be read, and those are different claims — a rendering can satisfy every one
+of the first while omitting the print detail a page exists to show. So the
+obligation on a configured visual gate is **semantic**: it must report a
+per-assertion outcome for the properties the run requires, bound to the exact
+head, and it must fail when one of them is absent even though every expected
+PNG and PDF is present and well-formed.
+
+`pr-prover` does not learn those properties. Which detail bodies a print page
+owes, which table columns must stay labelled once a header row is hidden, and
+which text is small enough to need a contrast floor are facts about one site;
+a tool that knew them would be a browser and accessibility framework wearing a
+merge-readiness tool's name, which
+[`MISSION.md`](MISSION.md#explicit-non-goals) rules out. They belong to the
+**operator-owned configured gate**, which `pr-prover` selects, hands the bound
+head and a checkout of its own, and blocks the head on when it exits nonzero.
+
+What *is* repository-owned is the shape of the obligation and the proof that it
+bites, in
+[`tests/test_visual_semantics.py`](tests/test_visual_semantics.py):
+
+| The gate must prove | How the proof avoids taking its word for it |
+|---|---|
+| required collapsed detail bodies reach the print output | the strings are pulled out of the PDF's own page content streams |
+| mobile failure-table values keep an accessible field label | every required column must be measured *and* carry a non-empty label; an unmentioned column fails |
+| required small operational text is legible | the WCAG contrast ratio is recomputed from the colours the gate recorded, or an explicitly approved design token is named |
+
+Screenshots and PDFs stay as human evidence and are still required — they are
+what a person looks at when the verdict is contested — but on their own they are
+never sufficient, and there is a case asserting exactly that: a rendering with
+all nine images and three PDFs intact, and all three defects present, does not
+pass. The one honest exception is written as one: no amount of decoding a PNG
+recovers a cell's accessible name, so the label check enforces that the
+measurement was taken for every required column rather than believing a summary.
 
 ## Lanes are launched, watched, and ended
 
@@ -505,11 +561,27 @@ with one line per blocker it fixed:
 ADDRESSED: ID=<slug>
 ```
 
+`SEVERITY=` is one of exactly those three lowercase words; `ID=` is 1–64
+characters, the first a lowercase letter or digit and the rest lowercase
+letters, digits, `.`, `_`, or `-`, unique within the lane's output; the
+separator is exactly two hyphens with one space on each side; and `<summary>`
+is 1–300 characters on that line alone.
+
+That grammar is stated verbatim in the prompt the reviewer adapter generates,
+and the two are held together by a round trip rather than by care: a fixture the
+shape of the nine-blocker artifact the PAPI-96 pilot produced is written the way
+the prompt asks for it and parsed by the parser that will judge it. A prompt
+that describes findings in prose while the parser reads a grammar is how a
+reviewer declares nine blockers over a count of zero, which is the second way
+that pilot stopped.
+
 Parsing is unforgiving on purpose. Exactly one `DONE:` line may appear, it must
 be the final non-empty line, the SHA must equal the bound head byte for byte,
-and `BLOCKING=<count>` must reconcile with the findings above it. Lane output is
-untrusted, so a body that quotes or forges a marker fails the run closed instead
-of being read as a verdict.
+and `BLOCKING=<count>` must reconcile with the findings above it — which in turn
+must equal the `BLOCKING=` the published artifact declares. Lane output is
+untrusted, so a body that quotes or forges a marker, repeats a finding id, or
+echoes the grammar back as an example fails the run closed instead of being read
+as a verdict.
 
 ### Every finding carries its provenance
 

@@ -24,9 +24,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pr_prover.config import RunConfig
+from pr_prover.errors import MalformedVerdict, ReviewerRelayError, StaleHead
 from pr_prover.github import GoverningIssue, PullRequest, ReviewEvidence
 from pr_prover.packet import REQUIRED_SURFACES, build_packet, write_packet
-from pr_prover.reviewers import CREDENTIAL_ENV, parse_artifact
+from pr_prover.reviewers import CREDENTIAL_ENV, parse_artifact, read_prepared
+from pr_prover.verdicts import parse_reviewer_verdict
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
@@ -48,9 +50,57 @@ printf 'stub agent ran\\n'
 printf 'DONE: STATUS=pass BLOCKING=0 HEAD=%s\\n' "$PR_PROVER_STUB_HEAD"
 """
 
+# A Codex-*shaped* stub, which is a different thing from a cooperative one.
+#
+# The real `codex exec` narrates while it works, and its narration includes the
+# prompt it was handed. The reviewer prompt necessarily contains example marker
+# lines — it is where the grammar is stated — so the narration of an honest run
+# contains text that reads exactly like a verdict. That is not hypothetical: it
+# is what put three DONE: candidates in front of the parser on the first PAPI-96
+# pilot run and stopped it.
+#
+# So this stub echoes the prompt back the way Codex does, and writes its actual
+# answer only to the file named by --output-last-message. A stub that printed a
+# clean marker on stdout would agree with any adapter, including the one that
+# was wrong.
+CODEX_STUB = """#!/bin/sh
+printf '%s\\n' "$@" > "$PR_PROVER_STUB_ARGV"
+final=""
+prompt=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--output-last-message) final="${2:-}"; shift 2 ;;
+	*) prompt="$1"; shift ;;
+	esac
+done
+printf '%s' "$prompt" > "$PR_PROVER_STUB_PROMPT"
+printf 'codex exec: model=stub sandbox=read-only approval=never\\n'
+printf 'codex exec: replaying the prompt it was handed\\n'
+printf '%s\\n' "$prompt"
+printf 'codex exec: tokens used 1234; wrote final message\\n' >&2
+if [ -n "${PR_PROVER_STUB_NO_FINAL:-}" ]; then
+	exit "${PR_PROVER_STUB_EXIT:-0}"
+fi
+if [ -n "${PR_PROVER_STUB_FINAL+set}" ]; then
+	answer="$PR_PROVER_STUB_FINAL"
+else
+	answer="DONE: STATUS=pass BLOCKING=0 HEAD=$PR_PROVER_STUB_HEAD"
+fi
+if [ -n "$final" ]; then
+	printf '%s' "$answer" > "$final"
+	if [ -n "${PR_PROVER_STUB_UNREADABLE:-}" ]; then chmod 000 "$final"; fi
+fi
+exit "${PR_PROVER_STUB_EXIT:-0}"
+"""
+
 
 @unittest.skipIf(SHELL is None, "no POSIX shell available")
 class AdapterHarness(unittest.TestCase):
+    # Which stub :meth:`stub` writes. The reviewer cases override it with the
+    # Codex-shaped one, because the adapter they exercise has to survive a real
+    # CLI's narration rather than a cooperative single line.
+    STUB_BODY = STUB
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-adapter-")
         self.addCleanup(self._tmp.cleanup)
@@ -67,9 +117,9 @@ class AdapterHarness(unittest.TestCase):
         self.argv_log = self.tmp / "argv.txt"
         self.prompt_log = self.tmp / "prompt.txt"
 
-    def stub(self, name: str) -> Path:
+    def stub(self, name: str, body: str | None = None) -> Path:
         path = self.bin / name
-        path.write_text(STUB, encoding="utf-8")
+        path.write_text(body or self.STUB_BODY, encoding="utf-8")
         path.chmod(0o755)
         return path
 
@@ -143,7 +193,17 @@ class ShippedAdaptersAreWellFormed(AdapterHarness):
         self.assertEqual(payload, {"mcpServers": {}})
 
 
-class ReviewerAdapterTests(AdapterHarness):
+class ReviewerLaneHarness(AdapterHarness):
+    """Everything needed to launch one real reviewer lane, and no cases.
+
+    Split from the cases below so the classes that reuse it — the final-message
+    transport, the nine-blocker round trip, the ordered three-role sequence —
+    inherit the machinery without inheriting and re-running the whole adapter
+    suite once per class.
+    """
+
+    STUB_BODY = CODEX_STUB
+
     def packet(
         self,
         *,
@@ -216,8 +276,18 @@ class ReviewerAdapterTests(AdapterHarness):
         return argv
 
     def invoke(self, *, role: str = "reviewer-a", **overrides: str):
-        return self.run_adapter(REVIEWER, self.base_argv(role=role, **overrides))
+        """Run the shipped reviewer adapter.
 
+        Upper-case keywords are environment for the stub — which final message
+        it writes, whether it writes one at all, what it exits with. Everything
+        else is an adapter flag.
+        """
+        env = {key: value for key, value in overrides.items() if key.isupper()}
+        argv = {key: value for key, value in overrides.items() if not key.isupper()}
+        return self.run_adapter(REVIEWER, self.base_argv(role=role, **argv), **env)
+
+
+class ReviewerAdapterTests(ReviewerLaneHarness):
     def test_it_runs_the_codex_binary_and_passes_its_verdict_through(self) -> None:
         self.stub("codex")
         result = self.invoke()
@@ -226,7 +296,17 @@ class ReviewerAdapterTests(AdapterHarness):
             result.stdout.strip().splitlines()[-1],
             f"DONE: STATUS=pass BLOCKING=0 HEAD={HEAD}",
         )
-        self.assertEqual(self.stub_argv()[0], "exec")
+        argv = self.stub_argv()
+        self.assertEqual(argv[0], "exec")
+        # The verdict travels by the final-message channel, and the file it is
+        # asked for is a scratch path, not somewhere in the checkout this lane
+        # is about to be checked for having modified.
+        self.assertIn("--output-last-message", argv)
+        named = Path(argv[argv.index("--output-last-message") + 1])
+        self.assertFalse(
+            named.is_relative_to(self.worktree),
+            "the final-message file must not be written into the reviewed worktree",
+        )
 
     def test_a_credential_reaching_the_judging_lane_is_refused(self) -> None:
         """The relay publishes. A token here means the lifecycle was misconfigured.
@@ -476,6 +556,445 @@ class ReviewerAdapterTests(AdapterHarness):
         self.assertTrue(reading.ok, reading.note)
         self.assertEqual(reading.claim.role, "reviewer-b")
         self.assertEqual(reading.claim.head, HEAD)
+
+
+class CodexFinalMessageTransportTests(ReviewerLaneHarness):
+    """PAPI-100: what the parser is handed is Codex's answer, not its narration.
+
+    The PAPI-96 pilot found the two seams this class pins, in order. Run 1 died
+    because the combined process output carried three ``DONE:`` candidates —
+    Codex had echoed the prompt, and the prompt is where the marker grammar is
+    written down. Run 2, on a pilot-only wrapper, got past that and then died
+    because the reviewer declared nine blockers in prose while the parser, which
+    was never told what a finding line looks like, counted zero.
+
+    Both are transport failures rather than judgement failures, and both are
+    fixed in the shipped adapter rather than in a wrapper: only the
+    ``--output-last-message`` file reaches stdout, and the prompt states the
+    grammar the parser actually implements.
+    """
+
+    def verdict(self, output: str, *, reviewer: str = "A"):
+        return parse_reviewer_verdict(reviewer, output, expected_head=HEAD)
+
+    def test_prompt_echo_in_the_narration_does_not_become_a_verdict(self) -> None:
+        """The PAPI-96 run-1 stop, as a test.
+
+        The stub echoes the whole prompt, so its narration genuinely contains
+        marker-shaped lines. The adapter still hands exactly one of them to the
+        parser, and it is the one Codex actually answered with.
+        """
+        self.stub("codex")
+        result = self.invoke()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Non-vacuity: the narration really did carry marker-shaped text, so
+        # this case would fail against an adapter that passed stdout through.
+        self.assertIn("DONE: STATUS=pass|fail BLOCKING=", result.stderr)
+        self.assertIn("FINDING: SEVERITY=<severity> ID=<id>", result.stderr)
+        # ...and none of it can be read as a marker, because no line of it
+        # starts with one.
+        for stream, name in ((result.stdout, "stdout"), (result.stderr, "stderr")):
+            for line in stream.splitlines():
+                if line.lstrip().upper().startswith(("DONE:", "FINDING:")):
+                    with self.subTest(stream=name):
+                        self.assertEqual(
+                            stream, result.stdout, f"{name} carries a marker line: {line!r}"
+                        )
+        verdict = self.verdict(result.stdout)
+        self.assertEqual(verdict.status, "pass")
+        self.assertEqual(verdict.head, HEAD)
+
+    def test_the_narration_is_kept_as_evidence_rather_than_discarded(self) -> None:
+        """Quiet is not the same as safe: a failed lane's transcript is the diagnosis."""
+        self.stub("codex")
+        result = self.invoke()
+        self.assertIn("codex| codex exec: model=stub", result.stderr)
+        self.assertIn("codex| codex exec: tokens used 1234", result.stderr)
+
+    def test_a_missing_final_message_fails_closed(self) -> None:
+        """An unsupported flag looks exactly like this, and must not read as "no findings"."""
+        self.stub("codex")
+        result = self.invoke(PR_PROVER_STUB_NO_FINAL="1")
+        self.assertEqual(result.returncode, 65)
+        self.assertIn("wrote no final message", result.stderr)
+        with self.assertRaises(MalformedVerdict):
+            self.verdict(result.stdout)
+
+    def test_an_empty_final_message_fails_closed(self) -> None:
+        for label, value in (("zero bytes", ""), ("whitespace only", "\n  \n")):
+            with self.subTest(final_message=label):
+                self.stub("codex")
+                result = self.invoke(PR_PROVER_STUB_FINAL=value)
+                self.assertEqual(result.returncode, 65)
+                self.assertIn("final message is empty", result.stderr)
+
+    def test_an_unreadable_final_message_fails_closed(self) -> None:
+        self.stub("codex")
+        result = self.invoke(PR_PROVER_STUB_UNREADABLE="1")
+        self.assertEqual(result.returncode, 65)
+        self.assertIn("not readable", result.stderr)
+
+    def test_a_failed_codex_process_keeps_its_exit_status(self) -> None:
+        """The seam that catches a "pass" written over a run that fell over.
+
+        pr-prover requires a clean process behind a clean verdict, so replacing
+        Codex's status with the adapter's own success would take that check's
+        evidence away before it ever ran.
+        """
+        self.stub("codex")
+        result = self.invoke(PR_PROVER_STUB_EXIT="3")
+        self.assertEqual(result.returncode, 3)
+        # The verdict is still readable — the loop needs both halves to see the
+        # contradiction, not one half and a guess.
+        self.assertEqual(self.verdict(result.stdout).status, "pass")
+
+    def test_a_verdict_for_another_head_is_refused(self) -> None:
+        self.stub("codex")
+        other = "f" * 40
+        result = self.invoke(
+            PR_PROVER_STUB_FINAL=f"DONE: STATUS=pass BLOCKING=0 HEAD={other}"
+        )
+        self.assertEqual(result.returncode, 0)
+        with self.assertRaises(StaleHead):
+            self.verdict(result.stdout)
+
+    def test_a_duplicated_marker_in_the_final_message_is_refused(self) -> None:
+        """The final message is trusted as the *channel*, never as the content."""
+        self.stub("codex")
+        marker = f"DONE: STATUS=pass BLOCKING=0 HEAD={HEAD}"
+        result = self.invoke(PR_PROVER_STUB_FINAL=f"{marker}\n{marker}")
+        with self.assertRaises(MalformedVerdict) as caught:
+            self.verdict(result.stdout)
+        self.assertEqual(caught.exception.evidence["marker_count"], 2)
+
+    def test_a_near_miss_marker_in_the_final_message_is_refused(self) -> None:
+        self.stub("codex")
+        for label, marker in (
+            ("indented", f"  DONE: STATUS=pass BLOCKING=0 HEAD={HEAD}"),
+            ("short sha", f"DONE: STATUS=pass BLOCKING=0 HEAD={HEAD[:12]}"),
+            ("reordered", f"DONE: BLOCKING=0 STATUS=pass HEAD={HEAD}"),
+        ):
+            with self.subTest(marker=label):
+                result = self.invoke(PR_PROVER_STUB_FINAL=marker)
+                with self.assertRaises(MalformedVerdict):
+                    self.verdict(result.stdout)
+
+
+class NineBlockerRoundTripTests(ReviewerLaneHarness):
+    """The PAPI-96 artifact's shape, carried end to end and counted.
+
+    The pilot's Reviewer A really did find nine blockers and really did say so;
+    what failed was that nothing it wrote was in the grammar the parser reads,
+    so the run saw ``BLOCKING=9`` over zero parsed findings and stopped. The
+    fixture below is that artifact's shape — nine distinct blocking findings,
+    plus the non-blocking and needs-karan severities a real review also
+    produces — put through the shipped adapter and then through the shipped
+    parser and the shipped artifact validator.
+    """
+
+    BLOCKERS = (
+        ("codex-stdout-parsed", "combined process output reaches the verdict parser"),
+        ("prompt-echo-markers", "the prompt's own marker examples become candidates"),
+        ("finding-grammar-absent", "the prompt never states the FINDING: grammar"),
+        ("blocking-count-unbacked", "BLOCKING=9 is declared over zero parsed findings"),
+        ("artifact-write-unproven", "no test writes the scratch artifact for real"),
+        ("visual-gate-file-only", "the visual gate checks file type and size only"),
+        ("print-detail-bodies", "collapsed operator detail is absent from print output"),
+        ("mobile-label-loss", "failure-table cells lose their labels at 320px"),
+        ("small-text-contrast", "small operational numerals fall under the threshold"),
+    )
+    OTHERS = (
+        ("non-blocking", "adapter-comment-drift", "the header comment predates the flag"),
+        ("needs-karan", "install-qualification", "re-tagging the installed build is Karan's call"),
+    )
+
+    def final_message(self) -> str:
+        lines = [
+            f"FINDING: SEVERITY=blocking ID={identifier} -- {summary}"
+            for identifier, summary in self.BLOCKERS
+        ]
+        lines += [
+            f"FINDING: SEVERITY={severity} ID={identifier} -- {summary}"
+            for severity, identifier, summary in self.OTHERS
+        ]
+        lines.append(f"DONE: STATUS=fail BLOCKING={len(self.BLOCKERS)} HEAD={HEAD}")
+        return "\n".join(lines)
+
+    def test_nine_blockers_parse_as_exactly_nine_blocking_findings(self) -> None:
+        self.stub("codex")
+        result = self.invoke(PR_PROVER_STUB_FINAL=self.final_message())
+
+        verdict = parse_reviewer_verdict("A", result.stdout, expected_head=HEAD)
+        self.assertEqual(verdict.status, "fail")
+        self.assertEqual(len(verdict.blocking), 9)
+        self.assertEqual(
+            [item.id for item in verdict.blocking], [identifier for identifier, _ in self.BLOCKERS]
+        )
+        # The other severities are carried, not silently dropped into the count.
+        self.assertEqual(len(verdict.findings), 11)
+        self.assertEqual(
+            sorted({item.severity for item in verdict.findings}),
+            ["blocking", "needs-karan", "non-blocking"],
+        )
+        # Every finding keeps the provenance an escalation needs.
+        for item in verdict.findings:
+            with self.subTest(finding=item.id):
+                self.assertEqual(item.head, HEAD)
+                self.assertEqual(item.provenance.role, "reviewer")
+
+    def test_the_grammar_the_prompt_states_is_the_grammar_the_parser_reads(self) -> None:
+        """Prompt and parser are prose and code; only a round trip pins them together."""
+        self.stub("codex")
+        self.invoke(PR_PROVER_STUB_FINAL=self.final_message())
+        lines = self.prompt_lines()
+        self.assertIn("FINDING: SEVERITY=<severity> ID=<id> -- <summary>", lines)
+        prompt = self.prompt()
+        for clause in (
+            "blocking, non-blocking, needs-karan",
+            "1 to 64 characters",
+            "exactly two hyphens, with exactly one space on each side",
+            "1 to 300 characters",
+            "Each id must be unique",
+        ):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, prompt)
+        self.assertIn(
+            f"DONE: STATUS=pass|fail BLOCKING=<number of blocking findings> HEAD={HEAD}", lines
+        )
+
+    def test_the_artifact_for_that_review_validates_against_the_same_counts(self) -> None:
+        """One-to-one: marker, artifact, and parsed findings tell one story."""
+        self.stub("codex")
+        artifact = self.tmp / "artifact.md"
+        result = self.invoke(
+            artifact_file=str(artifact), PR_PROVER_STUB_FINAL=self.final_message()
+        )
+        verdict = parse_reviewer_verdict("A", result.stdout, expected_head=HEAD)
+        # The lane writes the artifact; the stub does not run a model, so the
+        # body is composed here in exactly the shape the prompt demands.
+        artifact.write_text(
+            "\n".join(
+                [
+                    "ROLE=reviewer-a",
+                    "RUNTIME=codex-exec/stub",
+                    f"HEAD={HEAD}",
+                    "STATUS=fail",
+                    f"BLOCKING={len(self.BLOCKERS)}",
+                    "KILL-SWITCH: diffed the test inventory; two cases had been removed",
+                    *(
+                        f"FINDING: SEVERITY=blocking ID={identifier} -- {summary}"
+                        for identifier, summary in self.BLOCKERS
+                    ),
+                    "Reviewed by: CodexReviewer via Hermes orchestration",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        prepared = read_prepared(
+            artifact,
+            reviewer="A",
+            role="reviewer-a",
+            signature="Reviewed by: CodexReviewer via Hermes orchestration",
+            head=HEAD,
+            status=verdict.status,
+            blocking=len(verdict.blocking),
+        )
+        self.assertEqual(prepared.claim.blocking, 9)
+        self.assertEqual(prepared.claim.status, "fail")
+
+    def test_an_artifact_disagreeing_with_the_marker_never_reaches_the_relay(self) -> None:
+        """Nine in the marker and eight in the artifact is two stories, not a typo."""
+        self.stub("codex")
+        artifact = self.tmp / "artifact.md"
+        result = self.invoke(
+            artifact_file=str(artifact), PR_PROVER_STUB_FINAL=self.final_message()
+        )
+        verdict = parse_reviewer_verdict("A", result.stdout, expected_head=HEAD)
+        artifact.write_text(
+            "\n".join(
+                [
+                    "ROLE=reviewer-a",
+                    "RUNTIME=codex-exec/stub",
+                    f"HEAD={HEAD}",
+                    "STATUS=fail",
+                    "BLOCKING=8",
+                    "KILL-SWITCH: looked for a weakened assertion",
+                    "Reviewed by: CodexReviewer via Hermes orchestration",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(ReviewerRelayError) as caught:
+            read_prepared(
+                artifact,
+                reviewer="A",
+                role="reviewer-a",
+                signature="Reviewed by: CodexReviewer via Hermes orchestration",
+                head=HEAD,
+                status=verdict.status,
+                blocking=len(verdict.blocking),
+            )
+        self.assertIn("BLOCKING=8", str(caught.exception))
+
+    def test_a_malformed_or_repeated_finding_line_fails_closed(self) -> None:
+        self.stub("codex")
+        good = "FINDING: SEVERITY=blocking ID=real-one -- it crashes on empty input"
+        for label, body in (
+            (
+                "unknown severity",
+                f"FINDING: SEVERITY=urgent ID=x -- boom\nDONE: STATUS=fail BLOCKING=1 HEAD={HEAD}",
+            ),
+            (
+                "uppercase id",
+                f"FINDING: SEVERITY=blocking ID=Real-One -- boom\n"
+                f"DONE: STATUS=fail BLOCKING=1 HEAD={HEAD}",
+            ),
+            (
+                "single hyphen separator",
+                f"FINDING: SEVERITY=blocking ID=x - boom\nDONE: STATUS=fail BLOCKING=1 HEAD={HEAD}",
+            ),
+            (
+                "repeated id",
+                f"{good}\n{good}\nDONE: STATUS=fail BLOCKING=2 HEAD={HEAD}",
+            ),
+            (
+                "count disagrees with the findings",
+                f"{good}\nDONE: STATUS=fail BLOCKING=9 HEAD={HEAD}",
+            ),
+            (
+                "status disagrees with the count",
+                f"{good}\nDONE: STATUS=pass BLOCKING=1 HEAD={HEAD}",
+            ),
+            (
+                "the grammar quoted back as an example",
+                "FINDING: SEVERITY=<severity> ID=<id> -- <summary>\n"
+                f"DONE: STATUS=pass BLOCKING=0 HEAD={HEAD}",
+            ),
+        ):
+            with self.subTest(final_message=label):
+                result = self.invoke(PR_PROVER_STUB_FINAL=body)
+                with self.assertRaises(MalformedVerdict):
+                    parse_reviewer_verdict("A", result.stdout, expected_head=HEAD)
+
+
+class OrderedReviewSequenceTests(ReviewerLaneHarness):
+    """Reviewer A, then Reviewer B, then the Integration Auditor — shipped path only.
+
+    The pilot proved its ordering with a wrapper written for the pilot, which is
+    evidence about the wrapper. This runs the three roles through
+    ``scripts/codex-reviewer.sh`` itself, reads each verdict with the shipped
+    parser and each artifact with the shipped relay-side validator, and asks the
+    questions the sequence exists to answer: did all three run, in order, bound
+    to one head, each declaring its own role.
+    """
+
+    ROLES = ("reviewer-a", "reviewer-b", "integration-auditor")
+    SIGNATURE = "Reviewed by: CodexReviewer via Hermes orchestration"
+
+    def lane(self, role: str, *, final: str | None = None):
+        """One reviewer lane: run the shipped adapter, then validate what it left."""
+        artifact = self.tmp / f"artifact-{role}.md"
+        result = self.invoke(
+            role=role,
+            artifact_file=str(artifact),
+            **({"PR_PROVER_STUB_FINAL": final} if final is not None else {}),
+        )
+        verdict = parse_reviewer_verdict(role, result.stdout, expected_head=HEAD)
+        artifact.write_text(
+            "\n".join(
+                [
+                    f"ROLE={role}",
+                    "RUNTIME=codex-exec/stub",
+                    f"HEAD={HEAD}",
+                    f"STATUS={verdict.status}",
+                    f"BLOCKING={len(verdict.blocking)}",
+                    f"KILL-SWITCH: {role} diffed the test inventory; nothing was removed",
+                    self.SIGNATURE,
+                ]
+            ),
+            encoding="utf-8",
+        )
+        prepared = read_prepared(
+            artifact,
+            reviewer=role,
+            role=role,
+            signature=self.SIGNATURE,
+            head=HEAD,
+            status=verdict.status,
+            blocking=len(verdict.blocking),
+        )
+        return result, verdict, prepared
+
+    def test_the_three_roles_run_in_order_and_each_binds_to_the_one_head(self) -> None:
+        self.stub("codex")
+        seen = []
+        for role in self.ROLES:
+            result, verdict, prepared = self.lane(role)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(verdict.status, "pass")
+            self.assertEqual(verdict.head, HEAD)
+            # The prompt this lane was actually handed named this role, so the
+            # sequence is three distinct audits rather than one run three times.
+            self.assertIn(f"ROLE={role}", self.prompt_lines())
+            self.assertIn(f"You are {role} for an existing pull request", self.prompt())
+            seen.append(prepared.claim.role)
+
+        self.assertEqual(seen, list(self.ROLES))
+        # Three artifacts, three roles, one head, and no lane wrote another's.
+        for role in self.ROLES:
+            with self.subTest(role=role):
+                body = (self.tmp / f"artifact-{role}.md").read_text(encoding="utf-8")
+                self.assertIn(f"ROLE={role}", body.splitlines())
+                self.assertEqual(
+                    [line for line in body.splitlines() if line.startswith("HEAD=")],
+                    [f"HEAD={HEAD}"],
+                )
+
+    def test_a_role_declaring_another_lanes_role_stops_before_the_next_one(self) -> None:
+        """The auditor's artifact cannot be Reviewer B's, however clean it reads."""
+        self.stub("codex")
+        artifact = self.tmp / "artifact-auditor.md"
+        result = self.invoke(role="integration-auditor", artifact_file=str(artifact))
+        verdict = parse_reviewer_verdict("integration-auditor", result.stdout, expected_head=HEAD)
+        artifact.write_text(
+            "\n".join(
+                [
+                    "ROLE=reviewer-b",
+                    "RUNTIME=codex-exec/stub",
+                    f"HEAD={HEAD}",
+                    "STATUS=pass",
+                    "BLOCKING=0",
+                    "KILL-SWITCH: looked for a shrunken scope",
+                    self.SIGNATURE,
+                ]
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(ReviewerRelayError) as caught:
+            read_prepared(
+                artifact,
+                reviewer="integration-auditor",
+                role="integration-auditor",
+                signature=self.SIGNATURE,
+                head=HEAD,
+                status=verdict.status,
+                blocking=len(verdict.blocking),
+            )
+        self.assertIn("ROLE=reviewer-b", str(caught.exception))
+
+    def test_a_lane_that_found_blockers_carries_them_to_its_own_artifact(self) -> None:
+        """A failing middle lane is still a complete, readable, bound result."""
+        self.stub("codex")
+        final = (
+            "FINDING: SEVERITY=blocking ID=narrowed-assertion -- the assertion no longer trips\n"
+            f"DONE: STATUS=fail BLOCKING=1 HEAD={HEAD}"
+        )
+        result, verdict, prepared = self.lane("reviewer-b", final=final)
+        self.assertEqual(verdict.status, "fail")
+        self.assertEqual([item.id for item in verdict.blocking], ["narrowed-assertion"])
+        self.assertEqual(prepared.claim.status, "fail")
+        self.assertEqual(prepared.claim.blocking, 1)
 
 
 class BuilderAdapterTests(AdapterHarness):
