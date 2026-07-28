@@ -60,6 +60,17 @@ from; the artifact is what Karan and the next reviewer read. An artifact that
 says ``pass`` over a lane that reported blockers is not a formatting slip, it is
 two different stories about one head.
 
+The findings themselves are held to the same standard, and to the same grammar.
+``BLOCKING=`` is a count; the artifact's ``FINDING:`` lines are the records, and
+:func:`pr_prover.verdicts.finding_records` — the parser that read the lane's
+final message — is what reads them here too. :func:`finding_parity` then holds
+the two surfaces to one claim: the declared count is the number of blocking
+lines actually present, and every finding the lane reported appears exactly once
+with the same severity and summary, with nothing extra beside it. An artifact
+that announces nine blockers and states none of them satisfies every
+declaration check above and still leaves the Integration Auditor and Karan
+nothing to reconcile, so it is refused before a relay can publish it.
+
 ``KILL-SWITCH:`` is the adversarial mandate made checkable. A reviewer's job on
 a fix cycle is to try to *kill* the builder's fix — to hunt for a bad-faith
 pass, a weakened or deleted test, a gamed metric, a shrunken scope, stale
@@ -72,12 +83,14 @@ from __future__ import annotations
 
 import re
 import shutil
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .errors import ReviewerRelayError
+from .errors import MalformedVerdict, ReviewerRelayError
+from .findings import Finding
+from .verdicts import FindingRecord, finding_records
 
 # The variable names that carry a GitHub credential. A reviewer lane in the
 # relayed lifecycle never sees one; it writes a file and the relay publishes it.
@@ -106,6 +119,10 @@ HEAD_PREFIX = "HEAD="
 STATUS_PREFIX = "STATUS="
 BLOCKING_PREFIX = "BLOCKING="
 KILL_SWITCH_PREFIX = "KILL-SWITCH:"
+# Not a declaration: the findings themselves, in the grammar
+# :func:`pr_prover.verdicts.finding_records` reads. Named here only so the
+# reasons this module gives can quote the line shape it refused.
+FINDING_PREFIX = "FINDING:"
 
 DECLARATION_PREFIXES = (
     ROLE_PREFIX,
@@ -284,6 +301,75 @@ def artifact_disagreement(
     return ""
 
 
+def artifact_findings(body: str, *, reviewer: str) -> tuple[FindingRecord, ...]:
+    """The artifact's own ``FINDING:`` lines, read by the verdict parser's grammar.
+
+    Deliberately not a second reader. The prompt states one grammar, the lane's
+    final message is held to it, and an artifact that restates the same findings
+    in a shape the parser would refuse is not a record the next reviewer or
+    Karan can reconcile — so it is read by the same function and refused for the
+    same reasons, expressed as the relay failure it actually is.
+    """
+    lane = f"reviewer {reviewer}'s prepared artifact"
+    try:
+        return finding_records(body, lane=lane)
+    except MalformedVerdict as exc:
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s prepared artifact carries a {FINDING_PREFIX} line the "
+            f"verdict grammar refuses: {exc.message}",
+            evidence={"reviewer": reviewer, **exc.evidence},
+        ) from exc
+
+
+def finding_parity(
+    records: Sequence[FindingRecord], findings: Sequence[Finding], *, declared: int
+) -> str:
+    """Why the artifact's findings are not the lane's, or ``""`` when they are.
+
+    A declaration block can count blockers; only these lines say what they were.
+    The PAPI-96 pilot's Reviewer A declared nine and the parser counted zero,
+    and the mirror image of that is an artifact that declares nine and carries
+    no record of any of them — transport that succeeds while depriving the
+    Integration Auditor of the thing it exists to reconcile. So the two surfaces
+    are held together one to one: the declared count is the number of blocking
+    lines actually present, and every id the lane reported appears exactly once
+    with the same severity and the same summary, with nothing extra alongside
+    it. Order is not part of it; identity, count, severity, and text are.
+    """
+    counted = sum(1 for record in records if record.severity == "blocking")
+    if counted != declared:
+        return (
+            f"the artifact declares {BLOCKING_PREFIX}{declared} over {counted} blocking "
+            f"{FINDING_PREFIX} line(s)"
+        )
+    stated = {record.id: record for record in records}
+    reported = {finding.id: finding for finding in findings}
+    missing = sorted(set(reported) - set(stated))
+    if missing:
+        return (
+            f"the artifact carries no {FINDING_PREFIX} line for the finding(s) the lane "
+            f"reported: {', '.join(missing)}"
+        )
+    extra = sorted(set(stated) - set(reported))
+    if extra:
+        return (
+            f"the artifact states {FINDING_PREFIX} line(s) the lane never reported: "
+            f"{', '.join(extra)}"
+        )
+    for identifier in sorted(stated):
+        record, finding = stated[identifier], reported[identifier]
+        if record.severity != finding.severity:
+            return (
+                f"the artifact states {identifier} as SEVERITY={record.severity} while the "
+                f"lane reported SEVERITY={finding.severity}"
+            )
+        if record.summary != finding.summary:
+            return (
+                f"the artifact's summary for {identifier} is not the one the lane reported"
+            )
+    return ""
+
+
 @dataclass(frozen=True)
 class PreparedArtifact:
     """A reviewer's finished artifact, on disk and not yet published."""
@@ -291,6 +377,10 @@ class PreparedArtifact:
     path: Path
     body: str
     claim: ArtifactClaim
+    # The artifact's own finding lines, already proved to be the lane's
+    # findings. Kept rather than discarded so a caller that needs the record
+    # reads the validated one instead of re-parsing the body.
+    findings: tuple[FindingRecord, ...] = ()
 
     @property
     def size(self) -> int:
@@ -380,6 +470,7 @@ def read_prepared(
     head: str,
     status: str,
     blocking: int,
+    findings: Sequence[Finding],
 ) -> PreparedArtifact:
     """Read and validate what the reviewer prepared, before anything publishes it.
 
@@ -388,6 +479,14 @@ def read_prepared(
     a relay never publishes an artifact readback would then reject, so a
     reviewer lane that fell over silently stops the run rather than putting
     something unusable on the PR under the reviewer's name.
+
+    ``findings`` is the lane verdict this artifact must be the same claim as,
+    already parsed from the final message. The declaration block is checked
+    against ``status`` and ``blocking``, and then the artifact's own
+    ``FINDING:`` lines are checked against those findings one to one, because a
+    count is not a record: an artifact declaring blockers it does not state is
+    the one shape that passes every declaration check and still leaves the next
+    reader nothing to act on.
     """
     evidence: dict[str, Any] = {
         "reviewer": reviewer,
@@ -456,7 +555,21 @@ def read_prepared(
                 "lane_blocking": blocking,
             },
         )
-    return PreparedArtifact(path=path, body=body, claim=reading.claim)
+    records = artifact_findings(body, reviewer=reviewer)
+    mismatch = finding_parity(records, findings, declared=blocking)
+    if mismatch:
+        raise ReviewerRelayError(
+            f"reviewer {reviewer}'s prepared artifact does not carry the findings this "
+            f"lane reported: {mismatch}",
+            evidence={
+                **evidence,
+                "artifact_findings": [record.id for record in records],
+                "lane_findings": [finding.id for finding in findings],
+                "artifact_finding_count": len(records),
+                "lane_finding_count": len(findings),
+            },
+        )
+    return PreparedArtifact(path=path, body=body, claim=reading.claim, findings=records)
 
 
 def artifact_matches(
@@ -500,6 +613,7 @@ __all__ = [
     "BLOCKING_PREFIX",
     "CREDENTIAL_ENV",
     "DECLARATION_PREFIXES",
+    "FINDING_PREFIX",
     "GH_CONFIG_DIR_ENV",
     "HEAD_PREFIX",
     "KILL_SWITCH_PREFIX",
@@ -511,12 +625,14 @@ __all__ = [
     "ArtifactReading",
     "PreparedArtifact",
     "artifact_disagreement",
+    "artifact_findings",
     "artifact_matches",
     "artifact_path",
     "credential_free",
     "credential_free_config_dir",
     "declarations",
     "expected_block",
+    "finding_parity",
     "is_full_sha",
     "parse_artifact",
     "read_prepared",

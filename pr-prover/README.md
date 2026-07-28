@@ -183,6 +183,24 @@ Two are repository-owned, and the example config wires both:
   quietly found nothing, and Codex's own exit status is passed through unchanged
   so the [marker-versus-exit-status](#the-marker-is-not-the-whole-verdict) check
   still has both halves to compare.
+
+  **The rest of the run is pinned, not inherited.** The artifact this lane
+  publishes declares which runtime reviewed the head, so the launch states the
+  properties that declaration is about rather than accepting whatever default is
+  in effect: `--ephemeral`, so nothing is persisted and the next cycle starts
+  from the live PR rather than from a session that remembers the last one; the
+  reviewer `--model` and its reasoning effort, so `RUNTIME=` is a property of
+  the launch; `--sandbox workspace-write`, because a read-only lane cannot write
+  the one artifact it is being asked for; and `--add-dir` naming only the
+  artifact directory, so the file the lane is meant to leave behind is one it is
+  actually permitted to create and no other location is added. That directory is
+  checked to exist and to be **outside the worktree** before write access to it
+  is granted, because a lane's own scratch output landing in the reviewed tree
+  is indistinguishable from the contamination the post-lane check exists to
+  catch. None of this is a security boundary: ambient user configuration is
+  still loaded, this is a trusted inherited session, and what proves the
+  checkout was left alone is the contamination check rather than the write
+  scope.
 - [`scripts/claude-builder.sh`](scripts/claude-builder.sh) runs the trusted
   Claude builder in that cycle's own worktree. It is **pointer-first**: it names
   the blockers file, `AGENTS.md`, `MISSION.md`, and the live PR rather than
@@ -199,8 +217,22 @@ a trusted agent reliably, and both are covered by
 against stub binaries — a double cannot catch a mistyped flag or a guard that
 never fires. The reviewer's stub is deliberately *Codex-shaped* rather than
 cooperative: it echoes the prompt back the way the real CLI does, so its
-narration genuinely contains marker-shaped lines. A stub that printed one clean
-marker would agree with the adapter that was wrong.
+narration genuinely contains marker-shaped lines, and it reads the artifact path
+out of the prompt and creates that file before it returns, the way the CLI does.
+A stub that printed one clean marker would agree with the adapter that was wrong,
+and a proof whose artifacts were written by the test process afterwards would
+show that the validator works while saying nothing about whether a reviewer lane
+leaves one behind.
+
+The ordered three-role lifecycle is proved the same way, through the real thing:
+`OrderedRelayLifecycleTests` configures the three shipped reviewer lanes exactly
+as [`examples/run.example.json`](examples/run.example.json) does and runs
+`loop.run()`, so the adapter is really executed, the artifact it writes is the
+one the *loop's* configured relay publishes, and the order, the attribution
+snapshot, and the GitHub readback are the loop's own. A local loop over three
+adapter calls with the validator invoked directly proves the adapter three
+times; it cannot prove that the loop runs the three required roles in order or
+relays what each of them actually wrote.
 
 Gates remain the operator's own commands.
 
@@ -582,6 +614,23 @@ must equal the `BLOCKING=` the published artifact declares. Lane output is
 untrusted, so a body that quotes or forges a marker, repeats a finding id, or
 echoes the grammar back as an example fails the run closed instead of being read
 as a verdict.
+
+A count is not a record, so the artifact is held to the findings as well as to
+the count. `BLOCKING=9` says how many blockers there were; the artifact's own
+`FINDING:` lines say what they were, and an artifact that declares the first
+while carrying none of the second passes every declaration check above and still
+leaves the Integration Auditor and Karan nothing to reconcile — the mirror image
+of the pilot failure where the reviewer declared nine and the parser counted
+zero. So before a relay is allowed to publish anything, the artifact's finding
+lines are read by
+[`verdicts.finding_records`](src/pr_prover/verdicts.py) — the same function that
+read the lane's final message, not a second reader that could drift from it —
+and reconciled one to one with the findings that lane reported: the declared
+count is the number of blocking lines actually present, and every id appears
+exactly once with the same severity and the same summary, with nothing extra
+beside it. Order is not part of it; identity, count, severity, and text are. A
+missing, extra, duplicated, malformed, renamed, or rewritten record stops the run
+as a relay failure, and nothing reaches the pull request.
 
 ### Every finding carries its provenance
 

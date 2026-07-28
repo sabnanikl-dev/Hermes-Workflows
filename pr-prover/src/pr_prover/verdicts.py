@@ -9,6 +9,12 @@ Child output is untrusted. Anything that could be read two ways is rejected:
 * the head in the marker must equal the exact bound head, byte for byte;
 * the declared ``BLOCKING`` count must reconcile with the parsed findings.
 
+:func:`finding_records` is the single reader for the ``FINDING:`` grammar, and it
+is deliberately not private: :mod:`pr_prover.reviewers` reads the artifact a lane
+prepared with the same function that read that lane's final message, so the two
+surfaces cannot be held to two grammars and one of them cannot quietly become
+the looser one.
+
 Reviewer contract::
 
     FINDING: SEVERITY=blocking|non-blocking|needs-karan ID=<slug> -- <summary>
@@ -60,6 +66,26 @@ class ReviewerVerdict:
     @property
     def blocking(self) -> tuple[Finding, ...]:
         return tuple(item for item in self.findings if item.severity == "blocking")
+
+
+@dataclass(frozen=True)
+class FindingRecord:
+    """One ``FINDING:`` line, as the single accepted grammar reads it.
+
+    A lane states its findings twice — once in the final message the loop
+    classifies from, once in the artifact Karan and the next reviewer read —
+    and the two have to be the same claim. That is only checkable if both are
+    read by the same code, so this is what :func:`finding_records` returns and
+    what :mod:`pr_prover.reviewers` reconciles an artifact against. ``line`` and
+    ``excerpt`` are kept because provenance is taken at the only moment the
+    surface is still known.
+    """
+
+    id: str
+    severity: str
+    summary: str
+    line: int
+    excerpt: str
 
 
 @dataclass(frozen=True)
@@ -118,6 +144,43 @@ def _reject_near_misses(lines: list[str], candidate: re.Pattern[str], strict: re
             )
 
 
+def finding_records(text: str, *, lane: str) -> tuple[FindingRecord, ...]:
+    """Every ``FINDING:`` line in ``text``, or fail closed.
+
+    The one reader for the grammar the reviewer prompt states. A near-miss is
+    rejected rather than skipped over in favour of the well-formed lines around
+    it, and a repeated id is refused, because both are ways one surface can be
+    read two ways — and the whole point of reading a lane's final message and
+    its artifact with the same function is that neither can be held to a looser
+    grammar than the other.
+    """
+    lines = _lines(text)
+    _reject_near_misses(lines, _FINDING_CANDIDATE, _FINDING, lane=lane, kind="FINDING")
+    records: list[FindingRecord] = []
+    seen: set[str] = set()
+    for number, line in enumerate(lines, start=1):
+        found = _FINDING.match(line)
+        if found is None:
+            continue
+        identifier = found.group("id")
+        if identifier in seen:
+            raise MalformedVerdict(
+                f"{lane} repeated finding id {identifier!r}",
+                evidence={"lane": lane, "finding_id": identifier},
+            )
+        seen.add(identifier)
+        records.append(
+            FindingRecord(
+                id=identifier,
+                severity=found.group("severity"),
+                summary=redact_evidence(found.group("summary").strip(), limit=300),
+                line=number,
+                excerpt=redact_evidence(line.strip(), limit=400),
+            )
+        )
+    return tuple(records)
+
+
 def parse_reviewer_verdict(reviewer: str, output: str, *, expected_head: str) -> ReviewerVerdict:
     """Parse one reviewer lane's output, bound to ``expected_head``."""
     lane = f"reviewer {reviewer}"
@@ -140,44 +203,30 @@ def parse_reviewer_verdict(reviewer: str, output: str, *, expected_head: str) ->
             evidence={"lane": lane, "expected_head": expected_head, "reported_head": head},
         )
 
-    lines = _lines(output)
-    _reject_near_misses(lines, _FINDING_CANDIDATE, _FINDING, lane=lane, kind="FINDING")
-    findings: list[Finding] = []
-    seen: set[str] = set()
-    for number, line in enumerate(lines, start=1):
-        found = _FINDING.match(line)
-        if found is None:
-            continue
-        identifier = found.group("id")
-        if identifier in seen:
-            raise MalformedVerdict(
-                f"{lane} repeated finding id {identifier!r}",
-                evidence={"lane": lane, "finding_id": identifier},
-            )
-        seen.add(identifier)
-        findings.append(
-            Finding(
-                id=identifier,
-                severity=found.group("severity"),
-                summary=redact_evidence(found.group("summary").strip(), limit=300),
-                # Provenance is taken here, at the only moment the surface is
-                # still known: which lane printed it, on which head, on which
-                # line of its output, and exactly what it said. Reconstructing
-                # any of that later means reading it back out of a rendered
-                # summary, which is the thing an escalation cannot rely on.
-                provenance=FindingProvenance(
-                    agent_id=reviewer,
-                    role="reviewer",
-                    head=head,
-                    location=FindingLocation(
-                        kind="lane-output",
-                        reference=f"reviewer:{reviewer}",
-                        line=number,
-                    ),
-                    evidence_excerpt=redact_evidence(line.strip(), limit=400),
+    findings = [
+        Finding(
+            id=record.id,
+            severity=record.severity,
+            summary=record.summary,
+            # Provenance is taken here, at the only moment the surface is still
+            # known: which lane printed it, on which head, on which line of its
+            # output, and exactly what it said. Reconstructing any of that later
+            # means reading it back out of a rendered summary, which is the
+            # thing an escalation cannot rely on.
+            provenance=FindingProvenance(
+                agent_id=reviewer,
+                role="reviewer",
+                head=head,
+                location=FindingLocation(
+                    kind="lane-output",
+                    reference=f"reviewer:{reviewer}",
+                    line=record.line,
                 ),
-            )
+                evidence_excerpt=record.excerpt,
+            ),
         )
+        for record in finding_records(output, lane=lane)
+    ]
 
     declared = int(match.group("blocking"))
     counted = sum(1 for item in findings if item.severity == "blocking")
@@ -256,7 +305,9 @@ __all__ = [
     "FULL_SHA",
     "SEVERITIES",
     "BuilderReport",
+    "FindingRecord",
     "ReviewerVerdict",
+    "finding_records",
     "parse_builder_report",
     "parse_reviewer_verdict",
 ]

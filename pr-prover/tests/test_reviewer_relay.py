@@ -27,6 +27,7 @@ from _support import (
     REVIEWER_LOGIN,
     REVIEWER_SIGNATURE,
     builder_output,
+    make_finding,
     reviewer_artifact,
     reviewer_output,
 )
@@ -146,6 +147,7 @@ class PreparedArtifactTests(unittest.TestCase):
             head=HEAD_A,
             status=kwargs.pop("status", "pass"),
             blocking=kwargs.pop("blocking", 0),
+            findings=kwargs.pop("findings", ()),
         )
 
     def test_a_conforming_artifact_validates(self) -> None:
@@ -189,6 +191,119 @@ class PreparedArtifactTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.evidence["lane_blocking"], 3)
         self.assertEqual(caught.exception.evidence["declared_blocking"], 0)
+
+    def test_an_artifact_declaring_blockers_it_does_not_state_is_refused(self) -> None:
+        """A count is not a record.
+
+        ``STATUS=fail`` and ``BLOCKING=1`` over zero ``FINDING:`` lines: every
+        declaration is well-formed, and all of them agree with the lane's own
+        marker. What the artifact does not carry is the one thing the next
+        reviewer and Karan have to act on, so it never reaches a relay.
+        """
+        with self.assertRaises(ReviewerRelayError) as caught:
+            self.prepare(
+                reviewer_artifact(role="reviewer-a", head=HEAD_A, status="fail", blocking=1),
+                status="fail",
+                blocking=1,
+                findings=[make_finding("null-deref", summary="crashes on empty input")],
+            )
+        self.assertIn("BLOCKING=1 over 0 blocking FINDING: line(s)", caught.exception.message)
+        self.assertEqual(caught.exception.reason, "relay-failure")
+        self.assertEqual(caught.exception.evidence["artifact_finding_count"], 0)
+        self.assertEqual(caught.exception.evidence["lane_finding_count"], 1)
+
+    def test_the_same_review_stated_on_both_surfaces_validates(self) -> None:
+        """Non-vacuity for every case below: parity is satisfiable, and this is it."""
+        artifact = self.prepare(
+            reviewer_artifact(
+                role="reviewer-a",
+                head=HEAD_A,
+                status="fail",
+                blocking=1,
+                findings=[
+                    ("blocking", "null-deref", "crashes on empty input"),
+                    ("non-blocking", "stale-comment", "the header predates the flag"),
+                ],
+            ),
+            status="fail",
+            blocking=1,
+            findings=[
+                make_finding("null-deref", summary="crashes on empty input"),
+                make_finding("stale-comment", "non-blocking", summary="the header predates the flag"),
+            ],
+        )
+        self.assertEqual(
+            [record.id for record in artifact.findings], ["null-deref", "stale-comment"]
+        )
+
+    def test_every_way_an_artifact_can_disagree_with_its_lane_fails_closed(self) -> None:
+        """One table, because they are one predicate read from both sides.
+
+        Each row keeps the declaration block valid and agreeing with the lane, so
+        nothing here is caught by a check that already existed: the only thing
+        wrong is the relationship between the findings the lane reported and the
+        finding lines the artifact carries.
+        """
+        lane = [
+            make_finding("null-deref", summary="crashes on empty input"),
+            make_finding("bad-copy", "non-blocking", summary="the copy contradicts the contract"),
+        ]
+        good = ("blocking", "null-deref", "crashes on empty input")
+        other = ("non-blocking", "bad-copy", "the copy contradicts the contract")
+        for label, findings, expected in (
+            ("a missing record", [good], "carries no FINDING: line"),
+            (
+                "an extra record",
+                [good, other, ("non-blocking", "invented", "nobody reported this")],
+                "the lane never reported",
+            ),
+            (
+                "a renamed id",
+                [good, ("non-blocking", "renamed", "the copy contradicts the contract")],
+                "carries no FINDING: line",
+            ),
+            (
+                "a rewritten summary",
+                [good, ("non-blocking", "bad-copy", "a summary the lane never wrote")],
+                "summary for bad-copy",
+            ),
+            (
+                "a re-severed finding",
+                [good, ("needs-karan", "bad-copy", "the copy contradicts the contract")],
+                "as SEVERITY=needs-karan",
+            ),
+            (
+                "a repeated id",
+                [good, other, other],
+                "repeated finding id",
+            ),
+            (
+                "a malformed record",
+                [good, other, ("blocking", "x", "")],
+                "the verdict grammar refuses",
+            ),
+            (
+                "the grammar quoted back as an example",
+                [good, other, ("<severity>", "<id>", "<summary>")],
+                "the verdict grammar refuses",
+            ),
+        ):
+            with self.subTest(artifact=label):
+                with self.assertRaises(ReviewerRelayError) as caught:
+                    self.prepare(
+                        reviewer_artifact(
+                            role="reviewer-a",
+                            head=HEAD_A,
+                            status="fail",
+                            blocking=1,
+                            findings=findings,
+                        ),
+                        status="fail",
+                        blocking=1,
+                        findings=lane,
+                    )
+                self.assertIn(expected, caught.exception.message)
+                self.assertEqual(caught.exception.reason, "relay-failure")
 
     def test_the_artifact_path_is_cleared_before_a_lane_can_write_to_it(self) -> None:
         """A file an earlier lane left is never mistaken for this lane's work."""

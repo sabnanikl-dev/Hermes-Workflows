@@ -23,12 +23,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from _support import (
+    HEAD_A,
+    RELAY_PROGRAM as RELAY,
+    REVIEWER_LANES,
+    REVIEWER_LOGIN,
+    REVIEWER_SIGNATURE,
+    Call,
+    FakeRunner,
+    builder_output,
+    reviewer_lane,
+)
+from pr_prover.commands import CommandResult, validate_argv
 from pr_prover.config import RunConfig
 from pr_prover.errors import MalformedVerdict, ReviewerRelayError, StaleHead
 from pr_prover.github import GoverningIssue, PullRequest, ReviewEvidence
+from pr_prover.loop import MERGE_READY, NEEDS_KARAN
 from pr_prover.packet import REQUIRED_SURFACES, build_packet, write_packet
+from pr_prover.report import as_dict
 from pr_prover.reviewers import CREDENTIAL_ENV, parse_artifact, read_prepared
+from pr_prover.state import MAX_ATTEMPTS
 from pr_prover.verdicts import parse_reviewer_verdict
+from test_loop import LoopHarness
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
@@ -63,6 +79,22 @@ printf 'DONE: STATUS=pass BLOCKING=0 HEAD=%s\\n' "$PR_PROVER_STUB_HEAD"
 # answer only to the file named by --output-last-message. A stub that printed a
 # clean marker on stdout would agree with any adapter, including the one that
 # was wrong.
+#
+# It also does the other half of what the real CLI does: it reads the artifact
+# path out of the prompt it was handed and creates that file before it returns.
+# A stub that answered only on the final-message channel and left the artifact
+# to be written by the Python test process afterwards would let a test claim an
+# adapter-to-relay lifecycle the adapter never actually produced — the artifact
+# would exist because the test wrote it, not because the reviewer did. So the
+# scratch write is the stub's, derived from the prompt like everything else it
+# knows, and the artifact it composes restates the findings from its own final
+# message because that is the parity the relay holds a real one to.
+#
+# The knobs are all "what a defective lane does": PR_PROVER_STUB_FINAL replaces
+# the answer, PR_PROVER_STUB_NO_FINAL writes none, PR_PROVER_STUB_NO_ARTIFACT
+# writes no artifact, and PR_PROVER_STUB_ARTIFACT_FINDINGS replaces the finding
+# lines in the artifact without touching the ones in the final message, which is
+# how an artifact comes to disagree with the verdict it reports.
 CODEX_STUB = """#!/bin/sh
 printf '%s\\n' "$@" > "$PR_PROVER_STUB_ARGV"
 final=""
@@ -70,11 +102,13 @@ prompt=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--output-last-message) final="${2:-}"; shift 2 ;;
+	--model|--config|--sandbox|--add-dir) shift 2 ;;
+	--ephemeral|exec) shift ;;
 	*) prompt="$1"; shift ;;
 	esac
 done
 printf '%s' "$prompt" > "$PR_PROVER_STUB_PROMPT"
-printf 'codex exec: model=stub sandbox=read-only approval=never\\n'
+printf 'codex exec: model=stub approval=never\\n'
 printf 'codex exec: replaying the prompt it was handed\\n'
 printf '%s\\n' "$prompt"
 printf 'codex exec: tokens used 1234; wrote final message\\n' >&2
@@ -90,8 +124,86 @@ if [ -n "$final" ]; then
 	printf '%s' "$answer" > "$final"
 	if [ -n "${PR_PROVER_STUB_UNREADABLE:-}" ]; then chmod 000 "$final"; fi
 fi
+artifact=$(printf '%s\\n' "$prompt" | sed -n 's/^Artifact file to write: //p' | head -1)
+if [ -z "${PR_PROVER_STUB_NO_ARTIFACT:-}" ] && [ -n "$artifact" ]; then
+	role=$(printf '%s\\n' "$prompt" | sed -n 's/^[[:space:]]*ROLE=//p' | head -1)
+	head=$(printf '%s\\n' "$prompt" | sed -n 's/^[[:space:]]*HEAD=//p' | head -1)
+	signature=$(printf '%s\\n' "$prompt" | awk '
+		/^[[:space:]]*BLOCKING=<number of blocking findings>$/ {
+			getline line
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			print line
+			exit
+		}')
+	stated=$(printf '%s\\n' "$answer" | grep '^FINDING: ')
+	blocking=$(printf '%s\\n' "$answer" | grep -c '^FINDING: SEVERITY=blocking ID=')
+	if [ "$blocking" -eq 0 ]; then status=pass; else status=fail; fi
+	{
+		printf 'ROLE=%s\\n' "$role"
+		printf 'RUNTIME=codex-exec/stub\\n'
+		printf 'HEAD=%s\\n' "$head"
+		printf 'STATUS=%s\\n' "$status"
+		printf 'BLOCKING=%s\\n' "$blocking"
+		printf 'KILL-SWITCH: diffed the test inventory; nothing had been removed\\n'
+		if [ -n "${PR_PROVER_STUB_ARTIFACT_FINDINGS+set}" ]; then
+			if [ -n "$PR_PROVER_STUB_ARTIFACT_FINDINGS" ]; then
+				printf '%s\\n' "$PR_PROVER_STUB_ARTIFACT_FINDINGS"
+			fi
+		elif [ -n "$stated" ]; then
+			printf '%s\\n' "$stated"
+		fi
+		printf '%s\\n' "$signature"
+	} > "$artifact"
+fi
 exit "${PR_PROVER_STUB_EXIT:-0}"
 """
+
+
+class CodexLaneRunner(FakeRunner):
+    """The loop's runner, with the reviewer lanes actually executed.
+
+    Everything else stays the double the rest of the suite uses: ``git`` is
+    serviced in-process, the relay publishes to the fake remote, and no network
+    or real agent is reachable. The one substitution removed is the reviewer
+    lane itself — the claim under proof is that the shipped adapter, launched by
+    the shipped loop with the shipped placeholders resolved, leaves an artifact
+    the shipped relay can publish, and a scripted lane whose artifact this
+    module writes cannot answer any part of that.
+    """
+
+    #: What the reviewer lanes are; anything else falls through to the double.
+    ADAPTER = REVIEWER
+
+    def run(self, argv, *, cwd=None, env=None, timeout=None, progress=None):
+        checked = validate_argv(argv)
+        if checked[0] != str(self.ADAPTER):
+            return super().run(argv, cwd=cwd, env=env, timeout=timeout, progress=progress)
+        # Recorded exactly as the double records a lane, so the ordering and
+        # credential-denial assertions read the same either way.
+        self.calls.append(Call(argv=checked, cwd=str(cwd) if cwd is not None else None))
+        self.lane_env.append((checked[0], env))
+        self.lane_budgets.append((checked[0], timeout))
+        configured = (env or {}).get("GH_CONFIG_DIR")
+        if configured is not None:
+            directory = Path(configured)
+            self.lane_gh_config.append(
+                (checked[0], configured, directory.is_dir() and not any(directory.iterdir()))
+            )
+        completed = subprocess.run(
+            list(checked),
+            cwd=str(cwd) if cwd is not None else None,
+            env=dict(env) if env is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        return CommandResult(
+            argv=checked,
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
 
 
 @unittest.skipIf(SHELL is None, "no POSIX shell available")
@@ -203,6 +315,9 @@ class ReviewerLaneHarness(AdapterHarness):
     """
 
     STUB_BODY = CODEX_STUB
+    # The adapter's own default, and the signature the shipped example config
+    # names. An artifact has to carry it or the relay refuses to publish it.
+    SIGNATURE = "Reviewed by: CodexReviewer via Hermes orchestration"
 
     def packet(
         self,
@@ -357,11 +472,28 @@ class ReviewerAdapterTests(ReviewerLaneHarness):
         self.assertEqual(result.returncode, 64)
 
     def test_a_stale_artifact_at_the_target_path_is_cleared_first(self) -> None:
-        self.stub("codex")
-        target = self.tmp / "artifact.md"
-        target.write_text("left over from a previous head\n", encoding="utf-8")
-        self.invoke(artifact_file=str(target))
-        self.assertFalse(target.exists())
+        """A file an earlier head left must never be read as this lane's work.
+
+        Both halves matter, because the lane now really writes this path. With
+        the lane writing nothing the leftover is simply gone; with the lane
+        writing, what is there afterwards is the lane's own artifact and none of
+        the previous one survives in it.
+        """
+        stale = "left over from a previous head\n"
+        with self.subTest(lane="wrote nothing"):
+            self.stub("codex")
+            target = self.tmp / "artifact.md"
+            target.write_text(stale, encoding="utf-8")
+            self.invoke(artifact_file=str(target), PR_PROVER_STUB_NO_ARTIFACT="1")
+            self.assertFalse(target.exists())
+        with self.subTest(lane="wrote its own"):
+            self.stub("codex")
+            target = self.tmp / "artifact.md"
+            target.write_text(stale, encoding="utf-8")
+            self.invoke(artifact_file=str(target))
+            body = target.read_text(encoding="utf-8")
+            self.assertNotIn("left over", body)
+            self.assertIn(f"HEAD={HEAD}", body.splitlines())
 
     def test_the_prompt_is_adversarial_and_names_the_kill_switches(self) -> None:
         """The mandate is in the shipped prompt, not only in the documentation."""
@@ -764,78 +896,70 @@ class NineBlockerRoundTripTests(ReviewerLaneHarness):
         )
 
     def test_the_artifact_for_that_review_validates_against_the_same_counts(self) -> None:
-        """One-to-one: marker, artifact, and parsed findings tell one story."""
+        """One-to-one: marker, artifact, and parsed findings tell one story.
+
+        The artifact is the one the run itself produced. Nothing here writes it
+        after the adapter returned, because an artifact the test fabricated
+        proves the validator and says nothing about whether a reviewer lane
+        leaves one behind.
+        """
         self.stub("codex")
         artifact = self.tmp / "artifact.md"
         result = self.invoke(
             artifact_file=str(artifact), PR_PROVER_STUB_FINAL=self.final_message()
         )
         verdict = parse_reviewer_verdict("A", result.stdout, expected_head=HEAD)
-        # The lane writes the artifact; the stub does not run a model, so the
-        # body is composed here in exactly the shape the prompt demands.
-        artifact.write_text(
-            "\n".join(
-                [
-                    "ROLE=reviewer-a",
-                    "RUNTIME=codex-exec/stub",
-                    f"HEAD={HEAD}",
-                    "STATUS=fail",
-                    f"BLOCKING={len(self.BLOCKERS)}",
-                    "KILL-SWITCH: diffed the test inventory; two cases had been removed",
-                    *(
-                        f"FINDING: SEVERITY=blocking ID={identifier} -- {summary}"
-                        for identifier, summary in self.BLOCKERS
-                    ),
-                    "Reviewed by: CodexReviewer via Hermes orchestration",
-                ]
-            ),
-            encoding="utf-8",
+        self.assertTrue(
+            artifact.is_file(),
+            "the lane's own execution must have created the artifact the prompt named",
         )
         prepared = read_prepared(
             artifact,
             reviewer="A",
             role="reviewer-a",
-            signature="Reviewed by: CodexReviewer via Hermes orchestration",
+            signature=self.SIGNATURE,
             head=HEAD,
             status=verdict.status,
             blocking=len(verdict.blocking),
+            findings=verdict.findings,
         )
         self.assertEqual(prepared.claim.blocking, 9)
         self.assertEqual(prepared.claim.status, "fail")
+        # And the findings are the same eleven records, not merely the same count.
+        self.assertEqual(
+            [record.id for record in prepared.findings],
+            [item.id for item in verdict.findings],
+        )
 
     def test_an_artifact_disagreeing_with_the_marker_never_reaches_the_relay(self) -> None:
         """Nine in the marker and eight in the artifact is two stories, not a typo."""
         self.stub("codex")
         artifact = self.tmp / "artifact.md"
         result = self.invoke(
-            artifact_file=str(artifact), PR_PROVER_STUB_FINAL=self.final_message()
+            artifact_file=str(artifact),
+            PR_PROVER_STUB_FINAL=self.final_message(),
+            # The lane drops one blocker from what it writes down. Its final
+            # message still declares nine, so the two surfaces disagree.
+            PR_PROVER_STUB_ARTIFACT_FINDINGS="\n".join(
+                f"FINDING: SEVERITY=blocking ID={identifier} -- {summary}"
+                for identifier, summary in self.BLOCKERS[:8]
+            ),
         )
         verdict = parse_reviewer_verdict("A", result.stdout, expected_head=HEAD)
-        artifact.write_text(
-            "\n".join(
-                [
-                    "ROLE=reviewer-a",
-                    "RUNTIME=codex-exec/stub",
-                    f"HEAD={HEAD}",
-                    "STATUS=fail",
-                    "BLOCKING=8",
-                    "KILL-SWITCH: looked for a weakened assertion",
-                    "Reviewed by: CodexReviewer via Hermes orchestration",
-                ]
-            ),
-            encoding="utf-8",
-        )
         with self.assertRaises(ReviewerRelayError) as caught:
             read_prepared(
                 artifact,
                 reviewer="A",
                 role="reviewer-a",
-                signature="Reviewed by: CodexReviewer via Hermes orchestration",
+                signature=self.SIGNATURE,
                 head=HEAD,
                 status=verdict.status,
                 blocking=len(verdict.blocking),
+                findings=verdict.findings,
             )
-        self.assertIn("BLOCKING=8", str(caught.exception))
+        self.assertIn("BLOCKING=9", str(caught.exception))
+        self.assertEqual(caught.exception.evidence["artifact_finding_count"], 8)
+        self.assertEqual(caught.exception.evidence["lane_finding_count"], 11)
 
     def test_a_malformed_or_repeated_finding_line_fails_closed(self) -> None:
         self.stub("codex")
@@ -878,123 +1002,364 @@ class NineBlockerRoundTripTests(ReviewerLaneHarness):
                     parse_reviewer_verdict("A", result.stdout, expected_head=HEAD)
 
 
-class OrderedReviewSequenceTests(ReviewerLaneHarness):
-    """Reviewer A, then Reviewer B, then the Integration Auditor — shipped path only.
+class ArtifactWriteContractTests(ReviewerLaneHarness):
+    """The scratch write, as the adapter's own contract rather than the test's.
 
-    The pilot proved its ordering with a wrapper written for the pilot, which is
-    evidence about the wrapper. This runs the three roles through
-    ``scripts/codex-reviewer.sh`` itself, reads each verdict with the shipped
-    parser and each artifact with the shipped relay-side validator, and asks the
-    questions the sequence exists to answer: did all three run, in order, bound
-    to one head, each declaring its own role.
+    Issue #13 asks for a reviewer that creates its intended artifact outside the
+    exact-head checkout without a credential, and leaves that checkout alone. All
+    three halves are properties of one run, so they are read off one run here:
+    the file exists because the lane's execution created it, it is somewhere the
+    adapter proved was outside the worktree before it granted write access to it,
+    and the worktree it was handed is untouched afterwards.
     """
 
-    ROLES = ("reviewer-a", "reviewer-b", "integration-auditor")
-    SIGNATURE = "Reviewed by: CodexReviewer via Hermes orchestration"
-
-    def lane(self, role: str, *, final: str | None = None):
-        """One reviewer lane: run the shipped adapter, then validate what it left."""
-        artifact = self.tmp / f"artifact-{role}.md"
-        result = self.invoke(
-            role=role,
-            artifact_file=str(artifact),
-            **({"PR_PROVER_STUB_FINAL": final} if final is not None else {}),
-        )
-        verdict = parse_reviewer_verdict(role, result.stdout, expected_head=HEAD)
-        artifact.write_text(
-            "\n".join(
-                [
-                    f"ROLE={role}",
-                    "RUNTIME=codex-exec/stub",
-                    f"HEAD={HEAD}",
-                    f"STATUS={verdict.status}",
-                    f"BLOCKING={len(verdict.blocking)}",
-                    f"KILL-SWITCH: {role} diffed the test inventory; nothing was removed",
-                    self.SIGNATURE,
-                ]
-            ),
-            encoding="utf-8",
-        )
-        prepared = read_prepared(
-            artifact,
-            reviewer=role,
-            role=role,
-            signature=self.SIGNATURE,
-            head=HEAD,
-            status=verdict.status,
-            blocking=len(verdict.blocking),
-        )
-        return result, verdict, prepared
-
-    def test_the_three_roles_run_in_order_and_each_binds_to_the_one_head(self) -> None:
+    def test_the_lanes_own_execution_creates_the_artifact_the_prompt_named(self) -> None:
         self.stub("codex")
-        seen = []
-        for role in self.ROLES:
-            result, verdict, prepared = self.lane(role)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(verdict.status, "pass")
-            self.assertEqual(verdict.head, HEAD)
-            # The prompt this lane was actually handed named this role, so the
-            # sequence is three distinct audits rather than one run three times.
-            self.assertIn(f"ROLE={role}", self.prompt_lines())
-            self.assertIn(f"You are {role} for an existing pull request", self.prompt())
-            seen.append(prepared.claim.role)
+        artifact = self.tmp / "scratch" / "artifact.md"
+        artifact.parent.mkdir()
+        result = self.invoke(artifact_file=str(artifact))
 
-        self.assertEqual(seen, list(self.ROLES))
-        # Three artifacts, three roles, one head, and no lane wrote another's.
-        for role in self.ROLES:
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(artifact.is_file(), "no artifact was created by the lane itself")
+        # It is the reviewer's, and it says so in the shape the relay validates.
+        body = artifact.read_text(encoding="utf-8")
+        self.assertIn("ROLE=reviewer-a", body.splitlines())
+        self.assertIn(f"HEAD={HEAD}", body.splitlines())
+        self.assertIn(self.SIGNATURE, body)
+
+    def test_the_prompt_is_what_told_the_lane_where_to_write(self) -> None:
+        """Non-vacuity: the path came out of the adapter's prompt, not the env."""
+        self.stub("codex")
+        artifact = self.tmp / "elsewhere.md"
+        self.invoke(artifact_file=str(artifact))
+        self.assertIn(f"Artifact file to write: {artifact}", self.prompt_lines())
+
+    def test_the_worktree_is_still_clean_after_the_artifact_was_written(self) -> None:
+        """The scratch write and the contamination check are not in tension."""
+        self.stub("codex")
+        artifact = self.tmp / "artifact.md"
+        self.invoke(artifact_file=str(artifact))
+        self.assertTrue(artifact.is_file())
+        self.assertEqual(
+            sorted(item.name for item in self.worktree.iterdir()),
+            [],
+            "the reviewer lane left something in the checkout it was told to read",
+        )
+
+    def test_write_access_is_granted_to_the_artifact_directory_and_nowhere_else(self) -> None:
+        self.stub("codex")
+        artifact = self.tmp / "scratch" / "artifact.md"
+        artifact.parent.mkdir()
+        self.invoke(artifact_file=str(artifact))
+
+        argv = self.stub_argv()
+        added = [argv[index + 1] for index, item in enumerate(argv[:-1]) if item == "--add-dir"]
+        self.assertEqual(added, [str(artifact.parent)])
+
+    def test_an_artifact_path_inside_the_worktree_is_refused_before_a_model_runs(self) -> None:
+        """Granting write access inside the checkout would blind the next check.
+
+        A lane's own scratch output landing in the reviewed tree is
+        indistinguishable from the contamination the post-lane check exists to
+        catch, so the adapter refuses the configuration rather than spending a
+        model and producing evidence nobody can interpret.
+        """
+        self.stub("codex")
+        inside = self.worktree / "artifact.md"
+        result = self.invoke(artifact_file=str(inside))
+
+        self.assertEqual(result.returncode, 66)
+        self.assertIn("inside the reviewed worktree", result.stderr)
+        self.assertFalse(self.argv_log.exists(), "codex was launched anyway")
+
+    def test_a_missing_artifact_directory_is_refused_before_a_model_runs(self) -> None:
+        self.stub("codex")
+        result = self.invoke(artifact_file=str(self.tmp / "no-such-dir" / "artifact.md"))
+
+        self.assertEqual(result.returncode, 66)
+        self.assertIn("artifact directory does not exist", result.stderr)
+        self.assertFalse(self.argv_log.exists(), "codex was launched anyway")
+
+
+class PinnedCodexRuntimeTests(ReviewerLaneHarness):
+    """What the shipped adapter actually hands the installed CLI.
+
+    The artifact this lane publishes declares which runtime reviewed the head.
+    That declaration is only worth something if the launch pins it, so the argv
+    is read back off a real run rather than off the source: a flag can be
+    present in the file and still not reach the process.
+    """
+
+    def test_the_launch_pins_the_runtime_the_artifact_will_declare(self) -> None:
+        self.stub("codex")
+        self.invoke()
+        argv = self.stub_argv()
+
+        self.assertEqual(argv[0], "exec")
+        self.assertIn("--ephemeral", argv)
+        for flag, value in (
+            ("--model", "gpt-5.6-sol"),
+            ("--config", "model_reasoning_effort=medium"),
+            ("--sandbox", "workspace-write"),
+        ):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, argv)
+                self.assertEqual(argv[argv.index(flag) + 1], value)
+
+    def test_no_session_resuming_flag_is_ever_passed(self) -> None:
+        """A cycle is one exact-head audit; nothing may carry into the next."""
+        self.stub("codex")
+        self.invoke()
+        argv = self.stub_argv()
+        for forbidden in ("--resume", "--continue", "-c", "--session", "last"):
+            with self.subTest(flag=forbidden):
+                self.assertNotIn(forbidden, argv)
+
+    def test_the_prompt_is_the_last_argument_and_the_verdict_channel_is_isolated(self) -> None:
+        """The pinned flags must not have displaced either of the two channels."""
+        self.stub("codex")
+        self.invoke()
+        argv = self.stub_argv()
+
+        self.assertIn("--output-last-message", argv)
+        named = Path(argv[argv.index("--output-last-message") + 1])
+        self.assertFalse(named.is_relative_to(self.worktree))
+        self.assertNotEqual(named, Path(self.tmp / "artifact.md"))
+        # The prompt is still the final argument: the argv log is line-oriented
+        # and the prompt is many lines, so its last line is the last line there.
+        prompt = self.prompt_log.read_text(encoding="utf-8")
+        self.assertTrue(prompt.startswith("You are reviewer-a for an existing pull request"))
+        self.assertEqual(argv[-1], prompt.splitlines()[-1])
+
+
+class OrderedRelayLifecycleTests(LoopHarness):
+    """The three roles, in order, through the shipped adapter *and* the real loop.
+
+    This is the composed claim, so nothing in it stands in for a step of itself.
+    The reviewer lanes are ``scripts/codex-reviewer.sh`` really executed, exactly
+    as the shipped example config names it. Behind them the Codex-shaped stub
+    writes the external artifact its prompt named before it returns, the way the
+    CLI does. What happens to that artifact afterwards is the loop's own
+    business — its configured relay command, its pre-relay attribution snapshot,
+    its GitHub readback — in the loop's own order.
+
+    A local ``for`` loop over three adapter calls, with the artifacts written by
+    the test and ``read_prepared`` called directly, proves the adapter three
+    times and the validator once. It cannot prove that the *loop* runs the three
+    required roles in the required order, relays what each one actually wrote, or
+    reads it back; and those are what the pilot's undocumented wrapper stood in
+    for.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.codex = self.bin / "codex"
+        self.codex.write_text(CODEX_STUB, encoding="utf-8")
+        self.codex.chmod(0o755)
+        self.argv_logs: dict[str, Path] = {}
+        self.prompt_logs: dict[str, Path] = {}
+        # The reviewer lanes are real subprocesses; everything else — git, the
+        # relay, the remote — stays the deterministic double it is everywhere
+        # else in this suite.
+        self.runner = CodexLaneRunner(self.remote, self.script)
+
+    def lanes(self, **stub_env: dict[str, str]) -> list[dict[str, object]]:
+        """The three shipped reviewer lanes, modelled on ``run.example.json``.
+
+        ``stub_env`` is keyed by role, and is how a test makes one lane behave
+        like a defective reviewer without touching the other two.
+        """
+        lanes = []
+        for name, role, _program in REVIEWER_LANES:
+            self.argv_logs[role] = self.tmp / f"argv-{role}.txt"
+            self.prompt_logs[role] = self.tmp / f"prompt-{role}.txt"
+            lane = reviewer_lane(name, role, str(REVIEWER))
+            lane["argv"] = [
+                str(REVIEWER),
+                "--role", "{role}",
+                "--repo", "{repo}",
+                "--pr", "{pr}",
+                "--head", "{head}",
+                "--base", "{base}",
+                "--worktree", "{worktree}",
+                "--artifact-file", "{artifact_file}",
+                "--evidence-packet", "{evidence_packet}",
+                "--signature", REVIEWER_SIGNATURE,
+            ]
+            lane["env"] = {
+                "PR_PROVER_CODEX": str(self.codex),
+                "PR_PROVER_STUB_ARGV": str(self.argv_logs[role]),
+                "PR_PROVER_STUB_PROMPT": str(self.prompt_logs[role]),
+                "PR_PROVER_STUB_HEAD": HEAD_A,
+                **stub_env.get(role.replace("-", "_"), {}),
+            }
+            lanes.append(lane)
+        return lanes
+
+    def prompt_lines(self, role: str) -> list[str]:
+        return [
+            line.strip()
+            for line in self.prompt_logs[role].read_text(encoding="utf-8").splitlines()
+        ]
+
+    def published(self) -> list[str]:
+        return [
+            comment.body
+            for comment in self.remote.comments
+            if comment.author == REVIEWER_LOGIN
+        ]
+
+    def test_the_loop_runs_the_three_roles_in_order_through_the_shipped_adapter(self) -> None:
+        loop = self.build(reviewers=self.lanes())
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY, result.reason)
+        self.assertEqual(result.head, HEAD_A)
+        self.assertEqual([verdict.status for verdict in result.verdicts], ["pass"] * 3)
+        # The order is the loop's, read off the transport ledger it built while
+        # running rather than off the order this test happened to configure.
+        self.assertEqual(
+            [item["role"] for item in as_dict(result)["transport"]],
+            ["reviewer-a", "reviewer-b", "integration-auditor"],
+        )
+        # Adapter, then its relay, three times over: the shipped alternation.
+        launched = [Path(call.argv[0]).name for call in self.runner.calls if call.argv[0] != "git"]
+        self.assertEqual(launched, ["codex-reviewer.sh", RELAY] * 3)
+
+    def test_each_published_artifact_is_the_file_that_lanes_own_run_created(self) -> None:
+        """The relay published a reviewer's bytes, not bytes the test supplied."""
+        loop = self.build(reviewers=self.lanes())
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY, result.reason)
+        published = self.published()
+        self.assertEqual(len(published), 3)
+        for role, body in zip(("reviewer-a", "reviewer-b", "integration-auditor"), published):
             with self.subTest(role=role):
-                body = (self.tmp / f"artifact-{role}.md").read_text(encoding="utf-8")
-                self.assertIn(f"ROLE={role}", body.splitlines())
-                self.assertEqual(
-                    [line for line in body.splitlines() if line.startswith("HEAD=")],
-                    [f"HEAD={HEAD}"],
-                )
+                claim = parse_artifact(body).claim
+                self.assertIsNotNone(claim, body)
+                self.assertEqual(claim.role, role)
+                self.assertEqual(claim.head, HEAD_A)
+                # RUNTIME= is the Codex-shaped execution's own, so an artifact
+                # written by anything but that lane would not say this.
+                self.assertEqual(claim.runtime, "codex-exec/stub")
+                self.assertTrue(claim.kill_switches)
+                # And the prompt that produced it was this role's prompt.
+                self.assertIn(f"ROLE={role}", self.prompt_lines(role))
 
-    def test_a_role_declaring_another_lanes_role_stops_before_the_next_one(self) -> None:
-        """The auditor's artifact cannot be Reviewer B's, however clean it reads."""
-        self.stub("codex")
-        artifact = self.tmp / "artifact-auditor.md"
-        result = self.invoke(role="integration-auditor", artifact_file=str(artifact))
-        verdict = parse_reviewer_verdict("integration-auditor", result.stdout, expected_head=HEAD)
-        artifact.write_text(
-            "\n".join(
-                [
-                    "ROLE=reviewer-b",
-                    "RUNTIME=codex-exec/stub",
-                    f"HEAD={HEAD}",
-                    "STATUS=pass",
-                    "BLOCKING=0",
-                    "KILL-SWITCH: looked for a shrunken scope",
-                    self.SIGNATURE,
-                ]
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaises(ReviewerRelayError) as caught:
-            read_prepared(
-                artifact,
-                reviewer="integration-auditor",
-                role="integration-auditor",
-                signature=self.SIGNATURE,
-                head=HEAD,
-                status=verdict.status,
-                blocking=len(verdict.blocking),
+    def test_a_lanes_blockers_survive_the_whole_shipped_path_to_the_pr(self) -> None:
+        """A real review has findings, and the artifact has to carry them.
+
+        The middle lane fails, so this also pins the ordering consequence: the
+        auditor still runs, the head is blocked rather than merge-ready, and the
+        finding the artifact states is the one the verdict parsed.
+        """
+        blocker = "FINDING: SEVERITY=blocking ID=narrowed-assertion -- the assertion no longer trips"
+        loop = self.build(
+            reviewers=self.lanes(
+                reviewer_b={
+                    "PR_PROVER_STUB_FINAL": f"{blocker}\nDONE: STATUS=fail BLOCKING=1 HEAD={HEAD_A}"
+                }
             )
-        self.assertIn("ROLE=reviewer-b", str(caught.exception))
-
-    def test_a_lane_that_found_blockers_carries_them_to_its_own_artifact(self) -> None:
-        """A failing middle lane is still a complete, readable, bound result."""
-        self.stub("codex")
-        final = (
-            "FINDING: SEVERITY=blocking ID=narrowed-assertion -- the assertion no longer trips\n"
-            f"DONE: STATUS=fail BLOCKING=1 HEAD={HEAD}"
         )
-        result, verdict, prepared = self.lane("reviewer-b", final=final)
-        self.assertEqual(verdict.status, "fail")
-        self.assertEqual([item.id for item in verdict.blocking], ["narrowed-assertion"])
-        self.assertEqual(prepared.claim.status, "fail")
-        self.assertEqual(prepared.claim.blocking, 1)
+        # The builder is not the subject here: it is scripted to fail without
+        # pushing, so the run ends on this exact head with the review evidence
+        # this test is about still being the reported evidence.
+        for _ in range(MAX_ATTEMPTS):
+            self.script.add(
+                "lane-builder",
+                builder_output(HEAD_A, addressed=["narrowed-assertion"], status="failure"),
+                returncode=1,
+            )
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(
+            [verdict.status for verdict in result.verdicts], ["pass", "fail", "pass"]
+        )
+        self.assertEqual(
+            [item.finding.id for item in result.classification.blocking], ["narrowed-assertion"]
+        )
+        reviewer_b = self.published()[1]
+        self.assertIn(blocker, reviewer_b.splitlines())
+        self.assertIn("BLOCKING=1", reviewer_b.splitlines())
+
+    def test_the_lanes_ran_credential_free_and_left_their_checkouts_alone(self) -> None:
+        """The two invariants the scratch write is most likely to have cost.
+
+        The adapter refuses to run at all without an empty run-owned ``gh``
+        configuration directory, and the loop refuses a lane that dirtied the
+        checkout it was handed — so a run that reached ``merge-ready`` through
+        three real adapter executions has already satisfied both. Asserted
+        anyway, because "the run passed" is not a statement about *which*
+        guarantees held.
+        """
+        loop = self.build(reviewers=self.lanes())
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY, result.reason)
+        adapter = [
+            (path, empty)
+            for program, path, empty in self.runner.lane_gh_config
+            if program == str(REVIEWER)
+        ]
+        self.assertEqual(len(adapter), 3)
+        for path, empty in adapter:
+            with self.subTest(gh_config=path):
+                self.assertTrue(empty, "the lane could reach a stored gh login")
+        for program, env in self.runner.lane_env:
+            if program != str(REVIEWER):
+                continue
+            for name in CREDENTIAL_ENV:
+                with self.subTest(variable=name):
+                    self.assertNotIn(name, env or {})
+        # Every lane worktree was removed after being proved clean, which is the
+        # only way this run could have got here.
+        self.assertEqual(sorted(self.config.worktree_root.iterdir()), [])
+
+    def test_a_lane_that_writes_no_artifact_stops_the_run_before_any_relay(self) -> None:
+        """The failure the fabricated-artifact proof could not have detected."""
+        loop = self.build(reviewers=self.lanes(reviewer_a={"PR_PROVER_STUB_NO_ARTIFACT": "1"}))
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "relay-failure")
+        self.assertEqual(self.published(), [], "an artifact was published anyway")
+        self.assertNotIn(RELAY, [call.argv[0] for call in self.runner.calls])
+
+    def test_an_artifact_declaring_blockers_it_does_not_state_never_publishes(self) -> None:
+        """The frozen reproducer, through everything that ships.
+
+        ``STATUS=fail``, ``BLOCKING=1``, and no ``FINDING:`` line at all. Every
+        declaration in it is well-formed and agrees with the lane's own marker;
+        what is missing is the record the Integration Auditor and Karan are
+        expected to reconcile, and that is enough to stop the run.
+        """
+        loop = self.build(
+            reviewers=self.lanes(
+                reviewer_a={
+                    "PR_PROVER_STUB_FINAL": (
+                        "FINDING: SEVERITY=blocking ID=deleted-coverage -- the failing test "
+                        f"was removed\nDONE: STATUS=fail BLOCKING=1 HEAD={HEAD_A}"
+                    ),
+                    "PR_PROVER_STUB_ARTIFACT_FINDINGS": "",
+                }
+            )
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "relay-failure")
+        self.assertEqual(self.published(), [])
+        self.assertNotIn(RELAY, [call.argv[0] for call in self.runner.calls])
 
 
 class BuilderAdapterTests(AdapterHarness):

@@ -35,6 +35,7 @@ from pr_prover.commands import (
     validate_argv,
 )
 from pr_prover.config import RunConfig
+from pr_prover.errors import MalformedVerdict
 from pr_prover.findings import Finding, FindingLocation, FindingProvenance
 from pr_prover.github import (
     CheckRun,
@@ -46,6 +47,7 @@ from pr_prover.github import (
     ReviewEvidence,
     ReviewThread,
 )
+from pr_prover.verdicts import finding_records
 
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
@@ -82,9 +84,16 @@ def reviewer_artifact(
     runtime: str = REVIEWER_RUNTIME,
     signature: str = REVIEWER_SIGNATURE,
     kill_switches: Sequence[str] = ("tried to find a weakened test; found none",),
+    findings: Sequence[tuple[str, str, str]] = (),
     extra: str = "",
 ) -> str:
-    """One conforming reviewer artifact body."""
+    """One conforming reviewer artifact body.
+
+    ``findings`` are the same ``(severity, id, summary)`` triples
+    :func:`reviewer_output` builds a lane's final message from, written in the
+    grammar the parser reads. A real artifact restates the findings its lane
+    reported, and the relay holds it to exactly that, so the double does too.
+    """
     lines = [
         f"ROLE={role}",
         f"RUNTIME={runtime}",
@@ -92,6 +101,10 @@ def reviewer_artifact(
         f"STATUS={status}",
         f"BLOCKING={blocking}",
         *(f"KILL-SWITCH: {entry}" for entry in kill_switches),
+        *(
+            f"FINDING: SEVERITY={severity} ID={identifier} -- {summary}"
+            for severity, identifier, summary in findings
+        ),
         signature,
     ]
     if extra:
@@ -632,6 +645,7 @@ class FakeRunner:
                 head=_flag(argv, "--head"),
                 status=status,
                 blocking=blocking,
+                findings=_findings_of(result.stdout),
             )
         if body is None:
             return
@@ -741,6 +755,21 @@ def _flag(argv: Sequence[str], name: str) -> str:
         if item == name:
             return argv[index + 1]
     return ""
+
+
+def _findings_of(stdout: str) -> tuple[tuple[str, str, str], ...]:
+    """The findings a lane's marker declared, read with the shipped grammar.
+
+    Tolerant on purpose. A test that scripts a deliberately malformed lane is
+    making a point about the parser the *loop* runs, and this double must not
+    raise before the loop ever gets there — so an output the grammar refuses
+    contributes no artifact findings and the loop stops where it should.
+    """
+    try:
+        records = finding_records(stdout, lane="scripted reviewer lane")
+    except MalformedVerdict:
+        return ()
+    return tuple((record.severity, record.id, record.summary) for record in records)
 
 
 def _verdict_of(stdout: str) -> tuple[str, int]:

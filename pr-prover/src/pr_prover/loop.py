@@ -786,6 +786,7 @@ class ProverLoop:
                     cwd=worktree,
                     status=verdict.status,
                     blocking=blocking,
+                    findings=verdict.findings,
                 )
             else:
                 # A self-publishing lane prepares and publishes in one step this
@@ -817,16 +818,17 @@ class ProverLoop:
         cwd: Path,
         status: str,
         blocking: int,
+        findings: Sequence[Finding],
     ) -> frozenset[str]:
         """Publish a credential-free reviewer's prepared artifact, once it validates.
 
         This is the whole transport half of the lifecycle. The file the lane
         wrote is held to this reviewer's signature, role line, runtime, declared
-        status and blocking count, and this exact head before the configured
-        relay command is allowed to post it. An artifact that would fail
-        readback therefore never reaches GitHub at all, and a relay that cannot
-        publish stops the run rather than leaving the next step to discover an
-        absence it cannot explain.
+        status and blocking count, the findings the lane actually reported, and
+        this exact head before the configured relay command is allowed to post
+        it. An artifact that would fail readback therefore never reaches GitHub
+        at all, and a relay that cannot publish stops the run rather than
+        leaving the next step to discover an absence it cannot explain.
 
         What is returned is the artifact-id snapshot taken *immediately before*
         the relay ran, and it is the set readback attributes against. The
@@ -852,6 +854,7 @@ class ProverLoop:
             head=head,
             status=status,
             blocking=blocking,
+            findings=findings,
         )
         self._mark_transport(prepared=True)
         self._event(

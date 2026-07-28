@@ -27,6 +27,11 @@
 # failed — but it is re-emitted on stderr with every line prefixed, so no line
 # of it can begin with a marker keyword and none of it can be read as a verdict.
 #
+# The rest of the run is pinned rather than inherited: ephemeral execution, the
+# reviewer model, its reasoning effort, the write scope, and write access to the
+# external artifact directory are all stated at the launch below, because each
+# one is a property the published artifact makes a claim about.
+#
 # Set PR_PROVER_CODEX to invoke a Codex binary that is not on PATH as "codex".
 set -eu
 
@@ -116,6 +121,32 @@ command -v "$codex" >/dev/null 2>&1 || {
 	echo "$0: no Codex CLI found (looked for '$codex'; set PR_PROVER_CODEX)" >&2
 	exit 127
 }
+
+# The one file this lane is meant to leave behind, and the directory Codex has
+# to be granted write access to in order to create it. Both are checked before
+# a model is spent: a lane told to write somewhere that does not exist produces
+# a review nobody can relay, and a lane granted write access *inside* the
+# checkout would make its own scratch output indistinguishable from the
+# contamination the post-lane check exists to catch.
+artifact_dir=$(dirname "$artifact_file")
+[ -d "$artifact_dir" ] || {
+	echo "$0: the artifact directory does not exist: $artifact_dir" >&2
+	exit 66
+}
+worktree_real=$(cd "$worktree" && pwd -P) || {
+	echo "$0: could not resolve the worktree path: $worktree" >&2
+	exit 66
+}
+artifact_dir_real=$(cd "$artifact_dir" && pwd -P) || {
+	echo "$0: could not resolve the artifact directory: $artifact_dir" >&2
+	exit 66
+}
+case "$artifact_dir_real" in
+"$worktree_real" | "$worktree_real"/*)
+	echo "$0: the artifact path is inside the reviewed worktree ($artifact_file); this lane's own output must land outside the checkout it is checked for having modified" >&2
+	exit 66
+	;;
+esac
 
 rm -f "$artifact_file"
 
@@ -303,8 +334,43 @@ cd "$worktree"
 # lifted across the call on purpose: a reviewer that found blockers is entitled
 # to exit nonzero, and its verdict still has to be read and reported rather than
 # aborting the adapter here.
+#
+# Every property of the run this lane's evidence depends on is stated here
+# rather than left to whatever default happens to be in effect. "Which model
+# reviewed this head, under how much reasoning, with write access to what, and
+# did anything survive the run" are all claims the artifact makes, and a launch
+# that does not pin them lets the artifact declare a runtime the process never
+# had:
+#
+#   --ephemeral   nothing is persisted. A run is one exact-head audit, and the
+#                 next cycle starts from the live PR rather than from a session
+#                 that remembers the last one.
+#   --model       the reviewer runtime this repository reviews with. The
+#                 artifact's RUNTIME= line is then a property of the launch.
+#   --config      reasoning effort, pinned for the same reason as the model. The
+#                 value is passed bare, exactly as written, because it is one of
+#                 the effort names the CLI accepts as a scalar; nothing here adds
+#                 quoting the shell would strip anyway.
+#   --sandbox     workspace-write, because a read-only lane cannot write the one
+#                 artifact it is being asked for. This is not a security
+#                 boundary and is not relied on as one: what proves the checkout
+#                 was left alone is pr-prover's post-lane contamination check.
+#   --add-dir     the artifact directory, which is outside the worktree — so the
+#                 file this lane is meant to leave behind is one it is actually
+#                 permitted to create, and no other location is added.
+#
+# Ambient user configuration is deliberately still loaded: this is a trusted
+# inherited session, the flags above override the settings that matter, and
+# synthesizing an environment is not this tool's business.
 set +e
-"$codex" exec --output-last-message "$final_message" "$prompt" >"$diagnostics" 2>&1
+"$codex" exec \
+	--ephemeral \
+	--model gpt-5.6-sol \
+	--config model_reasoning_effort=medium \
+	--sandbox workspace-write \
+	--add-dir "$artifact_dir" \
+	--output-last-message "$final_message" \
+	"$prompt" >"$diagnostics" 2>&1
 codex_status=$?
 set -e
 
