@@ -39,6 +39,7 @@ from pr_prover.commands import (
 )
 from pr_prover.config import RunConfig
 from pr_prover.errors import MalformedVerdict
+from pr_prover.feedback import publication_evidence
 from pr_prover.findings import Finding, FindingLocation, FindingProvenance
 from pr_prover.github import (
     CheckRun,
@@ -301,12 +302,22 @@ class FakeRemote:
             cursor = self.parents.get(cursor)
         return False
 
+    def next_comment_identifier(self) -> str:
+        """The immutable id the next comment recorded here will carry.
+
+        A test that has to name a post *before* the run publishes it — an
+        operator pinning an id a lane has not written yet — asks the double
+        rather than typing a literal beside it, so the two cannot drift apart
+        into a test that quietly proves nothing.
+        """
+        return f"IC_comment{self._next_comment_id}"
+
     def comment(
         self, body: str, *, author: str = BUILDER_LOGIN, created_at: str | None = None
     ) -> Comment:
         """Append a comment with a fresh, never-reused GitHub-style node id."""
         posted = Comment(
-            identifier=f"IC_comment{self._next_comment_id}",
+            identifier=self.next_comment_identifier(),
             author=author,
             body=body,
             created_at=self._stamp() if created_at is None else created_at,
@@ -866,6 +877,7 @@ def make_config(
     lock_file: str | None = None,
     reviewers: Sequence[Mapping[str, object]] | None = None,
     governing_issues: Sequence[int] = (GOVERNING_ISSUE,),
+    operator_acknowledgements: Sequence[Mapping[str, object]] | None = None,
 ) -> RunConfig:
     payload: dict[str, object] = {
         "schema_version": 2,
@@ -893,7 +905,47 @@ def make_config(
     }
     if branch is None:
         payload.pop("branch")
+    # Absent unless a test pins something, so every other config in this suite
+    # keeps proving the default publisher denial rather than a relaxed one.
+    if operator_acknowledgements is not None:
+        payload["operator_acknowledgements"] = list(operator_acknowledgements)
     return RunConfig.from_mapping(payload, base_dir=tmp)
+
+
+def operator_pin(
+    post: Comment | str, *, body: str | None = None, state: str | None = None
+) -> dict[str, str]:
+    """One ``operator_acknowledgements`` entry, as an operator would write it.
+
+    A pin is an exact immutable id *and* the publication evidence for the body
+    that id held when the operator read it, so the natural way to write one in a
+    test is to hand over the post itself and let the digest be derived from it —
+    which is also what stops a test from pinning a body nobody ever wrote.
+
+    ``body``/``state`` override what was authorized, for the rows that need the
+    pinned body and the current body to differ: that is exactly the shape of a
+    post edited after the operator read it. A bare id pins something no post on
+    the PR holds, which is how "this id names nothing" is written.
+    """
+    if isinstance(post, Comment):
+        identifier = post.identifier
+        authorized_body = post.body if body is None else body
+        authorized_state = post.state if state is None else state
+    else:
+        identifier = post
+        authorized_body = "" if body is None else body
+        authorized_state = "" if state is None else state
+    return {
+        "id": identifier,
+        "body_evidence": publication_evidence(
+            Comment(
+                identifier=identifier,
+                author="",
+                body=authorized_body,
+                state=authorized_state,
+            )
+        ),
+    }
 
 
 def make_source_repo(tmp: Path) -> Path:

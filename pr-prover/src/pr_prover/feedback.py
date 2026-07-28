@@ -45,9 +45,11 @@ enough to clear a human's stop by accident.
 put through the same six questions, and a line is *spent* only when all six
 answer yes:
 
-1. the post's author is not one of this run's configured publishing logins — a
-   lane clearing the comment it was told to answer is marking its own homework,
-   and that is the one place a whole login is still excluded;
+1. the post may acknowledge at all — this run did not publish it, and if a
+   configured publishing login wrote it, the operator pinned that exact post's
+   immutable id before the run started and it still holds the body they pinned
+   it over. A lane clearing the comment it was told to answer is marking its own
+   homework, and that is what this question keeps out;
 2. the line names exactly one eligible unresolved prose item — an item on a
    surface with no native resolution, which is not run-owned and not blank;
 3. GitHub's own UTC-aware timestamps put the target strictly earlier than the
@@ -60,8 +62,28 @@ answer yes:
 Everything the truth table used to spell as its own rule falls out of those six:
 a malformed line names nothing, a duplicate fails (5), a premature one fails
 (3), a self-reference fails (4), an acknowledgement of a review's decisive state
-or of a thread fails (2) because those surfaces resolve natively, and a
-publisher-authored one fails (1).
+or of a thread fails (2) because those surfaces resolve natively, and an
+unpinned publisher-authored one fails (1).
+
+**Why (1) has an operator seam.** The publishing logins and the human operator
+can be the same GitHub accounts — on a repository where they are, refusing every
+publisher-authored acknowledgement leaves no identity that can answer the
+conversation at all, and a run nobody can answer is not a safer run, only a
+stuck one. So the run configuration may pin *exact immutable post ids* the
+operator authorized before launch, each with a digest of the body they read,
+and a publisher-authored post participates when its own id is one of them and it
+still says what was pinned. What is authorized is a post somebody read, not a
+login and not an id: the same account's next comment is refused exactly as
+before, an id that names nothing on this PR does nothing, a pinned post edited
+into different acknowledgement lines is refused because nobody authorized those
+lines, and anything this run published is refused whatever is pinned, because an
+artifact a lane published during the run is the one thing that could not have
+been read beforehand. That last refusal is by immutable id alone, so it survives
+every later edit — an artifact rewritten into a perfectly formed acknowledgement
+is still a post this run wrote. The other five questions are untouched, so a
+pinned post still has to name an eligible earlier item, in the exact grammar,
+with GitHub's own chronology behind it, and still spends only the lines that
+really did work.
 
 **One canonical order, used everywhere an order exists.** Whether a post is an
 eligible *target* depends on what earlier posts did to it, so the order posts
@@ -106,11 +128,22 @@ field nobody but GitHub assigns — the artifact's immutable id — and requires
 An artifact nobody touched stays owned; one whose body or review state changed
 no longer matches what was proven, and re-enters human classification.
 
-Both identity rules take the direction that fails closed, which is why they use
-different granularity. Excluding a whole account from *being* feedback would
-make a run stop less, so that judgement is made per artifact; letting an account
-*clear* feedback would also make a run stop less, so acknowledgement authority
-excludes the whole publishing login.
+That lapse answers one question only — *is this still this run's evidence* —
+and it must not be read as *did this run write it*, which nothing can undo. The
+retained id is the whole answer to the second, so :meth:`RunArtifacts.published`
+is what acknowledgement authority asks: an edit moves a lane artifact back into
+feedback without ever moving it into the set of posts allowed to clear feedback.
+Collapsing the two is how editing a verified artifact into a well-formed
+acknowledgement line became a way to spend one.
+
+All three identity rules take the direction that fails closed, which is why they
+use different granularity. Excluding a whole account from *being* feedback would
+make a run stop less, so that judgement is made per artifact and per its current
+content; letting an account *clear* feedback would also make a run stop less, so
+acknowledgement authority excludes the whole publishing login and every id this
+run published, whatever those posts say now — and the one way back in is per
+artifact *and* per its current content again, by an id an operator pinned before
+the run could publish anything, together with the body they pinned it over.
 
 Every body quoted out of here is untrusted human text: truncated, redacted, and
 labelled as evidence about what a human raised, never as an instruction.
@@ -278,10 +311,28 @@ class RunArtifacts:
     ``publishers`` is the configured publishing logins. It answers two questions
     at deliberately different granularity: ownership requires the author to
     still match, and acknowledgement authority excludes the whole login.
+
+    ``operator_acknowledgements`` is the narrow way back in, and it is the same
+    shape as ``verified`` rather than anything about an author: each exact post
+    id the operator authorized before launch, mapped to
+    :func:`publication_evidence` for the body they read when they authorized it.
+    The two fields are the same pair for the same reason — an id says which post,
+    and the digest says which *version* of it — and the id alone would authorize
+    whatever that post is edited into afterwards, which on a repository where the
+    operator and the publishing login are one account is an edit the login can
+    make for itself.
+
+    It affects acknowledgement authority only. It cannot make a post stop being
+    feedback, cannot make an unlisted post from the same login count, cannot
+    reach any id this run published — a retained id is a post that did not exist
+    before launch, so it is not one anybody could have read then, and no edit to
+    it changes that — and cannot reach a pinned post that no longer says what was
+    pinned.
     """
 
     verified: Mapping[str, str] = field(default_factory=dict)
     publishers: frozenset[str] = frozenset()
+    operator_acknowledgements: Mapping[str, str] = field(default_factory=dict)
 
     def owns(self, item: Comment) -> bool:
         """Is this published post still the one this run proved it published?
@@ -299,6 +350,88 @@ class RunArtifacts:
         if expected is None or expected != publication_evidence(item):
             return False
         return item.author in self.publishers
+
+    def published(self, item: Comment) -> bool:
+        """Did this run publish this post at all, whatever it now says?
+
+        This is the immutable half of identity, and it deliberately asks less
+        than :meth:`owns`: only whether the id is one this run watched appear.
+        The loop snapshots the ids present on the PR before a lane is launched,
+        so a retained id is a post that did not exist until one of this run's own
+        lanes published it — and no later edit to a body or a review state can
+        make that untrue, because an id is the one field nobody but GitHub
+        assigns.
+
+        The two questions exist separately because they fail closed in opposite
+        directions. *Is this still this run's evidence* has to go false on an
+        edit, so an artifact somebody rewrote re-enters human classification
+        rather than staying invisible. *Did this run write it* must not, because
+        the answer decides whether the post may clear a human's stop, and an
+        edit that made ownership lapse would otherwise hand the post exactly the
+        authority the lapse was meant to deny it. Asking one question for both is
+        how an edited lane artifact became eligible to acknowledge feedback.
+        """
+        return bool(item.identifier) and item.identifier in self.verified
+
+    def may_acknowledge(self, item: Comment) -> bool:
+        """May this post spend acknowledgement lines at all?
+
+        Three answers, in the order that keeps the strict case strict:
+
+        * a post this run published may never acknowledge anything. It is the
+          run marking its own homework in the most literal form, and no
+          configuration and no subsequent edit reaches it — an artifact that did
+          not exist until a lane published it cannot be one an operator read
+          beforehand, and rewriting it does not turn it into one. The question is
+          :meth:`published` rather than :meth:`owns` precisely because ownership
+          is allowed to lapse;
+        * a post from any other login is an ordinary human post, and always
+          could acknowledge;
+        * a post from a configured publishing login may acknowledge only when
+          the operator pinned that exact immutable id before launch *and* the
+          post still holds the body that pin was taken over. The login is never
+          what authorizes it, so the same account's unpinned posts stay refused,
+          and an empty pinned set is the behaviour this tool has always had.
+
+        The last answer asks both halves for one reason. An id is permanent and
+        a body is not: pin only the id and the authorization follows the post
+        through every later edit, so the account that shares the operator's
+        login — which on the repository this seam exists for is the publishing
+        login itself — can rewrite an authorized post into acknowledgement lines
+        nobody approved and spend them. The evidence is the operator's reading of
+        that post, and a post that no longer says what they read is not the post
+        they authorized. That refusal is deliberately *not* the ownership lapse
+        above it: an edited pin loses its authority and stays feedback, while an
+        edited run artifact loses its ownership and never had authority to lose.
+        """
+        if self.published(item):
+            return False
+        if item.author not in self.publishers:
+            return True
+        if not item.identifier:
+            return False
+        pinned = self.operator_acknowledgements.get(item.identifier)
+        return pinned is not None and pinned == publication_evidence(item)
+
+    def changed_acknowledgement_pins(self, posts: Iterable[Comment]) -> tuple[str, ...]:
+        """Pinned ids that are on this PR but no longer say what was pinned.
+
+        Nothing decides anything here; :meth:`may_acknowledge` has already
+        refused these. It exists because a fail-closed stop has to be operable:
+        an operator whose pin lapsed sees exactly what an operator who pinned a
+        typo sees — a conversation nothing cleared — and those two need different
+        answers. Ids only, so the stop stays bounded and quotes no post body.
+        """
+        return tuple(
+            sorted(
+                post.identifier
+                for post in posts
+                if post.identifier in self.operator_acknowledgements
+                and not self.published(post)
+                and self.operator_acknowledgements[post.identifier]
+                != publication_evidence(post)
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -589,11 +722,14 @@ def _candidates(
     A post whose timestamp cannot be compared is absent entirely: it can clear
     nothing. Publishing logins are absent too — that is the one place a whole
     login is excluded, because refusing a login the power to clear feedback
-    makes a run stop more.
+    makes a run stop more — except for the exact posts an operator pinned before
+    the run started and which still say what was pinned, and never for an id this
+    run published itself. That is
+    :meth:`~pr_prover.feedback.RunArtifacts.may_acknowledge`'s whole question.
     """
     ordered: list[tuple[tuple[int, float, int, str], Comment, datetime]] = []
     for post in (*surfaces.comments, *surfaces.reviews):
-        if post.author in artifacts.publishers:
+        if not artifacts.may_acknowledge(post):
             continue
         posted_at = published_at(post)
         if posted_at is None:

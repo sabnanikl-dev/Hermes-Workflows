@@ -70,6 +70,42 @@ is posted, so on their own they prove only that somebody read the PR; the login
 is the part an arbitrary account cannot supply. There is no "any author will do"
 configuration to fall into.
 
+``operator_acknowledgements`` is the one optional, strict seam through which a
+human operator can pin acknowledgement posts *before* a run starts. It is a list
+of exact immutable GitHub artifact ids, each paired with a digest of the exact
+body that id held when the operator read it — no logins, no patterns, no bearer
+tokens, no third identity. Its only effect is on :mod:`pr_prover.feedback`: a
+post whose author is one of this run's own publishing logins may spend
+acknowledgement lines when, and only when, its own immutable id is listed here
+*and* the post still says what the pinned digest was taken over. Absent or
+empty, every publisher-authored post is refused acknowledgement authority
+exactly as before.
+
+It exists because the publishing logins and the human operator can be the same
+GitHub accounts. When they are, the fail-closed rule that a lane may not clear
+the feedback aimed at it leaves the operator with no identity that can
+acknowledge anything, and a run that cannot be answered is not safer than one
+that can — it is just stuck. Pinning is the operator saying "I read that exact
+post, and I authorize what it says", which is a decision made on a post that
+already exists rather than a login granted standing authority.
+
+The id alone cannot carry that decision. A GitHub post keeps its id through
+every later edit, so an authorization stored as an id is an authorization of
+whatever the post is changed to say afterwards — and on the repository this seam
+exists for, the account that can make that edit is the publishing login itself.
+So each pin carries ``body_evidence``: the digest
+:func:`pr_prover.feedback.publication_evidence` takes over the body, and the
+review state, the operator authorized. The id stays the identity — it is still the only field nobody but
+GitHub assigns, and matching is still exact — and the digest is what makes the
+authorization about a body somebody read rather than about a post somebody owns.
+A pinned post whose current evidence differs from the pinned evidence is refused
+and stays unresolved feedback, which is the direction that stops the run.
+
+Everything else about the acknowledgement contract is untouched: the exact line
+grammar, immutable-id matching, chronology, the single unresolved-to-cleared
+transition, residual prose, native review/thread resolution, and the refusal to
+let this run's own verified artifacts acknowledge anything at all.
+
 ``env``/``env_unset`` are a small named overlay on the inherited environment,
 not a replacement for it: the trusted lanes run as the operator's own user with
 the normal Claude OAuth/keychain session, so the session variables cannot be
@@ -121,6 +157,28 @@ _V1_UPGRADE_STEPS = (
 # bound exists so a misconfiguration cannot quietly turn every reviewer packet
 # into a document dump.
 MAX_GOVERNING_ISSUES = 8
+# How many acknowledgement posts one operator may pin for one run. The seam is a
+# preauthorization of specific posts somebody has read, so the bound is the size
+# of a list a human can still check by eye; a config that needs more than this is
+# describing a policy rather than a decision, and policy is not what this field
+# is for.
+MAX_OPERATOR_ACKNOWLEDGEMENTS = 16
+# One immutable GitHub artifact id, as the surfaces this tool reads can produce
+# it: a REST comment id (``5107483039``), a namespaced review id
+# (``review:2938...``), or a GraphQL node id (``IC_kwDOM...==``). Matched
+# exactly and bounded, because this value is compared against ids GitHub
+# assigned and is never a pattern, a prefix, or a login.
+_ARTIFACT_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:=-]{0,199}\Z")
+# The digest of the body the operator authorized: exactly what
+# ``feedback.publication_evidence`` produces for that post, which is a SHA-256
+# hex digest. Matched as strictly as the id is, and in one case only — lower
+# case, sixty-four hex characters — because a near-miss digest is an operator
+# who believes a post is pinned while nothing is.
+_BODY_EVIDENCE = re.compile(r"\A[0-9a-f]{64}\Z")
+# The two keys one pin carries, and no others. A typo here would silently pin a
+# post to nothing, which is the shape of authorization this field exists to
+# refuse.
+_ACKNOWLEDGEMENT_KEYS = frozenset({"id", "body_evidence"})
 GATE_KINDS = ("baseline", "visual")
 # The acceptance lifecycle, as configuration rather than operator convention.
 #
@@ -157,6 +215,7 @@ _TOP_LEVEL_KEYS = frozenset(
         "lock_file",
         "visual_qa_required",
         "governing_issues",
+        "operator_acknowledgements",
         "gates",
         "reviewers",
         "builder",
@@ -224,6 +283,26 @@ class LaneEnv:
             env.pop(name, None)
         env.update(self.set)
         return env
+
+
+@dataclass(frozen=True)
+class OperatorAcknowledgement:
+    """One acknowledgement post the operator authorized before launch.
+
+    ``identifier`` is the exact immutable id GitHub assigned the post, and it is
+    the identity: nothing here is a login, a pattern, or a prefix.
+
+    ``body_evidence`` is what that authorization is *about* — the
+    :func:`~pr_prover.feedback.publication_evidence` digest of the body, and the
+    review state, the post held when the operator read it. The pair is needed
+    because an id survives every edit: a post pinned by id alone is a post whose
+    author, who on this repository is the publishing login itself, may rewrite
+    into different acknowledgement lines after the authorization was given. Two
+    fields make the authorization say what it means — *this post, saying this*.
+    """
+
+    identifier: str
+    body_evidence: str
 
 
 @dataclass(frozen=True)
@@ -309,6 +388,11 @@ class RunConfig:
     branch: str | None = None
     base: str | None = None
     visual_qa_required: bool = False
+    # Exact immutable acknowledgement post ids the operator authorized before
+    # launch, each bound to the body they authorized. Empty is the default and
+    # means what it always meant: no post written under a publishing login may
+    # acknowledge anything.
+    operator_acknowledgements: tuple[OperatorAcknowledgement, ...] = ()
     source: Path | None = field(default=None, compare=False)
 
     @property
@@ -347,8 +431,28 @@ class RunConfig:
         what the two-cycle loop pays for. An omitted budget is the other end of
         the same problem — nothing will ever end that lane — so it is said out
         loud here rather than quietly capped somewhere the report cannot see.
+
+        A pinned acknowledgement is the other kind of note worth printing before
+        a run rather than reading about afterwards. It is the one field that lets
+        a post written under a publishing login clear human feedback, so
+        ``check-config`` names every id it was handed: the seam is auditable
+        exactly to the extent an operator can see, before launch, which posts
+        they preauthorized. The bodies those ids were pinned to are not printed —
+        a digest read back to the person who wrote it proves nothing, and the run
+        itself compares them against what GitHub currently serves.
         """
         notes: list[str] = []
+        if self.operator_acknowledgements:
+            notes.append(
+                f"{len(self.operator_acknowledgements)} operator-pinned acknowledgement "
+                "post id(s) may acknowledge earlier feedback even though a configured "
+                "publishing login wrote them: "
+                + ", ".join(pin.identifier for pin in self.operator_acknowledgements)
+                + "; pin only exact posts you have read on this pull request, since "
+                "each one is an authorization rather than a login-wide exemption, and "
+                "each is refused if the post no longer says what its pinned "
+                "body_evidence was taken over"
+            )
         for lane, timeout in self._budgets():
             if timeout is None:
                 notes.append(
@@ -513,6 +617,7 @@ class RunConfig:
             )
 
         governing_issues = _governing_issues(raw)
+        operator_acknowledgements = _operator_acknowledgements(raw)
 
         branch = _optional_text(raw, "branch")
         base = _optional_text(raw, "base")
@@ -536,6 +641,7 @@ class RunConfig:
             branch=branch,
             base=base,
             visual_qa_required=visual_required,
+            operator_acknowledgements=operator_acknowledgements,
             source=source,
         )
 
@@ -595,6 +701,90 @@ def _governing_issues(raw: Mapping[str, Any]) -> tuple[int, ...]:
             )
         numbers.append(item)
     return tuple(numbers)
+
+
+def _operator_acknowledgements(
+    raw: Mapping[str, Any],
+) -> tuple[OperatorAcknowledgement, ...]:
+    """The acknowledgement posts the operator authorized before launch.
+
+    Optional, and absent means the strictest thing this tool can mean: no post
+    written under a configured publishing login may acknowledge anything. What
+    the field adds is per-post, not per-account — an operator who has read one
+    exact post says so by naming the id GitHub assigned it and the digest of what
+    it said — so everything here is checked as an id and a digest, and nothing is
+    accepted as a rule about authors.
+
+    Both halves are required, and neither is a default. An id with no
+    ``body_evidence`` would be an authorization of whatever that post is edited
+    to say later, which is the one thing an operator cannot have read; a digest
+    with no id would be an authorization of any post that happens to match. So a
+    pin is a mapping of exactly those two keys, and an entry missing one, or
+    carrying a third, is refused rather than half-applied.
+
+    Strictness is the point of each refusal below. A non-string, a whitespace or
+    control character, or an over-long value is not an id this tool could ever
+    match against a GitHub artifact; anything but a lower-case sixty-four
+    character hex digest is not evidence it could ever match either, and
+    accepting one would leave an operator believing a post was pinned when
+    nothing was. A repeated id is a file whose author has lost track of what they
+    authorized. The count is bounded for the same reason ``governing_issues`` is:
+    a list a human cannot check by eye has stopped being a list of decisions.
+
+    A malformed entry is never echoed back. It is operator-supplied text of
+    unknown provenance, and the index says which entry to fix.
+    """
+    value = raw.get("operator_acknowledgements")
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(
+            "config operator_acknowledgements must be a list of {'id', "
+            "'body_evidence'} pins; it preauthorizes specific acknowledgement "
+            "posts and is never a login, a pattern, or a prefix",
+            evidence={"key": "operator_acknowledgements"},
+        )
+    if len(value) > MAX_OPERATOR_ACKNOWLEDGEMENTS:
+        raise ConfigError(
+            f"config operator_acknowledgements names more than "
+            f"{MAX_OPERATOR_ACKNOWLEDGEMENTS} artifacts",
+            evidence={"count": len(value), "limit": MAX_OPERATOR_ACKNOWLEDGEMENTS},
+        )
+    pins: list[OperatorAcknowledgement] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping) or set(item) != _ACKNOWLEDGEMENT_KEYS:
+            raise ConfigError(
+                f"config operator_acknowledgements[{index}] must be an object with "
+                "exactly 'id' and 'body_evidence': the exact immutable GitHub "
+                "artifact id, and the sha256 publication-evidence digest of the "
+                "body that post held when you read it",
+                evidence={"index": index},
+            )
+        identifier = item["id"]
+        evidence = item["body_evidence"]
+        if not isinstance(identifier, str) or not _ARTIFACT_ID.match(identifier):
+            raise ConfigError(
+                f"config operator_acknowledgements[{index}].id must be one exact "
+                "immutable GitHub artifact id: a bounded string of letters, digits, "
+                "'.', '_', ':', '=', or '-', with no whitespace in it",
+                evidence={"index": index},
+            )
+        if not isinstance(evidence, str) or not _BODY_EVIDENCE.match(evidence):
+            raise ConfigError(
+                f"config operator_acknowledgements[{index}].body_evidence must be "
+                "one lower-case sha256 hex digest of the exact post body you "
+                "authorized; a post whose current body does not match it is refused",
+                evidence={"index": index},
+            )
+        if any(pin.identifier == identifier for pin in pins):
+            raise ConfigError(
+                "config operator_acknowledgements names the same artifact twice",
+                evidence={"artifact_id": identifier},
+            )
+        pins.append(
+            OperatorAcknowledgement(identifier=identifier, body_evidence=evidence)
+        )
+    return tuple(pins)
 
 
 def _sequence(raw: Mapping[str, Any], key: str, *, required: bool) -> list[Any]:
@@ -824,6 +1014,7 @@ def _reject_duplicates(names: list[str], *, what: str) -> None:
 __all__ = [
     "GATE_KINDS",
     "MAX_GOVERNING_ISSUES",
+    "MAX_OPERATOR_ACKNOWLEDGEMENTS",
     "REALISTIC_BUILDER_BUDGET",
     "REALISTIC_REVIEWER_BUDGET",
     "REQUIRED_REVIEWER_ROLES",
@@ -831,6 +1022,7 @@ __all__ = [
     "BuilderConfig",
     "GateConfig",
     "LaneEnv",
+    "OperatorAcknowledgement",
     "RelayConfig",
     "ReviewerConfig",
     "RunConfig",
