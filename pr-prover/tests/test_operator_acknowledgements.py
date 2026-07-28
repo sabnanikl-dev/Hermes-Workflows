@@ -9,13 +9,18 @@ so a run that reads a conversation the operator has already reconciled still
 answers ``acknowledged: []`` and stops — not because anything is unresolved, but
 because nobody left is allowed to say so.
 
-The repair is one optional config field naming *exact immutable post ids*, and
-the tests here are written to hold it to being exactly that:
+The repair is one optional config field naming *exact immutable post ids*, each
+bound to the body that post held when the operator read it, and the tests here
+are written to hold it to being exactly that:
 
 * the strict default is unchanged. Absent, empty, or naming other posts, a
   publisher-authored acknowledgement clears nothing;
-* an id authorizes one post, never a login. The same account's next comment is
-  refused, and editing the pinned post re-judges every line in it;
+* a pin authorizes one post saying one thing, never a login and never an id on
+  its own. The same account's next comment is refused, and the same post edited
+  after it was pinned is refused too — an id survives every edit, so an
+  authorization stored as an id alone would follow a post into wording nobody
+  approved, on a repository where the account that can make that edit is the
+  publishing login itself;
 * a pinned post is not exempt from anything else. Grammar, chronology, the one
   unresolved-to-cleared transition, residual prose, and the surfaces GitHub
   resolves natively all still decide;
@@ -39,6 +44,7 @@ import json
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -55,6 +61,7 @@ from _support import (
     builder_output,
     fix_comment,
     make_source_repo,
+    operator_pin,
     reviewer_lane,
     reviewer_output,
 )
@@ -84,7 +91,7 @@ def ack(target: str) -> str:
 
 
 class ConfigSeamTests(unittest.TestCase):
-    """The field is a bounded list of exact ids, or it is a config error."""
+    """The field is a bounded list of exact id/body-evidence pins, or an error."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="pr-prover-ack-config-")
@@ -147,69 +154,145 @@ class ConfigSeamTests(unittest.TestCase):
     # -- what it accepts ---------------------------------------------------
     def test_the_id_shapes_this_tool_reads_are_accepted(self) -> None:
         """A REST comment id, a namespaced review id, and a GraphQL node id."""
-        pinned = ["5107483039", "review:2938471", "IC_kwDOM7-x1s6h2K_A=="]
+        pinned = [
+            operator_pin(identifier, body=f"body of {identifier}")
+            for identifier in ("5107483039", "review:2938471", "IC_kwDOM7-x1s6h2K_A==")
+        ]
+        loaded = self.load(operator_acknowledgements=pinned).operator_acknowledgements
         self.assertEqual(
-            self.load(operator_acknowledgements=pinned).operator_acknowledgements,
-            tuple(pinned),
+            [(pin.identifier, pin.body_evidence) for pin in loaded],
+            [(entry["id"], entry["body_evidence"]) for entry in pinned],
         )
 
     def test_the_order_the_operator_wrote_is_preserved(self) -> None:
-        pinned = ["c2", "c1"]
+        pinned = [operator_pin("c2"), operator_pin("c1")]
         self.assertEqual(
-            self.load(operator_acknowledgements=pinned).operator_acknowledgements, ("c2", "c1")
+            [pin.identifier for pin in self.load(
+                operator_acknowledgements=pinned
+            ).operator_acknowledgements],
+            ["c2", "c1"],
         )
 
     # -- what it refuses ---------------------------------------------------
-    def test_a_bare_string_is_not_a_list_of_ids(self) -> None:
+    def test_a_bare_string_is_not_a_list_of_pins(self) -> None:
         self.assertIn("must be a list", self.refusal("c1").message)
 
-    def test_a_non_string_entry_is_refused(self) -> None:
-        self.assertIn("operator_acknowledgements[0]", self.refusal([5107483039]).message)
+    def test_a_bare_id_with_no_body_evidence_is_refused(self) -> None:
+        """The shape the reported defect had: an id, authorizing any later body."""
+        error = self.refusal(["5107483039"])
+        self.assertIn("exactly 'id' and 'body_evidence'", error.message)
+        self.assertEqual(error.evidence, {"index": 0})
 
-    def test_an_empty_entry_is_refused(self) -> None:
-        self.assertIn("operator_acknowledgements[0]", self.refusal([""]).message)
+    def test_an_entry_missing_its_body_evidence_is_refused(self) -> None:
+        self.assertIn(
+            "exactly 'id' and 'body_evidence'", self.refusal([{"id": "c1"}]).message
+        )
 
-    def test_an_entry_carrying_whitespace_is_refused(self) -> None:
+    def test_an_entry_missing_its_id_is_refused(self) -> None:
+        pin = operator_pin("c1")
+        self.assertIn(
+            "exactly 'id' and 'body_evidence'",
+            self.refusal([{"body_evidence": pin["body_evidence"]}]).message,
+        )
+
+    def test_an_entry_carrying_a_third_key_is_refused(self) -> None:
+        """A pin is two fields; a third is a rule somebody hoped would apply."""
+        self.assertIn(
+            "exactly 'id' and 'body_evidence'",
+            self.refusal([{**operator_pin("c1"), "author": REVIEWER_LOGIN}]).message,
+        )
+
+    def test_a_non_string_id_is_refused(self) -> None:
+        self.assertIn(
+            "operator_acknowledgements[0].id",
+            self.refusal([{**operator_pin("c1"), "id": 5107483039}]).message,
+        )
+
+    def test_an_empty_id_is_refused(self) -> None:
+        self.assertIn(
+            "operator_acknowledgements[0].id",
+            self.refusal([{**operator_pin("c1"), "id": ""}]).message,
+        )
+
+    def test_an_id_carrying_whitespace_is_refused(self) -> None:
         """An id with a space in it can never match one GitHub assigned."""
         for value in ("c1 c2", " c1", "c1\n", "c1\tc2"):
             with self.subTest(value=value):
-                self.assertIn("no whitespace", self.refusal([value]).message)
+                self.assertIn(
+                    "no whitespace",
+                    self.refusal([{**operator_pin("c1"), "id": value}]).message,
+                )
 
-    def test_an_over_long_entry_is_refused(self) -> None:
-        self.assertIn("operator_acknowledgements[0]", self.refusal(["c" * 201]).message)
+    def test_an_over_long_id_is_refused(self) -> None:
+        self.assertIn(
+            "operator_acknowledgements[0].id",
+            self.refusal([{**operator_pin("c1"), "id": "c" * 201}]).message,
+        )
 
     def test_a_wildcard_or_path_shaped_pattern_is_refused(self) -> None:
         """The field is ids; nothing with pattern syntax in it is an id."""
         for value in ("*", "karanagent1/*", "^karanagent1$", "c1,c2"):
             with self.subTest(value=value):
-                self.assertIsInstance(self.refusal([value]), ConfigError)
+                self.assertIsInstance(
+                    self.refusal([{**operator_pin("c1"), "id": value}]), ConfigError
+                )
+
+    def test_body_evidence_that_is_not_a_sha256_digest_is_refused(self) -> None:
+        """Anything this tool could never compute is not evidence of a body."""
+        digest = operator_pin("c1")["body_evidence"]
+        for value in (
+            "",
+            "not-a-digest",
+            digest.upper(),
+            digest[:-1],
+            f"{digest}0",
+            f" {digest}",
+            digest.replace("a", "g") if "a" in digest else "z" * 64,
+            None,
+            True,
+        ):
+            with self.subTest(value=value):
+                error = self.refusal([{"id": "c1", "body_evidence": value}])
+                self.assertIn("operator_acknowledgements[0].body_evidence", error.message)
 
     def test_the_same_id_twice_is_refused(self) -> None:
-        error = self.refusal(["c1", "c1"])
+        """Even with different bodies: two answers about one post is no answer."""
+        error = self.refusal([operator_pin("c1", body="one"), operator_pin("c1", body="two")])
         self.assertIn("same artifact twice", error.message)
         self.assertEqual(error.evidence["artifact_id"], "c1")
 
     def test_more_than_the_bound_is_refused(self) -> None:
-        too_many = [f"c{index}" for index in range(MAX_OPERATOR_ACKNOWLEDGEMENTS + 1)]
+        too_many = [
+            operator_pin(f"c{index}")
+            for index in range(MAX_OPERATOR_ACKNOWLEDGEMENTS + 1)
+        ]
         error = self.refusal(too_many)
         self.assertEqual(error.evidence["limit"], MAX_OPERATOR_ACKNOWLEDGEMENTS)
 
     def test_a_malformed_entry_is_not_echoed_back(self) -> None:
         """Operator-supplied text of unknown provenance; the index names it."""
-        error = self.refusal(["ghp_0123456789abcdef ohno"])
+        error = self.refusal(
+            [{**operator_pin("c1"), "id": "ghp_0123456789abcdef ohno"}]
+        )
         self.assertEqual(error.evidence, {"index": 0})
         self.assertNotIn("ghp_", json.dumps(error.evidence))
 
     def test_an_unknown_neighbouring_key_is_still_rejected(self) -> None:
         """The new field does not open the top level to typos."""
         with self.assertRaises(ConfigError):
-            self.load(operator_acknowledgments=["c1"])
+            self.load(operator_acknowledgments=[operator_pin("c1")])
 
     # -- the seam is auditable before launch -------------------------------
     def test_check_config_names_every_pinned_id(self) -> None:
         path = self.tmp / "pinned.json"
         path.write_text(
-            json.dumps(self.payload(operator_acknowledgements=["c1", "review:r9"])),
+            json.dumps(
+                self.payload(
+                    operator_acknowledgements=[
+                        operator_pin("c1"), operator_pin("review:r9")
+                    ]
+                )
+            ),
             encoding="utf-8",
         )
 
@@ -221,6 +304,11 @@ class ConfigSeamTests(unittest.TestCase):
         self.assertEqual(code, 0, "a pinned id is a note, not a rejection")
         self.assertIn("note: 2 operator-pinned acknowledgement post id(s)", printed)
         self.assertIn("c1, review:r9", printed)
+        self.assertNotIn(
+            operator_pin("c1")["body_evidence"],
+            printed,
+            "reading a digest back to whoever wrote it proves nothing",
+        )
 
     def test_check_config_says_nothing_when_nothing_is_pinned(self) -> None:
         path = self.tmp / "plain.json"
@@ -243,16 +331,34 @@ class PinnedShapeHarness(LoopHarness):
     the config pins has to be the post that exists.
     """
 
-    def seed(self, *, mapped_body: str | None = None) -> None:
+    def seed(self) -> None:
         self.first = self.remote.comment(FIRST_PROSE, author=HUMAN)
         self.second = self.remote.comment(SECOND_PROSE, author=HUMAN)
         self.mapped = self.remote.comment(
-            mapped_body
-            if mapped_body is not None
-            else f"{ack(self.first.identifier)}\n{ack(self.second.identifier)}\n{RESIDUAL_PROSE}",
+            f"{ack(self.first.identifier)}\n{ack(self.second.identifier)}\n{RESIDUAL_PROSE}",
             author=BUILDER_LOGIN,
         )
         self.pure = self.remote.comment(ack(self.mapped.identifier), author=BUILDER_LOGIN)
+
+    def rewrite(self, identifier: str, body: str) -> None:
+        """Edit one already-published post, keeping every field GitHub owns.
+
+        Same immutable id, same author, same timestamp, different body — which
+        is exactly what GitHub's edit button does, and the reason an id alone
+        cannot say what a post currently holds.
+        """
+        for index, posted in enumerate(self.remote.comments):
+            if posted.identifier != identifier:
+                continue
+            self.remote.comments[index] = Comment(
+                identifier=posted.identifier,
+                author=posted.author,
+                body=body,
+                url=posted.url,
+                created_at=posted.created_at,
+            )
+            return
+        raise AssertionError(f"nothing published on this PR carries the id {identifier}")
 
     def unresolved_ids(self, result) -> list[str]:
         return [item["artifact_id"] for item in result.evidence["evidence"]["unresolved"]]
@@ -287,7 +393,9 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
         """The positive case: the mapped post clears the prose, then is cleared."""
         self.seed()
         loop = self.build(
-            operator_acknowledgements=[self.mapped.identifier, self.pure.identifier]
+            operator_acknowledgements=[
+                operator_pin(self.mapped), operator_pin(self.pure)
+            ]
         )
         self.review_round(HEAD_A)
 
@@ -296,7 +404,7 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
         self.assertEqual(result.outcome, MERGE_READY)
         self.assertEqual(result.head, HEAD_A)
         self.assertEqual(
-            sorted(self.config.operator_acknowledgements),
+            sorted(pin.identifier for pin in self.config.operator_acknowledgements),
             sorted([self.mapped.identifier, self.pure.identifier]),
         )
 
@@ -324,7 +432,7 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
     def test_omitting_the_later_pure_acknowledgement_stops_the_run(self) -> None:
         """Its prose is cleared, but the mapped post's own residual is not."""
         self.seed()
-        loop = self.build(operator_acknowledgements=[self.mapped.identifier])
+        loop = self.build(operator_acknowledgements=[operator_pin(self.mapped)])
         self.review_round(HEAD_A)
 
         result = loop.run()
@@ -342,7 +450,7 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
 
     def test_omitting_the_mapped_post_leaves_the_original_prose_unresolved(self) -> None:
         self.seed()
-        loop = self.build(operator_acknowledgements=[self.pure.identifier])
+        loop = self.build(operator_acknowledgements=[operator_pin(self.pure)])
         self.review_round(HEAD_A)
 
         result = loop.run()
@@ -353,23 +461,24 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
         )
         self.assertEqual(self.acknowledged(result), [self.mapped.identifier])
 
-    def test_changing_the_pinned_body_clears_only_what_still_parses(self) -> None:
-        """A pin authorizes a post to be read, never a line to be forgiven."""
+    def test_a_pinned_post_still_obeys_the_line_grammar(self) -> None:
+        """A pin authorizes a post to be read, never a line to be forgiven.
+
+        The operator read and pinned this post exactly as it stands, so nothing
+        here turns on the body having changed: one of its acknowledgement lines
+        carries the double space a human actually types, and that line spells
+        nothing the classifier recognises.
+        """
         self.seed()
-        # The same post, with one acknowledgement line mistyped as the double
-        # space a human actually produces.
-        self.remote.comments[2] = Comment(
-            identifier=self.mapped.identifier,
-            author=BUILDER_LOGIN,
-            body=(
-                f"{ACKNOWLEDGEMENT}  {self.first.identifier}\n"
-                f"{ack(self.second.identifier)}\n{RESIDUAL_PROSE}"
-            ),
-            url=self.mapped.url,
-            created_at=self.mapped.created_at,
+        mistyped = (
+            f"{ACKNOWLEDGEMENT}  {self.first.identifier}\n"
+            f"{ack(self.second.identifier)}\n{RESIDUAL_PROSE}"
         )
+        self.rewrite(self.mapped.identifier, mistyped)
         loop = self.build(
-            operator_acknowledgements=[self.mapped.identifier, self.pure.identifier]
+            operator_acknowledgements=[
+                operator_pin(self.mapped, body=mistyped), operator_pin(self.pure)
+            ]
         )
         self.review_round(HEAD_A)
 
@@ -379,13 +488,100 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
         self.assertEqual(self.unresolved_ids(result), [self.first.identifier])
         self.assertNotIn(self.first.identifier, self.acknowledged(result))
 
+    def test_editing_a_pinned_post_into_other_valid_grammar_clears_nothing(self) -> None:
+        """The reported defect: a historical pin, edited after it was given.
+
+        The operator read the mapped post and pinned it. The same account — the
+        builder login *is* the operator's account on the repository this seam
+        exists for — then rewrote that post, under its immutable id, into a pure
+        acknowledgement of the same two comments with the residual prose taken
+        out. Every line in the new body is valid grammar naming an eligible
+        earlier id, so nothing downstream of authorization can refuse it: an
+        authorization stored as an id alone would spend all of it. The pin is
+        bound to what was read, so it spends none of it.
+        """
+        self.seed()
+        # The post as the operator read it: it acknowledged the first comment
+        # and left prose of its own, and that is the body they pinned.
+        authorized = f"{ack(self.first.identifier)}\n{RESIDUAL_PROSE}"
+        self.rewrite(self.mapped.identifier, authorized)
+        pins = [operator_pin(self.mapped, body=authorized), operator_pin(self.pure)]
+        # The post as it stands now: the same immutable id, one more perfectly
+        # formed line, and a second human stop it was never authorized to spend.
+        self.rewrite(
+            self.mapped.identifier,
+            f"{ack(self.first.identifier)}\n{ack(self.second.identifier)}\n"
+            f"{RESIDUAL_PROSE}",
+        )
+        loop = self.build(operator_acknowledgements=pins)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assert_stopped_before_any_fix(result)
+        self.assertEqual(
+            self.unresolved_ids(result), [self.first.identifier, self.second.identifier]
+        )
+        self.assertNotIn(self.first.identifier, self.acknowledged(result))
+        self.assertNotIn(self.second.identifier, self.acknowledged(result))
+        self.assertEqual(
+            result.evidence["evidence"]["operator_pinned_acknowledgements_changed"],
+            [self.mapped.identifier],
+            "a lapsed pin and a mistyped id must not read the same to an operator",
+        )
+
+    def test_re_reading_the_edited_post_and_re_pinning_it_is_the_way_back(self) -> None:
+        """The control: the refusal is the evidence, not the edit.
+
+        Same edit, same immutable id, same login — but the config now pins the
+        body that is really there, which is the operator saying they read it.
+        Nothing else about the run changes, so what stopped the case above was
+        an authorization nobody had given rather than a seam that has closed.
+        """
+        self.seed()
+        authorized = f"{ack(self.first.identifier)}\n{RESIDUAL_PROSE}"
+        self.rewrite(self.mapped.identifier, authorized)
+        rewritten = (
+            f"{ack(self.first.identifier)}\n{ack(self.second.identifier)}\n"
+            f"{RESIDUAL_PROSE}"
+        )
+        self.rewrite(self.mapped.identifier, rewritten)
+        loop = self.build(
+            operator_acknowledgements=[
+                operator_pin(self.mapped, body=rewritten), operator_pin(self.pure)
+            ]
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(self.builder_calls(), [], "nothing here needed a fix")
+
+    def test_a_cosmetic_edit_costs_a_pin_its_authority_too(self) -> None:
+        """Evidence is the exact body; "near enough" is a rule, not a reading."""
+        self.seed()
+        pins = [operator_pin(self.mapped), operator_pin(self.pure)]
+        self.rewrite(self.mapped.identifier, f"{self.mapped.body} ")
+        loop = self.build(operator_acknowledgements=pins)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assert_stopped_before_any_fix(result)
+        self.assertEqual(
+            self.unresolved_ids(result), [self.first.identifier, self.second.identifier]
+        )
+
     def test_an_unpinned_publisher_acknowledgement_clears_nothing(self) -> None:
         """One more human comment, answered by the reviewer login nobody pinned."""
         self.seed()
         stray = self.remote.comment("and one more thing", author=HUMAN)
         rogue = self.remote.comment(ack(stray.identifier), author=REVIEWER_LOGIN)
         loop = self.build(
-            operator_acknowledgements=[self.mapped.identifier, self.pure.identifier]
+            operator_acknowledgements=[
+                operator_pin(self.mapped), operator_pin(self.pure)
+            ]
         )
         self.review_round(HEAD_A)
 
@@ -399,7 +595,11 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
 
     def test_a_pinned_id_that_names_no_post_authorizes_nothing(self) -> None:
         self.seed()
-        loop = self.build(operator_acknowledgements=["IC_comment404", "review:r404"])
+        loop = self.build(
+            operator_acknowledgements=[
+                operator_pin("IC_comment404"), operator_pin("review:r404")
+            ]
+        )
         self.review_round(HEAD_A)
 
         result = loop.run()
@@ -419,7 +619,11 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
         immutable ids on the PR, matches none of them, and authorizes nothing.
         """
         self.seed()
-        loop = self.build(operator_acknowledgements=[f"author:{REVIEWER_LOGIN}", BUILDER_LOGIN])
+        loop = self.build(
+            operator_acknowledgements=[
+                operator_pin(f"author:{REVIEWER_LOGIN}"), operator_pin(BUILDER_LOGIN)
+            ]
+        )
         self.review_round(HEAD_A)
 
         result = loop.run()
@@ -447,7 +651,9 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
         self.seed()
         stray = self.remote.comment("this one is for the lane", author=HUMAN)
         loop = self.build(
-            operator_acknowledgements=[self.mapped.identifier, self.pure.identifier]
+            operator_acknowledgements=[
+                operator_pin(self.mapped), operator_pin(self.pure)
+            ]
         )
         self.script.add(
             "lane-reviewer-A",
@@ -493,7 +699,7 @@ class PinnedAcknowledgementLoopTests(PinnedShapeHarness):
     def test_no_pinned_conversation_reaches_a_lane_as_text(self) -> None:
         """Pinned or not, the conversation is evidence and never lane input."""
         self.seed()
-        loop = self.build(operator_acknowledgements=[self.mapped.identifier])
+        loop = self.build(operator_acknowledgements=[operator_pin(self.mapped)])
         self.review_round(HEAD_A)
 
         loop.run()
@@ -519,26 +725,6 @@ class EditedRunPublishedArtifactTests(PinnedShapeHarness):
     ``RunArtifacts`` → feedback path, on an artifact the loop itself published
     and verified during the run rather than one a test asserted was owned.
     """
-
-    def rewrite(self, identifier: str, body: str) -> None:
-        """Edit one already-published post, keeping every field GitHub owns.
-
-        Same immutable id, same author, same timestamp, different body — which
-        is exactly what GitHub's edit button does, and the reason an id alone
-        cannot say what a post currently holds.
-        """
-        for index, posted in enumerate(self.remote.comments):
-            if posted.identifier != identifier:
-                continue
-            self.remote.comments[index] = Comment(
-                identifier=posted.identifier,
-                author=posted.author,
-                body=body,
-                url=posted.url,
-                created_at=posted.created_at,
-            )
-            return
-        raise AssertionError(f"nothing published on this PR carries the id {identifier}")
 
     def pin_the_first_artifact(self) -> str:
         """Build a loop whose config pins the id Reviewer A is about to publish.
@@ -570,9 +756,11 @@ class EditedRunPublishedArtifactTests(PinnedShapeHarness):
         artifact_id = self.pin_the_first_artifact()
         loop = self.build(
             operator_acknowledgements=[
-                self.mapped.identifier,
-                self.pure.identifier,
-                artifact_id,
+                operator_pin(self.mapped),
+                operator_pin(self.pure),
+                # Pinned to exactly the body the edit will leave behind, so the
+                # only thing refusing it is that this run published the id.
+                operator_pin(artifact_id, body=ack(stray.identifier)),
             ]
         )
         self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
@@ -614,9 +802,11 @@ class EditedRunPublishedArtifactTests(PinnedShapeHarness):
         artifact_id = self.pin_the_first_artifact()
         loop = self.build(
             operator_acknowledgements=[
-                self.mapped.identifier,
-                self.pure.identifier,
-                artifact_id,
+                operator_pin(self.mapped),
+                operator_pin(self.pure),
+                # Pinned to exactly the body the edit will leave behind, so the
+                # only thing refusing it is that this run published the id.
+                operator_pin(artifact_id, body=ack(stray.identifier)),
             ]
         )
         self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
@@ -642,7 +832,9 @@ class EditedRunPublishedArtifactTests(PinnedShapeHarness):
         stray = self.remote.comment("and the rollback plan is still missing", author=HUMAN)
         artifact_id = self.pin_the_first_artifact()
         loop = self.build(
-            operator_acknowledgements=[self.mapped.identifier, self.pure.identifier]
+            operator_acknowledgements=[
+                operator_pin(self.mapped), operator_pin(self.pure)
+            ]
         )
         self.script.add("lane-reviewer-A", reviewer_output(HEAD_A))
         self.script.add(
@@ -689,7 +881,9 @@ class UnpinnedFixCycleTests(PinnedShapeHarness):
         """The control: the only thing that changed is the two authorized ids."""
         self.seed()
         loop = self.build(
-            operator_acknowledgements=[self.mapped.identifier, self.pure.identifier]
+            operator_acknowledgements=[
+                operator_pin(self.mapped), operator_pin(self.pure)
+            ]
         )
         self.review_round(HEAD_A, [BLOCKER])
         self.script.add(
@@ -716,7 +910,7 @@ class RealConfigFileTests(PinnedShapeHarness):
     where it would actually be met.
     """
 
-    def written_config(self, pinned: list[str]) -> Path:
+    def written_config(self, pinned: list[Mapping[str, str]]) -> Path:
         payload = {
             "schema_version": 2,
             "repo": "example/repo",
@@ -764,9 +958,9 @@ class RealConfigFileTests(PinnedShapeHarness):
             scratch_root=self.tmp / "scratch",
         )
 
-    def test_a_loaded_file_carries_its_pinned_ids_into_reconciliation(self) -> None:
+    def test_a_loaded_file_carries_its_pins_into_reconciliation(self) -> None:
         self.seed()
-        path = self.written_config([self.mapped.identifier, self.pure.identifier])
+        path = self.written_config([operator_pin(self.mapped), operator_pin(self.pure)])
 
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
@@ -790,6 +984,68 @@ class RealConfigFileTests(PinnedShapeHarness):
 
         self.assert_stopped_before_any_fix(result)
         self.assertEqual(self.acknowledged(result), [])
+
+    def test_editing_a_pinned_post_after_the_file_was_written_stops_the_run(self) -> None:
+        """The reported defect, through the file an operator really writes.
+
+        The config is written and validated while the mapped post still says
+        what the operator read. The post is then edited — same immutable id,
+        same login, different valid acknowledgement grammar — and the head this
+        runs on carries a real blocker, so a run that accepted the edit would
+        launch the builder on it. Nothing is scripted for that lane beyond the
+        push it would make, and the assertions below are that none of it happens:
+        no attempt spent, no builder process, no push, no ``merge-ready``.
+        """
+        self.seed()
+        path = self.written_config([operator_pin(self.mapped), operator_pin(self.pure)])
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["check-config", "--config", str(path)]), 0)
+
+        self.rewrite(
+            self.mapped.identifier,
+            f"{ack(self.first.identifier)}\n{ack(self.second.identifier)}\n"
+            f"{RESIDUAL_PROSE} (edited)",
+        )
+        loop = self.loop_from(path)
+        self.review_round(HEAD_A, [BLOCKER])
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["null-deref"]),
+            after=lambda: self.remote.push(HEAD_B, comment=fix_comment(HEAD_B)),
+        )
+
+        result = loop.run()
+
+        self.assert_stopped_before_any_fix(result)
+        self.assertFalse(self.script.exhausted, "the builder script was consumed")
+        self.assertEqual(
+            self.unresolved_ids(result), [self.first.identifier, self.second.identifier]
+        )
+        self.assertEqual(self.acknowledged(result), [self.mapped.identifier])
+        self.assertEqual(
+            result.evidence["evidence"]["operator_pinned_acknowledgements_changed"],
+            [self.mapped.identifier],
+        )
+
+    def test_the_same_file_re_pinned_to_the_edited_body_runs(self) -> None:
+        """The control, on the same path: the operator re-reads and re-pins."""
+        self.seed()
+        rewritten = (
+            f"{ack(self.first.identifier)}\n{ack(self.second.identifier)}\n"
+            f"{RESIDUAL_PROSE} (edited)"
+        )
+        self.rewrite(self.mapped.identifier, rewritten)
+        loop = self.loop_from(
+            self.written_config(
+                [operator_pin(self.mapped, body=rewritten), operator_pin(self.pure)]
+            )
+        )
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
 
 
 if __name__ == "__main__":  # pragma: no cover - parity with the other modules

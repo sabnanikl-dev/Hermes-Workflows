@@ -98,12 +98,13 @@ change gets to answer.
 
 `operator_acknowledgements` is **optional**, and absent means the strictest thing
 this tool can mean. It lists exact immutable GitHub post ids an operator
-authorized before launch, and its only effect is to let those exact posts
-acknowledge earlier feedback even though a configured publishing login wrote
-them — see [Operator-pinned
+authorized before launch, each paired with a digest of the body that post held
+when they read it, and its only effect is to let those exact posts — still
+saying what they said — acknowledge earlier feedback even though a configured
+publishing login wrote them. See [Operator-pinned
 acknowledgements](#operator-pinned-acknowledgements). It is never a login, a
-pattern, or a standing permission, it is bounded at sixteen ids, and
-`check-config` prints back every one it was handed.
+pattern, or a standing permission, it is bounded at sixteen pins, and
+`check-config` prints back every id it was handed.
 
 `env` and `env_unset` are a small **named overlay** on the environment a lane
 inherits, never a replacement for it. The trusted agents run as the operator's
@@ -607,26 +608,42 @@ the operator has already reconciled by hand still stops every run, with
 `acknowledged: []` and no identity left that could change that. A run nobody can
 answer is not a safer run than one that can be answered carefully.
 
-So the run config may name exact immutable post ids, and only ids:
+So the run config may name exact immutable post ids, and for each one the body
+that was read:
 
 ```json
-"operator_acknowledgements": ["5107483039", "5107611402"]
+"operator_acknowledgements": [
+  {
+    "id": "5107483039",
+    "body_evidence": "9f2c…64 lower-case hex characters…"
+  }
+]
 ```
 
 A publisher-authored post may spend acknowledgement lines when, and only when,
-its own id is listed there. What that authorizes is one post the operator read
-before launch — never a login, never a shape, never a pattern. Concretely:
+its own id is listed there *and* it still says what the pinned digest was taken
+over. What that authorizes is one post the operator read before launch, saying
+what it said then — never a login, never a shape, never a pattern, and never an
+id on its own. An id survives every later edit, so an authorization stored as an
+id alone is an authorization of whatever that post is changed to say afterwards,
+and on the repository this seam exists for the account that can make that edit is
+the publishing login itself. Concretely:
 
 - **absent or `[]` is the strict default**, unchanged in every respect;
-- the same account's *next* post is refused. What is pinned is one id, and
+- the same account's *next* post is refused. What is pinned is one post, and
   nothing about the account carries over to anything else it writes;
+- **the same post, edited after it was pinned, is refused.** Not only when the
+  edit breaks the grammar: a rewrite into different, perfectly valid
+  acknowledgement lines is refused too, because those lines are not the ones
+  anybody read. The stop names such a pin under
+  `operator_pinned_acknowledgements_changed`, so a lapsed authorization does not
+  read like a mistyped id. Re-read the post, re-derive its evidence, and pin it
+  again — that is the operator saying they have read what it says now;
 - a pinned post is exempt from nothing else. The exact line grammar,
   immutable-id matching, chronology, the single unresolved-to-cleared
   transition, residual prose, and native review/thread resolution all still
   decide, so a mixed post spends its valid lines and its own remaining prose
-  stays unresolved until a *separately* pinned later post clears that id. Edit a
-  pinned post and each line is judged again on those same rules — a line that
-  stops parsing stops clearing anything;
+  stays unresolved until a *separately* pinned later post clears that id;
 - a pinned post is still feedback in its own right — pinning grants
   acknowledgement authority, not an exemption from being read;
 - **nothing this run published can be reached by a pin, whatever it says now.**
@@ -639,10 +656,36 @@ before launch — never a login, never a shape, never a pattern. Concretely:
   authority the denial exists to withhold;
 - an id that names nothing on the PR does nothing, silently and safely.
 
+`body_evidence` is the same digest the tool keeps for its own published
+artifacts — `sha256` over the post's body and review state — so there is one
+notion of "still the post we mean" rather than two. Derive it from the post
+GitHub is serving:
+
+```bash
+# a conversation comment: its own id, and no review state
+gh api repos/OWNER/NAME/issues/comments/5107483039 | python3 -c '
+import hashlib, json, sys
+post = json.load(sys.stdin)
+payload = json.dumps([post["body"], ""], ensure_ascii=False)
+print(hashlib.sha256(payload.encode("utf-8")).hexdigest())'
+
+# a review: pin it as "review:<id>", and its state is part of the evidence
+gh api repos/OWNER/NAME/pulls/16/reviews/4801303218 | python3 -c '
+import hashlib, json, sys
+post = json.load(sys.stdin)
+payload = json.dumps([post["body"], post["state"].strip().upper()], ensure_ascii=False)
+print(hashlib.sha256(payload.encode("utf-8")).hexdigest())'
+```
+
+Those are the only two surfaces a pin applies to; an inline thread comment is
+resolved by its thread and never acknowledges anything. Read the post before you
+run this: the digest records *that* you read it, and only you can supply the part
+where you did.
+
 There is no login allowlist, no approval service, no token or signature
-protocol, and no third identity: the whole seam is a bounded list of ids
-(sixteen at most) that `check-config` prints back before a run starts, and that
-every `needs-Karan` stop repeats as
+protocol, and no third identity: the whole seam is a bounded list of pins
+(sixteen at most) whose ids `check-config` prints back before a run starts, and
+which every `needs-Karan` stop repeats as
 `operator_pinned_acknowledgements` so the authorization in force is visible
 beside the feedback it did not clear.
 

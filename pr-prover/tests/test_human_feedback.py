@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from itertools import permutations, product
@@ -125,23 +126,39 @@ def thread(
     )
 
 
-def owning(*artifacts: Comment, pinned: tuple[str, ...] = ()) -> RunArtifacts:
+def owning(
+    *artifacts: Comment, pinned: Mapping[str, str] | None = None
+) -> RunArtifacts:
     """A run that proved it published exactly these artifacts, as they stand.
 
     Ownership is the id *and* what readback verified the post held, so the
     artifacts themselves are passed rather than bare ids: retaining an id alone
     is the thing that keeps an edited post excluded after somebody rewrites it.
 
-    ``pinned`` is the other half of the identity contract: the exact post ids an
-    operator authorized in the run config before launch. Empty is the default
-    everywhere, so every row that does not name one is still proving the
-    unconditional publisher denial.
+    ``pinned`` is the other half of the identity contract, and it is the same
+    pair for the same reason: each exact post id an operator authorized in the
+    run config before launch, mapped to the evidence for the body they read.
+    Empty is the default everywhere, so every row that does not name one is
+    still proving the unconditional publisher denial.
     """
     return RunArtifacts(
         verified={item.identifier: publication_evidence(item) for item in artifacts},
         publishers=PUBLISHERS,
-        operator_acknowledgements=frozenset(pinned),
+        operator_acknowledgements=dict(pinned or {}),
     )
+
+
+def pins(*posts: Comment) -> dict[str, str]:
+    """The config pins that authorize exactly these posts, as they stand here."""
+    return {item.identifier: publication_evidence(item) for item in posts}
+
+
+# Evidence for a body nothing on any of these PRs holds. It is what a pinned id
+# that names no post is bound to, so such a row proves the id matched nothing
+# rather than accidentally matching an empty body somebody wrote.
+UNWRITTEN_BODY = publication_evidence(
+    Comment(identifier="", author="", body="a body no post in this table holds")
+)
 
 
 NOTHING_PROVED = RunArtifacts(publishers=PUBLISHERS)
@@ -158,13 +175,37 @@ class Case:
     threads: tuple[ReviewThread, ...] = ()
     owned: tuple[Comment, ...] = ()
     pinned: tuple[str, ...] = ()
+    # The posts a row authorized *as they were read*, for the rows where that
+    # differs from what the PR now shows. Pinning an id alone is pinning a
+    # version of the post too, and an edited pin has to be able to say so.
+    pinned_as: tuple[Comment, ...] = ()
     cleared: tuple[str, ...] | None = None
     note: str = ""
 
+    def pins(self) -> dict[str, str]:
+        """What the config authorized: each pinned id, and the body it named.
+
+        A row that names an id pins the post as this row presents it — the
+        ordinary case, where the operator read the post that is there. A row
+        listing ``pinned_as`` pins a different body under the same id, which is
+        the post-was-edited-afterwards case. An id no post carries is bound to a
+        body nothing holds, so it matches by neither half.
+        """
+        posts = {item.identifier: item for item in (*self.comments, *self.reviews)}
+        pinned = {item.identifier: publication_evidence(item) for item in self.pinned_as}
+        for identifier in self.pinned:
+            if identifier in pinned:
+                continue
+            post = posts.get(identifier)
+            pinned[identifier] = (
+                UNWRITTEN_BODY if post is None else publication_evidence(post)
+            )
+        return pinned
+
     def artifacts(self) -> RunArtifacts:
-        if not self.owned and not self.pinned:
+        if not self.owned and not self.pinned and not self.pinned_as:
             return NOTHING_PROVED
-        return owning(*self.owned, pinned=self.pinned)
+        return owning(*self.owned, pinned=self.pins())
 
     def surfaces(self) -> FeedbackSurfaces:
         return FeedbackSurfaces(
@@ -210,6 +251,21 @@ RESTATED_REVIEW = review(
     author=REVIEWER_LOGIN,
     state="APPROVED",
     created_at=at(2),
+)
+# A second human comment, so a rewritten pin has something else to name.
+SECOND_RAISED = comment("c3", "and the rollback plan is still missing", created_at=at(1))
+# The historical publisher-authored post an operator read and pinned before
+# launch, and the same post after somebody rewrote it. Same immutable id, same
+# author, same timestamp, different acknowledgement lines: nothing an id can
+# distinguish, and the whole reason a pin carries the body it was taken over.
+AUTHORIZED_PIN = comment(
+    "c2",
+    f"{ack('c1')}\nreconciled with Karan; holding for one more read",
+    author=BUILDER_LOGIN,
+    created_at=at(2),
+)
+REWRITTEN_PIN = comment(
+    AUTHORIZED_PIN.identifier, ack("c3"), author=BUILDER_LOGIN, created_at=at(2)
 )
 
 TRUTH_TABLE: tuple[Case, ...] = (
@@ -535,6 +591,26 @@ TRUTH_TABLE: tuple[Case, ...] = (
             "the review surface form of the same edit; its own decisive state "
             "resolves it, and the human comment it names is untouched"
         ),
+    ),
+    Case(
+        name="a pinned post rewritten into different valid grammar clears nothing",
+        comments=(RAISED, SECOND_RAISED, REWRITTEN_PIN),
+        pinned_as=(AUTHORIZED_PIN,),
+        unresolved=("c1", "c3", "c2"),
+        cleared=(),
+        note=(
+            "an id survives an edit and an authorization must not: the operator "
+            "read a mapped post and pinned it, and the same account rewrote it "
+            "under that id into a clean acknowledgement of something else"
+        ),
+    ),
+    Case(
+        name="the same pinned post, unedited, still spends what was authorized",
+        comments=(RAISED, SECOND_RAISED, AUTHORIZED_PIN),
+        pinned_as=(AUTHORIZED_PIN,),
+        unresolved=("c3", "c2"),
+        cleared=("c1",),
+        note="the control for the row above: only the edit changed the answer",
     ),
     Case(
         name="a pinned id naming nothing on this PR changes nothing",
@@ -1019,7 +1095,7 @@ class AcknowledgementAuthorityTests(unittest.TestCase):
         self.assertFalse(owning(OWNED_ARTIFACT).may_acknowledge(OWNED_ARTIFACT))
 
     def test_pinning_a_verified_artifact_does_not_change_that(self) -> None:
-        artifacts = owning(OWNED_ARTIFACT, pinned=(OWNED_ARTIFACT.identifier,))
+        artifacts = owning(OWNED_ARTIFACT, pinned=pins(OWNED_ARTIFACT))
         self.assertFalse(artifacts.may_acknowledge(OWNED_ARTIFACT))
 
     def test_an_edit_drops_ownership_but_not_publication(self) -> None:
@@ -1030,13 +1106,18 @@ class AcknowledgementAuthorityTests(unittest.TestCase):
         self.assertTrue(artifacts.published(changed), "an id is not editable")
 
     def test_an_edited_artifact_may_not_acknowledge_even_when_pinned(self) -> None:
-        """The reported defect, at the smallest scale it can be stated."""
+        """The reported defect, at the smallest scale it can be stated.
+
+        The pin is taken over the *edited* body, so nothing here is refused for
+        having changed: the id alone is what denies it, which is the half of
+        identity that must never lapse.
+        """
         changed = self.edited(OWNED_ARTIFACT, ack("c1"))
-        artifacts = owning(OWNED_ARTIFACT, pinned=(OWNED_ARTIFACT.identifier,))
+        artifacts = owning(OWNED_ARTIFACT, pinned=pins(changed))
         self.assertFalse(artifacts.may_acknowledge(changed))
 
     def test_a_changed_review_state_does_not_restore_authority(self) -> None:
-        artifacts = owning(PUBLISHED_REVIEW, pinned=(PUBLISHED_REVIEW.identifier,))
+        artifacts = owning(PUBLISHED_REVIEW, pinned=pins(RESTATED_REVIEW))
         self.assertFalse(artifacts.owns(RESTATED_REVIEW))
         self.assertFalse(artifacts.may_acknowledge(RESTATED_REVIEW))
 
@@ -1047,9 +1128,69 @@ class AcknowledgementAuthorityTests(unittest.TestCase):
         """The seam this slice adds is untouched by the stricter denial."""
         historical = comment("c2", ack("c1"), author=BUILDER_LOGIN, created_at=at(2))
         self.assertTrue(
-            owning(OWNED_ARTIFACT, pinned=("c2",)).may_acknowledge(historical)
+            owning(OWNED_ARTIFACT, pinned=pins(historical)).may_acknowledge(historical)
         )
         self.assertFalse(owning(OWNED_ARTIFACT).may_acknowledge(historical))
+
+    def test_a_pinned_post_edited_into_other_valid_grammar_may_not(self) -> None:
+        """The half an id cannot carry: *which* acknowledgement was authorized.
+
+        The operator read a mapped post and pinned it. The same account then
+        rewrote it, under the same immutable id, into a clean acknowledgement of
+        a different comment — a body nobody approved, in grammar the classifier
+        accepts. The pin is bound to what was read, so it does not follow.
+        """
+        authorized = comment(
+            "c2",
+            f"{ack('c1')}\nreconciled with Karan; holding for one more read",
+            author=BUILDER_LOGIN,
+            created_at=at(2),
+        )
+        rewritten = self.edited(authorized, ack("c9"))
+        artifacts = owning(OWNED_ARTIFACT, pinned=pins(authorized))
+        self.assertTrue(artifacts.may_acknowledge(authorized))
+        self.assertFalse(artifacts.may_acknowledge(rewritten))
+        self.assertFalse(
+            artifacts.published(rewritten),
+            "the historical post is not one this run published; only the pin denies it",
+        )
+
+    def test_even_a_cosmetic_edit_costs_a_pin_its_authority(self) -> None:
+        """Evidence is the exact body, not an approximation of it."""
+        authorized = comment("c2", ack("c1"), author=BUILDER_LOGIN, created_at=at(2))
+        artifacts = owning(pinned=pins(authorized))
+        self.assertFalse(
+            artifacts.may_acknowledge(self.edited(authorized, f"{ack('c1')} "))
+        )
+
+    def test_a_pin_bound_to_a_body_the_post_never_held_authorizes_nothing(self) -> None:
+        historical = comment("c2", ack("c1"), author=BUILDER_LOGIN, created_at=at(2))
+        artifacts = owning(pinned={historical.identifier: UNWRITTEN_BODY})
+        self.assertFalse(artifacts.may_acknowledge(historical))
+
+    def test_a_lapsed_pin_is_named_so_the_stop_can_be_acted_on(self) -> None:
+        """A pin that no longer matches and a mistyped id are different problems."""
+        authorized = comment("c2", ack("c1"), author=BUILDER_LOGIN, created_at=at(2))
+        rewritten = self.edited(authorized, ack("c9"))
+        artifacts = owning(
+            OWNED_ARTIFACT, pinned={**pins(authorized), "c404": UNWRITTEN_BODY}
+        )
+
+        self.assertEqual(
+            artifacts.changed_acknowledgement_pins((rewritten, RAISED, OWNED_ARTIFACT)),
+            ("c2",),
+        )
+        self.assertEqual(
+            artifacts.changed_acknowledgement_pins((authorized, RAISED)),
+            (),
+            "a pin that still matches has not lapsed",
+        )
+
+    def test_an_edited_run_artifact_is_not_reported_as_a_lapsed_pin(self) -> None:
+        """It was never authorized; reporting it would suggest re-pinning it."""
+        changed = self.edited(OWNED_ARTIFACT, ack("c1"))
+        artifacts = owning(OWNED_ARTIFACT, pinned=pins(OWNED_ARTIFACT))
+        self.assertEqual(artifacts.changed_acknowledgement_pins((changed,)), ())
 
 
 class ReviewThreadReadTests(unittest.TestCase):

@@ -1370,16 +1370,21 @@ class ProverLoop:
         The three are handed over at deliberately different granularity, and the
         reconciler treats them that way: the id-and-evidence pairs decide what
         is *not* feedback, the logins decide only who may not *clear* it, and the
-        operator-pinned ids name the exact posts that are allowed to clear it
-        anyway. The last of those comes straight from the configuration the
-        operator wrote before launch, and it stays a set of ids the whole way: no
-        login gains standing authority by appearing in it.
+        operator's pins name the exact posts, in the exact wording, that are
+        allowed to clear it anyway. The last of those comes straight from the
+        configuration the operator wrote before launch, and it stays a set of
+        id-and-evidence pairs the whole way: no login gains standing authority by
+        appearing in it, and no post gains it by being edited after it was
+        pinned.
         """
         state = self._state
         return RunArtifacts(
             verified=dict(state.verified_artifacts) if state is not None else {},
             publishers=frozenset(self.config.publisher_logins),
-            operator_acknowledgements=frozenset(self.config.operator_acknowledgements),
+            operator_acknowledgements={
+                pin.identifier: pin.body_evidence
+                for pin in self.config.operator_acknowledgements
+            },
         )
 
     def _read_surfaces(self) -> FeedbackSurfaces:
@@ -1453,9 +1458,10 @@ class ProverLoop:
         that performs one unresolved-to-cleared transition. That line counts only
         from a post allowed to spend one: not this run's own verified artifacts,
         and not a configured publishing login unless the operator pinned that
-        exact post's id before launch. Anything this run cannot prove resolved
-        stays unresolved, which is the direction that fails closed for a check
-        whose whole job is to decide whether a run may go on.
+        exact post's id before launch and it still holds the body they pinned it
+        over. Anything this run cannot prove resolved stays unresolved, which is
+        the direction that fails closed for a check whose whole job is to decide
+        whether a run may go on.
 
         It guards two moments, and only two: opening a fix attempt, and reporting
         ``merge-ready``. A ``blocked`` head is still reported as blocked — the
@@ -1465,6 +1471,9 @@ class ProverLoop:
         artifacts = self._run_artifacts()
         pinned = sorted(artifacts.operator_acknowledgements)
         surfaces = self._stable_surfaces(head)
+        changed_pins = artifacts.changed_acknowledgement_pins(
+            (*surfaces.comments, *surfaces.reviews)
+        )
         result = reconcile(surfaces, artifacts=artifacts)
         if result.reconciled:
             self._event(
@@ -1502,6 +1511,11 @@ class ProverLoop:
                 # named so a stop shows the operator exactly which pinned ids were
                 # in force rather than leaving them to infer it from the config.
                 "operator_pinned_acknowledgements": pinned,
+                # The pinned posts that are on the PR but no longer say what was
+                # pinned. A lapsed authorization and a mistyped id both look like
+                # a conversation nothing cleared, and only one of them is fixed
+                # by re-reading the post and pinning what it says now.
+                "operator_pinned_acknowledgements_changed": list(changed_pins),
                 "untrusted_note": UNTRUSTED_NOTE,
                 "resolution": (
                     "read the conversation and deal with what it asks for; then resolve "
@@ -1509,7 +1523,8 @@ class ProverLoop:
                     f"their own review, and post '{ACKNOWLEDGEMENT} <artifact id>' on its "
                     "own line for each remaining comment. A post written under one of "
                     "this run's own publishing logins acknowledges nothing unless its "
-                    "exact id is listed in the config's operator_acknowledgements"
+                    "exact id is listed in the config's operator_acknowledgements and it "
+                    "still holds the body that pin's body_evidence was taken over"
                 ),
             },
         )
