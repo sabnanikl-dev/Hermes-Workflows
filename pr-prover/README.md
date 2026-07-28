@@ -96,6 +96,15 @@ the pull request, because a PR body is untrusted prose — a PR that says
 author typed. Which contract a change is measured against is not a question the
 change gets to answer.
 
+`operator_acknowledgements` is **optional**, and absent means the strictest thing
+this tool can mean. It lists exact immutable GitHub post ids an operator
+authorized before launch, and its only effect is to let those exact posts
+acknowledge earlier feedback even though a configured publishing login wrote
+them — see [Operator-pinned
+acknowledgements](#operator-pinned-acknowledgements). It is never a login, a
+pattern, or a standing permission, it is bounded at sixteen ids, and
+`check-config` prints back every one it was handed.
+
 `env` and `env_unset` are a small **named overlay** on the environment a lane
 inherits, never a replacement for it. The trusted agents run as the operator's
 own user and authenticate through the normal OAuth/keychain session, so there is
@@ -553,12 +562,14 @@ one does not:
   all ineffective, on purpose — a form loose enough to forgive a typo is a
   second, unwritten way to clear somebody's stop.
 
-That line is *spent* only when all six of these hold: its author is not a
-configured publishing login; it names exactly one eligible unresolved prose item
-on a surface with no native resolution; GitHub's own UTC-aware timestamps put
-that target strictly earlier; the target is not the post itself; the target is
-not already cleared, globally or by an earlier line of the same post; and so the
-line performs exactly one unresolved-to-cleared transition.
+That line is *spent* only when all six of these hold: its post is allowed to
+acknowledge at all — see [operator-pinned
+acknowledgements](#operator-pinned-acknowledgements); it names exactly one
+eligible unresolved prose item on a surface with no native resolution; GitHub's
+own UTC-aware timestamps put that target strictly earlier; the target is not the
+post itself; the target is not already cleared, globally or by an earlier line
+of the same post; and so the line performs exactly one unresolved-to-cleared
+transition.
 
 One canonical order — UTC-aware timestamp, then surface, then immutable id —
 governs everywhere an order exists: which posts are considered as candidates,
@@ -581,6 +592,53 @@ The check guards two moments and only two: opening a fix attempt, and reporting
 `merge-ready`. A `blocked` head is still reported blocked — the blockers are
 real whatever the conversation says, and refusing to answer is not the same as
 answering carefully.
+
+### Operator-pinned acknowledgements
+
+A post written under one of this run's own publishing logins acknowledges
+nothing. That is the rule a lane must not be able to talk its way out of — it
+would be marking its own homework — and it is the default here whatever else is
+configured.
+
+It has one failure mode, and it is not hypothetical. Where the builder publishes
+as one account, the reviewers as another, and those two are also the only
+identities the operator has, *nobody* can acknowledge anything: a conversation
+the operator has already reconciled by hand still stops every run, with
+`acknowledged: []` and no identity left that could change that. A run nobody can
+answer is not a safer run than one that can be answered carefully.
+
+So the run config may name exact immutable post ids, and only ids:
+
+```json
+"operator_acknowledgements": ["5107483039", "5107611402"]
+```
+
+A publisher-authored post may spend acknowledgement lines when, and only when,
+its own id is listed there. What that authorizes is one post the operator read
+before launch — never a login, never a shape, never a pattern. Concretely:
+
+- **absent or `[]` is the strict default**, unchanged in every respect;
+- the same account's *next* post is refused, and so is the same post with one
+  byte changed, because what was pinned was an id and an id names one body;
+- a pinned post is exempt from nothing else. The exact line grammar,
+  immutable-id matching, chronology, the single unresolved-to-cleared
+  transition, residual prose, and native review/thread resolution all still
+  decide, so a mixed post spends its valid lines and its own remaining prose
+  stays unresolved until a *separately* pinned later post clears that id;
+- a pinned post is still feedback in its own right — pinning grants
+  acknowledgement authority, not an exemption from being read;
+- **nothing a lane published during the run can be reached by a pin.** A
+  verified run artifact is refused whatever the config says, because an artifact
+  that did not exist until a lane posted it cannot be one an operator read
+  beforehand;
+- an id that names nothing on the PR does nothing, silently and safely.
+
+There is no login allowlist, no approval service, no token or signature
+protocol, and no third identity: the whole seam is a bounded list of ids
+(sixteen at most) that `check-config` prints back before a run starts, and that
+every `needs-Karan` stop repeats as
+`operator_pinned_acknowledgements` so the authorization in force is visible
+beside the feedback it did not clear.
 
 ## Fix cycles start fresh
 

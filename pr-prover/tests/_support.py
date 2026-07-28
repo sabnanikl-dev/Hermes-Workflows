@@ -866,6 +866,7 @@ def make_config(
     lock_file: str | None = None,
     reviewers: Sequence[Mapping[str, object]] | None = None,
     governing_issues: Sequence[int] = (GOVERNING_ISSUE,),
+    operator_acknowledgements: Sequence[str] | None = None,
 ) -> RunConfig:
     payload: dict[str, object] = {
         "schema_version": 2,
@@ -893,6 +894,10 @@ def make_config(
     }
     if branch is None:
         payload.pop("branch")
+    # Absent unless a test pins something, so every other config in this suite
+    # keeps proving the default publisher denial rather than a relaxed one.
+    if operator_acknowledgements is not None:
+        payload["operator_acknowledgements"] = list(operator_acknowledgements)
     return RunConfig.from_mapping(payload, base_dir=tmp)
 
 

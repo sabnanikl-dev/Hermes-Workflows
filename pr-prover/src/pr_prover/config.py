@@ -70,6 +70,27 @@ is posted, so on their own they prove only that somebody read the PR; the login
 is the part an arbitrary account cannot supply. There is no "any author will do"
 configuration to fall into.
 
+``operator_acknowledgements`` is the one optional, strict seam through which a
+human operator can pin acknowledgement posts *before* a run starts. It is a list
+of exact immutable GitHub artifact ids and nothing else — no logins, no
+patterns, no bearer tokens, no third identity. Its only effect is on
+:mod:`pr_prover.feedback`: a post whose author is one of this run's own
+publishing logins may spend acknowledgement lines when, and only when, its own
+immutable id is listed here. Absent or empty, every publisher-authored post is
+refused acknowledgement authority exactly as before.
+
+It exists because the publishing logins and the human operator can be the same
+GitHub accounts. When they are, the fail-closed rule that a lane may not clear
+the feedback aimed at it leaves the operator with no identity that can
+acknowledge anything, and a run that cannot be answered is not safer than one
+that can — it is just stuck. Pinning an id is the operator saying "I read that
+exact post, and I authorize it", which is a decision made on a post that already
+exists rather than a login granted standing authority. Everything else about the
+acknowledgement contract is untouched: the exact line grammar, immutable-id
+matching, chronology, the single unresolved-to-cleared transition, residual
+prose, native review/thread resolution, and the refusal to let this run's own
+verified artifacts acknowledge anything at all.
+
 ``env``/``env_unset`` are a small named overlay on the inherited environment,
 not a replacement for it: the trusted lanes run as the operator's own user with
 the normal Claude OAuth/keychain session, so the session variables cannot be
@@ -121,6 +142,18 @@ _V1_UPGRADE_STEPS = (
 # bound exists so a misconfiguration cannot quietly turn every reviewer packet
 # into a document dump.
 MAX_GOVERNING_ISSUES = 8
+# How many acknowledgement posts one operator may pin for one run. The seam is a
+# preauthorization of specific posts somebody has read, so the bound is the size
+# of a list a human can still check by eye; a config that needs more than this is
+# describing a policy rather than a decision, and policy is not what this field
+# is for.
+MAX_OPERATOR_ACKNOWLEDGEMENTS = 16
+# One immutable GitHub artifact id, as the surfaces this tool reads can produce
+# it: a REST comment id (``5107483039``), a namespaced review id
+# (``review:2938...``), or a GraphQL node id (``IC_kwDOM...==``). Matched
+# exactly and bounded, because this value is compared against ids GitHub
+# assigned and is never a pattern, a prefix, or a login.
+_ARTIFACT_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:=-]{0,199}\Z")
 GATE_KINDS = ("baseline", "visual")
 # The acceptance lifecycle, as configuration rather than operator convention.
 #
@@ -157,6 +190,7 @@ _TOP_LEVEL_KEYS = frozenset(
         "lock_file",
         "visual_qa_required",
         "governing_issues",
+        "operator_acknowledgements",
         "gates",
         "reviewers",
         "builder",
@@ -309,6 +343,10 @@ class RunConfig:
     branch: str | None = None
     base: str | None = None
     visual_qa_required: bool = False
+    # Exact immutable acknowledgement post ids the operator authorized before
+    # launch. Empty is the default and means what it always meant: no post
+    # written under a publishing login may acknowledge anything.
+    operator_acknowledgements: tuple[str, ...] = ()
     source: Path | None = field(default=None, compare=False)
 
     @property
@@ -347,8 +385,24 @@ class RunConfig:
         what the two-cycle loop pays for. An omitted budget is the other end of
         the same problem — nothing will ever end that lane — so it is said out
         loud here rather than quietly capped somewhere the report cannot see.
+
+        A pinned acknowledgement is the other kind of note worth printing before
+        a run rather than reading about afterwards. It is the one field that lets
+        a post written under a publishing login clear human feedback, so
+        ``check-config`` names every id it was handed: the seam is auditable
+        exactly to the extent an operator can see, before launch, which posts
+        they preauthorized.
         """
         notes: list[str] = []
+        if self.operator_acknowledgements:
+            notes.append(
+                f"{len(self.operator_acknowledgements)} operator-pinned acknowledgement "
+                "post id(s) may acknowledge earlier feedback even though a configured "
+                "publishing login wrote them: "
+                + ", ".join(self.operator_acknowledgements)
+                + "; pin only exact posts you have read on this pull request, since "
+                "each one is an authorization rather than a login-wide exemption"
+            )
         for lane, timeout in self._budgets():
             if timeout is None:
                 notes.append(
@@ -513,6 +567,7 @@ class RunConfig:
             )
 
         governing_issues = _governing_issues(raw)
+        operator_acknowledgements = _operator_acknowledgements(raw)
 
         branch = _optional_text(raw, "branch")
         base = _optional_text(raw, "base")
@@ -536,6 +591,7 @@ class RunConfig:
             branch=branch,
             base=base,
             visual_qa_required=visual_required,
+            operator_acknowledgements=operator_acknowledgements,
             source=source,
         )
 
@@ -595,6 +651,60 @@ def _governing_issues(raw: Mapping[str, Any]) -> tuple[int, ...]:
             )
         numbers.append(item)
     return tuple(numbers)
+
+
+def _operator_acknowledgements(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    """The exact acknowledgement post ids the operator authorized before launch.
+
+    Optional, and absent means the strictest thing this tool can mean: no post
+    written under a configured publishing login may acknowledge anything. What
+    the field adds is per-post, not per-account — an operator who has read one
+    exact post says so by naming the id GitHub assigned it — so everything here
+    is checked as an id and nothing is accepted as a rule about authors.
+
+    Strictness is the point of each refusal below. A non-string, a whitespace or
+    control character, or an over-long value is not an id this tool could ever
+    match against a GitHub artifact, and accepting one would leave an operator
+    believing a post was pinned when nothing was. A repeated id is a file whose
+    author has lost track of what they authorized. The count is bounded for the
+    same reason ``governing_issues`` is: a list a human cannot check by eye has
+    stopped being a list of decisions.
+
+    A malformed entry is never echoed back. It is operator-supplied text of
+    unknown provenance, and the index says which entry to fix.
+    """
+    value = raw.get("operator_acknowledgements")
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(
+            "config operator_acknowledgements must be a list of exact immutable "
+            "GitHub artifact ids; it preauthorizes specific acknowledgement posts "
+            "and is never a login, a pattern, or a prefix",
+            evidence={"key": "operator_acknowledgements"},
+        )
+    if len(value) > MAX_OPERATOR_ACKNOWLEDGEMENTS:
+        raise ConfigError(
+            f"config operator_acknowledgements names more than "
+            f"{MAX_OPERATOR_ACKNOWLEDGEMENTS} artifacts",
+            evidence={"count": len(value), "limit": MAX_OPERATOR_ACKNOWLEDGEMENTS},
+        )
+    identifiers: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not _ARTIFACT_ID.match(item):
+            raise ConfigError(
+                f"config operator_acknowledgements[{index}] must be one exact "
+                "immutable GitHub artifact id: a bounded string of letters, digits, "
+                "'.', '_', ':', '=', or '-', with no whitespace in it",
+                evidence={"index": index},
+            )
+        if item in identifiers:
+            raise ConfigError(
+                "config operator_acknowledgements names the same artifact twice",
+                evidence={"artifact_id": item},
+            )
+        identifiers.append(item)
+    return tuple(identifiers)
 
 
 def _sequence(raw: Mapping[str, Any], key: str, *, required: bool) -> list[Any]:
@@ -824,6 +934,7 @@ def _reject_duplicates(names: list[str], *, what: str) -> None:
 __all__ = [
     "GATE_KINDS",
     "MAX_GOVERNING_ISSUES",
+    "MAX_OPERATOR_ACKNOWLEDGEMENTS",
     "REALISTIC_BUILDER_BUDGET",
     "REALISTIC_REVIEWER_BUDGET",
     "REQUIRED_REVIEWER_ROLES",

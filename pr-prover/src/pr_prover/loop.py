@@ -1367,14 +1367,19 @@ class ProverLoop:
     def _run_artifacts(self) -> RunArtifacts:
         """This run's own publications, and the logins its lanes publish under.
 
-        The two are handed over at deliberately different granularity, and the
+        The three are handed over at deliberately different granularity, and the
         reconciler treats them that way: the id-and-evidence pairs decide what
-        is *not* feedback, and the logins decide only who may not *clear* it.
+        is *not* feedback, the logins decide only who may not *clear* it, and the
+        operator-pinned ids name the exact posts that are allowed to clear it
+        anyway. The last of those comes straight from the configuration the
+        operator wrote before launch, and it stays a set of ids the whole way: no
+        login gains standing authority by appearing in it.
         """
         state = self._state
         return RunArtifacts(
             verified=dict(state.verified_artifacts) if state is not None else {},
             publishers=frozenset(self.config.publisher_logins),
+            operator_acknowledgements=frozenset(self.config.operator_acknowledgements),
         )
 
     def _read_surfaces(self) -> FeedbackSurfaces:
@@ -1445,22 +1450,28 @@ class ProverLoop:
         same author; an inline thread clears only when GitHub records it resolved
         or outdated; and a conversation comment, which has no resolve button at
         all, clears only through a later ``PR-PROVER: ACKNOWLEDGED <id>`` line
-        that performs one unresolved-to-cleared transition. Anything this run
-        cannot prove resolved stays unresolved, which is the direction that fails
-        closed for a check whose whole job is to decide whether a run may go on.
+        that performs one unresolved-to-cleared transition. That line counts only
+        from a post allowed to spend one: not this run's own verified artifacts,
+        and not a configured publishing login unless the operator pinned that
+        exact post's id before launch. Anything this run cannot prove resolved
+        stays unresolved, which is the direction that fails closed for a check
+        whose whole job is to decide whether a run may go on.
 
         It guards two moments, and only two: opening a fix attempt, and reporting
         ``merge-ready``. A ``blocked`` head is still reported as blocked — the
         blockers are real whatever the conversation says, and refusing to answer
         is not the same as answering carefully.
         """
+        artifacts = self._run_artifacts()
+        pinned = sorted(artifacts.operator_acknowledgements)
         surfaces = self._stable_surfaces(head)
-        result = reconcile(surfaces, artifacts=self._run_artifacts())
+        result = reconcile(surfaces, artifacts=artifacts)
         if result.reconciled:
             self._event(
                 f"human feedback reconciled on {head} before {before}: "
                 f"{len(surfaces.comments)} comment(s), {len(surfaces.reviews)} review(s), "
-                f"{len(surfaces.threads)} thread(s), {len(result.cleared)} acknowledged"
+                f"{len(surfaces.threads)} thread(s), {len(result.cleared)} acknowledged, "
+                f"{len(pinned)} operator-pinned acknowledgement post(s) configured"
             )
             return
         raise HumanFeedbackPresent(
@@ -1487,12 +1498,18 @@ class ProverLoop:
                     0, len(result.unresolved) - _OBSERVED_CANDIDATES
                 ),
                 "acknowledged": sorted(result.cleared),
+                # What this run was authorized to accept from a publishing login,
+                # named so a stop shows the operator exactly which pinned ids were
+                # in force rather than leaving them to infer it from the config.
+                "operator_pinned_acknowledgements": pinned,
                 "untrusted_note": UNTRUSTED_NOTE,
                 "resolution": (
                     "read the conversation and deal with what it asks for; then resolve "
                     "the inline threads, have the requesting reviewer approve or dismiss "
                     f"their own review, and post '{ACKNOWLEDGEMENT} <artifact id>' on its "
-                    "own line for each remaining comment"
+                    "own line for each remaining comment. A post written under one of "
+                    "this run's own publishing logins acknowledges nothing unless its "
+                    "exact id is listed in the config's operator_acknowledgements"
                 ),
             },
         )

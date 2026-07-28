@@ -125,16 +125,22 @@ def thread(
     )
 
 
-def owning(*artifacts: Comment) -> RunArtifacts:
+def owning(*artifacts: Comment, pinned: tuple[str, ...] = ()) -> RunArtifacts:
     """A run that proved it published exactly these artifacts, as they stand.
 
     Ownership is the id *and* what readback verified the post held, so the
     artifacts themselves are passed rather than bare ids: retaining an id alone
     is the thing that keeps an edited post excluded after somebody rewrites it.
+
+    ``pinned`` is the other half of the identity contract: the exact post ids an
+    operator authorized in the run config before launch. Empty is the default
+    everywhere, so every row that does not name one is still proving the
+    unconditional publisher denial.
     """
     return RunArtifacts(
         verified={item.identifier: publication_evidence(item) for item in artifacts},
         publishers=PUBLISHERS,
+        operator_acknowledgements=frozenset(pinned),
     )
 
 
@@ -151,11 +157,14 @@ class Case:
     reviews: tuple[Comment, ...] = ()
     threads: tuple[ReviewThread, ...] = ()
     owned: tuple[Comment, ...] = ()
+    pinned: tuple[str, ...] = ()
     cleared: tuple[str, ...] | None = None
     note: str = ""
 
     def artifacts(self) -> RunArtifacts:
-        return owning(*self.owned) if self.owned else NOTHING_PROVED
+        if not self.owned and not self.pinned:
+            return NOTHING_PROVED
+        return owning(*self.owned, pinned=self.pinned)
 
     def surfaces(self) -> FeedbackSurfaces:
         return FeedbackSurfaces(
@@ -167,6 +176,15 @@ class Case:
 RAISED = comment("c1", BLOCKING_PROSE, created_at=at(1))
 OWNED_ARTIFACT = comment(
     "owned1", reviewer_artifact(role="reviewer-a", head=HEAD_A), author=REVIEWER_LOGIN
+)
+# A verified run artifact carrying an acknowledgement line, for the row that
+# pins its id anyway: a post this run published during the run is the one thing
+# an operator cannot have read before launch, so the pin must not reach it.
+PINNED_RUN_ARTIFACT = comment(
+    "owned2",
+    f"{reviewer_artifact(role='reviewer-b', head=HEAD_A)}\n{ack('c1')}",
+    author=REVIEWER_LOGIN,
+    created_at=at(2),
 )
 
 TRUTH_TABLE: tuple[Case, ...] = (
@@ -385,6 +403,146 @@ TRUTH_TABLE: tuple[Case, ...] = (
         name="a copy under a publishing login this run never published is feedback",
         comments=(comment("c9", reviewer_artifact(role="reviewer-a", head=HEAD_A), author=REVIEWER_LOGIN),),
         unresolved=("c9",),
+    ),
+    # -- operator-pinned acknowledgement authority -------------------------
+    #
+    # The deadlock these rows exist for: when the operator's account is also a
+    # configured publishing login, the unconditional denial above leaves nobody
+    # able to answer the conversation at all. What is authorized is one exact
+    # post the operator read before launch, so every other rule still applies to
+    # it and the same login's other posts are refused exactly as before.
+    Case(
+        name="an operator-pinned publisher post may acknowledge",
+        comments=(RAISED, comment("c2", ack("c1"), author=REVIEWER_LOGIN, created_at=at(2))),
+        pinned=("c2",),
+        unresolved=(),
+        cleared=("c1",),
+    ),
+    Case(
+        name="pinning one post does not authorize the same login's next one",
+        comments=(
+            RAISED,
+            comment("c2", "and another thing", created_at=at(2)),
+            comment("c3", ack("c1"), author=REVIEWER_LOGIN, created_at=at(3)),
+            comment("c4", ack("c2"), author=REVIEWER_LOGIN, created_at=at(4)),
+        ),
+        pinned=("c3",),
+        unresolved=("c2", "c4"),
+        cleared=("c1",),
+        note=(
+            "the pinned post cleared what it named; the unpinned one from the "
+            "same login cleared nothing and is itself unacknowledged prose"
+        ),
+    ),
+    Case(
+        name="a pinned mixed post spends its lines and leaves its own prose",
+        comments=(
+            RAISED,
+            comment(
+                "c2",
+                f"{ack('c1')}\nreconciled with the operator; holding for a re-read",
+                author=BUILDER_LOGIN,
+                created_at=at(2),
+            ),
+        ),
+        pinned=("c2",),
+        unresolved=("c2",),
+        cleared=("c1",),
+    ),
+    Case(
+        name="a later separately pinned pure acknowledgement clears that residual",
+        comments=(
+            RAISED,
+            comment(
+                "c2",
+                f"{ack('c1')}\nreconciled with the operator; holding for a re-read",
+                author=BUILDER_LOGIN,
+                created_at=at(2),
+            ),
+            comment("c3", ack("c2"), author=BUILDER_LOGIN, created_at=at(3)),
+        ),
+        pinned=("c2", "c3"),
+        unresolved=(),
+        cleared=("c1", "c2"),
+        note="the PAPI-101 live shape: a mapped post, then the post that clears it",
+    ),
+    Case(
+        name="a pinned publisher post is still feedback in its own right",
+        comments=(comment("c1", BLOCKING_PROSE, author=BUILDER_LOGIN, created_at=at(1)),),
+        pinned=("c1",),
+        unresolved=("c1",),
+        note="pinning grants acknowledgement authority, never an exemption from being read",
+    ),
+    Case(
+        name="pinning this run's own verified artifact authorizes nothing",
+        comments=(RAISED, PINNED_RUN_ARTIFACT),
+        owned=(PINNED_RUN_ARTIFACT,),
+        pinned=(PINNED_RUN_ARTIFACT.identifier,),
+        unresolved=("c1",),
+        cleared=(),
+        note=(
+            "an artifact that did not exist until a lane published it cannot be "
+            "one an operator read beforehand, so no config reaches it"
+        ),
+    ),
+    Case(
+        name="a pinned id naming nothing on this PR changes nothing",
+        comments=(RAISED, comment("c2", ack("c1"), author=REVIEWER_LOGIN, created_at=at(2))),
+        pinned=("c404",),
+        unresolved=("c1", "c2"),
+        cleared=(),
+    ),
+    Case(
+        name="a pinned post still obeys the exact line grammar",
+        comments=(
+            RAISED,
+            comment(
+                "c2",
+                f"{ACKNOWLEDGEMENT}  c1",
+                author=REVIEWER_LOGIN,
+                created_at=at(2),
+            ),
+        ),
+        pinned=("c2",),
+        unresolved=("c1", "c2"),
+        cleared=(),
+    ),
+    Case(
+        name="a pinned post still obeys chronology",
+        comments=(
+            comment("c1", BLOCKING_PROSE, created_at=at(5)),
+            comment("c2", ack("c1"), author=REVIEWER_LOGIN, created_at=at(2)),
+        ),
+        pinned=("c2",),
+        unresolved=("c2", "c1"),
+        cleared=(),
+    ),
+    Case(
+        name="a pinned post cannot acknowledge itself",
+        comments=(RAISED, comment("c2", ack("c2"), author=REVIEWER_LOGIN, created_at=at(2))),
+        pinned=("c2",),
+        unresolved=("c1", "c2"),
+        cleared=(),
+    ),
+    Case(
+        name="two pinned posts cannot clear one item twice",
+        comments=(
+            RAISED,
+            comment("c2", ack("c1"), author=REVIEWER_LOGIN, created_at=at(2)),
+            comment("c3", ack("c1"), author=REVIEWER_LOGIN, created_at=at(3)),
+        ),
+        pinned=("c2", "c3"),
+        unresolved=("c3",),
+        cleared=("c1",),
+        note="the second line performs no unresolved-to-cleared transition",
+    ),
+    Case(
+        name="a pinned post cannot clear a natively resolvable surface",
+        comments=(comment("c2", ack("review:r1"), author=REVIEWER_LOGIN, created_at=at(2)),),
+        reviews=(review("review:r1", "please fix", state="CHANGES_REQUESTED", created_at=at(1)),),
+        pinned=("c2",),
+        unresolved=("review:r1", "c2"),
+        cleared=(),
     ),
     # -- ineligible targets -----------------------------------------------
     Case(
