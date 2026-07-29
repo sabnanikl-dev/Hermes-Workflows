@@ -33,6 +33,7 @@ Builder contract::
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .errors import MalformedVerdict, ScopeContamination, StaleHead
@@ -272,6 +273,19 @@ def parse_reviewer_verdict(reviewer: str, output: str, *, expected_head: str) ->
     return ReviewerVerdict(reviewer=reviewer, status=status, head=head, findings=tuple(findings))
 
 
+def render_finding_records(findings: Sequence[Finding]) -> tuple[str, ...]:
+    """Render parsed findings using the grammar :func:`finding_records` reads.
+
+    The control plane uses this only for its publication copy after it has
+    parsed a reviewer's final message. Keeping the writer beside the grammar
+    reader prevents a second hand-maintained record format in the relay layer.
+    """
+    return tuple(
+        f"FINDING: SEVERITY={finding.severity} ID={finding.id} -- {finding.summary}"
+        for finding in findings
+    )
+
+
 def parse_builder_report(
     output: str,
     *,
@@ -339,4 +353,5 @@ __all__ = [
     "finding_records",
     "parse_builder_report",
     "parse_reviewer_verdict",
+    "render_finding_records",
 ]

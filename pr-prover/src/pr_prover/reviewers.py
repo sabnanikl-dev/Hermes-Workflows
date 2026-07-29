@@ -74,18 +74,17 @@ from; the artifact is what Karan and the next reviewer read. An artifact that
 says ``pass`` over a lane that reported blockers is not a formatting slip, it is
 two different stories about one head.
 
-The findings themselves are held to the same standard, and to the same grammar.
-``BLOCKING=`` is a count; the artifact's ``FINDING:`` lines are the records, and
-:func:`pr_prover.verdicts.finding_records` — the parser that read the lane's
-final message — is what reads them here too. :func:`finding_parity` then holds
-the two surfaces to one claim: the declared count is the number of blocking
-lines actually present, and every finding the lane reported appears exactly once
-with the same severity and summary, with nothing extra beside it. An artifact
-that announces nine blockers and states none of them satisfies every
-declaration check above and still leaves the Integration Auditor and Karan
-nothing to reconcile, so it is refused before a relay can publish it — and
-refused again, by the same comparison, if the body that reached GitHub is not
-the body that was validated.
+The reviewer final message is the structured source of truth. ``BLOCKING=`` is
+a count, and the parent parses that message once with
+:func:`pr_prover.verdicts.finding_records`. Before publication it renders those
+canonical records into the relay artifact deterministically. A reviewer may
+leave no ``FINDING:`` records in its prose artifact; that is normal and does not
+make the final verdict unrelayable. If it does try to include structured records,
+they are read by the same parser and must already agree one-to-one with the final
+verdict. A conflicting, duplicated, or malformed record still fails closed.
+The rendered publication copy is then revalidated and read back with the same
+comparison, so the Integration Auditor and Karan receive the exact structured
+records the reviewer reported.
 
 ``KILL-SWITCH:`` is the adversarial mandate made checkable. A reviewer's job on
 a fix cycle is to try to *kill* the builder's fix — to hunt for a bad-faith
@@ -108,7 +107,7 @@ from typing import Any
 from .errors import MalformedVerdict, ReviewerRelayError
 from .findings import Finding
 from .redaction import scrub
-from .verdicts import FindingRecord, finding_records
+from .verdicts import FindingRecord, finding_records, render_finding_records
 
 # The variable names that carry a GitHub credential. A reviewer lane in the
 # relayed lifecycle never sees one; it writes a file and the relay publishes it.
@@ -398,6 +397,34 @@ def finding_parity(
     return ""
 
 
+def normalized_artifact_body(
+    body: str, *, artifact_records: Sequence[FindingRecord], findings: Sequence[Finding]
+) -> str:
+    """Replace validated artifact records with canonical final-verdict records.
+
+    The prepared artifact remains a reviewer-written prose surface. Its existing
+    structured lines are only a consistency assertion: :func:`read_prepared`
+    has already rejected any disagreement before this function runs. The relay
+    copy removes those duplicate model-rendered lines and appends the canonical
+    block derived from the final verdict. With no findings, nothing is appended,
+    so pass/no-finding artifacts remain clean.
+    """
+    canonical = render_finding_records(findings)
+    if not artifact_records and not canonical:
+        return body
+    record_lines = {record.line for record in artifact_records}
+    kept = "".join(
+        line
+        for number, line in enumerate(body.splitlines(keepends=True), start=1)
+        if number not in record_lines
+    )
+    if not canonical:
+        return kept
+    separator = "" if not kept or kept.endswith(("\n", "\r")) else "\n"
+    canonical_block = "\n".join(canonical)
+    return f"{kept}{separator}{canonical_block}\n"
+
+
 @dataclass(frozen=True)
 class PreparedArtifact:
     """A reviewer's finished artifact, on disk and not yet published."""
@@ -405,9 +432,10 @@ class PreparedArtifact:
     path: Path
     body: str
     claim: ArtifactClaim
-    # The artifact's own finding lines, already proved to be the lane's
-    # findings. Kept rather than discarded so a caller that needs the record
-    # reads the validated one instead of re-parsing the body.
+    # Any structured lines the reviewer put in its own artifact. They are
+    # already proved to agree with the final verdict when present, and their
+    # line numbers let publication remove duplicate model-rendered records
+    # before it appends the canonical final-verdict block.
     findings: tuple[FindingRecord, ...] = ()
     # Has this body been through the redaction every published surface owes?
     # False is what a lane wrote: valid, checked against everything this run
@@ -515,13 +543,11 @@ def read_prepared(
     reviewer lane that fell over silently stops the run rather than putting
     something unusable on the PR under the reviewer's name.
 
-    ``findings`` is the lane verdict this artifact must be the same claim as,
-    already parsed from the final message. The declaration block is checked
-    against ``status`` and ``blocking``, and then the artifact's own
-    ``FINDING:`` lines are checked against those findings one to one, because a
-    count is not a record: an artifact declaring blockers it does not state is
-    the one shape that passes every declaration check and still leaves the next
-    reader nothing to act on.
+    ``findings`` is the lane verdict already parsed from the final message. The
+    declaration block is checked against ``status`` and ``blocking``. A prepared
+    artifact may omit structured records: the relay copy deterministically adds
+    the final verdict's canonical block. If the reviewer did include records,
+    they are a second claim and must agree one to one before anything publishes.
     """
     evidence: dict[str, Any] = {
         "reviewer": reviewer,
@@ -627,7 +653,11 @@ def _validated(
             },
         )
     records = artifact_findings(body, reviewer=reviewer, surface=surface)
-    mismatch = finding_parity(records, findings, declared=blocking)
+    # The final message is the canonical source. A prose artifact may omit
+    # ``FINDING:`` lines entirely; publication supplies those from ``findings``.
+    # Any structured line the artifact does include is a second machine claim,
+    # so retain the existing one-to-one fail-closed comparison for that case.
+    mismatch = finding_parity(records, findings, declared=blocking) if records else ""
     if mismatch:
         raise ReviewerRelayError(
             f"reviewer {reviewer}'s {surface} does not carry the findings this "
@@ -705,8 +735,11 @@ def publication_copy(
         "artifact_file": str(prepared.path),
         "publication_file": str(target),
     }
+    normalized = normalized_artifact_body(
+        prepared.body, artifact_records=prepared.findings, findings=findings
+    )
     try:
-        body = scrub(prepared.body)
+        body = scrub(normalized)
     except Exception as exc:  # pragma: no cover - a regex substitution over str
         # Fail closed rather than fall back to the unredacted body: "the
         # sanitizer did not run" is the one condition under which publishing is
@@ -918,6 +951,7 @@ __all__ = [
     "expected_block",
     "finding_parity",
     "is_full_sha",
+    "normalized_artifact_body",
     "parse_artifact",
     "publication_copy",
     "publication_path",

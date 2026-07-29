@@ -7,7 +7,13 @@ import _support
 from _support import HEAD_A, HEAD_B, builder_output, reviewer_output
 from pr_prover.errors import MalformedVerdict, ScopeContamination, StaleHead
 from pr_prover.redaction import PLACEHOLDER, clip, scrub
-from pr_prover.verdicts import MAX_SUMMARY, parse_builder_report, parse_reviewer_verdict
+from pr_prover.verdicts import (
+    MAX_SUMMARY,
+    finding_records,
+    parse_builder_report,
+    parse_reviewer_verdict,
+    render_finding_records,
+)
 
 
 class ReviewerVerdictTests(unittest.TestCase):
@@ -31,6 +37,28 @@ class ReviewerVerdictTests(unittest.TestCase):
         self.assertEqual([item.id for item in verdict.findings], ["null-deref", "naming", "copy-tone"])
         self.assertTrue(all(item.source == "reviewer:A" for item in verdict.findings))
         self.assertTrue(all(item.head == HEAD_A for item in verdict.findings))
+
+    def test_rendered_findings_round_trip_through_the_canonical_parser(self) -> None:
+        """The relay renderer cannot drift from the grammar its records must satisfy."""
+        verdict = parse_reviewer_verdict(
+            "A",
+            reviewer_output(
+                HEAD_A,
+                [
+                    ("blocking", "null-deref", "crashes on empty input"),
+                    ("non-blocking", "naming", "rename the helper"),
+                    ("needs-karan", "copy-tone", "headline wording is a product call"),
+                ],
+            ),
+            expected_head=HEAD_A,
+        )
+
+        records = finding_records("\n".join(render_finding_records(verdict.findings)), lane="relay")
+
+        self.assertEqual(
+            [(record.severity, record.id, record.summary) for record in records],
+            [(item.severity, item.id, item.summary) for item in verdict.findings],
+        )
 
     def test_missing_marker_fails_closed(self) -> None:
         with self.assertRaises(MalformedVerdict):
