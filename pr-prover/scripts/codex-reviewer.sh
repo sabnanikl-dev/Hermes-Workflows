@@ -262,7 +262,9 @@ second or conflicting HEAD= line is rejected before anything is published. The
 same rule applies to ROLE=, RUNTIME=, STATUS=, and BLOCKING=, and STATUS must
 agree with BLOCKING: pass means zero.
 
-State every blocking finding in the artifact with its file and line.
+Record every blocker in the artifact narrative with its file and line, but do not
+write FINDING: records there. The parent renders the canonical structured
+finding block from this final message when it creates the relay artifact.
 
 Your final message is the only thing read as this lane's verdict. Nothing you
 print along the way is parsed, so put the whole machine-readable result in that
@@ -293,11 +295,11 @@ Then print, as the last non-empty line of your final message, exactly:
 
   DONE: STATUS=pass|fail BLOCKING=<number of blocking findings> HEAD=${head}
 
-These have to agree with each other and with your artifact, one to one:
-BLOCKING= is the number of FINDING: lines whose SEVERITY= is blocking, the
-BLOCKING= line in your artifact is that same number, STATUS=pass is correct
-only when that number is zero, and STATUS=fail only when it is one or more.
-Nothing may follow the DONE: line, and there must be exactly one of it.
+BLOCKING= is the number of FINDING: lines whose SEVERITY= is blocking, and
+STATUS=pass is correct only when that number is zero; STATUS=fail only when it
+is one or more. The parent renders those canonical FINDING: records into the
+relay artifact. Nothing may follow the DONE: line, and there must be exactly one
+of it.
 PROMPT
 
 prompt=$(cat "$prompt_file")

@@ -216,25 +216,45 @@ class PreparedArtifactTests(unittest.TestCase):
         self.assertEqual(caught.exception.evidence["lane_blocking"], 3)
         self.assertEqual(caught.exception.evidence["declared_blocking"], 0)
 
-    def test_an_artifact_declaring_blockers_it_does_not_state_is_refused(self) -> None:
-        """A count is not a record.
+    def test_an_artifact_without_records_gets_the_final_verdicts_canonical_block(self) -> None:
+        """The final message is structured truth; the prose artifact need not duplicate it."""
+        lane = [make_finding("null-deref", summary="crashes on empty input")]
+        prepared = self.prepare(
+            reviewer_artifact(role="reviewer-a", head=HEAD_A, status="fail", blocking=1),
+            status="fail",
+            blocking=1,
+            findings=lane,
+        )
 
-        ``STATUS=fail`` and ``BLOCKING=1`` over zero ``FINDING:`` lines: every
-        declaration is well-formed, and all of them agree with the lane's own
-        marker. What the artifact does not carry is the one thing the next
-        reviewer and Karan have to act on, so it never reaches a relay.
-        """
-        with self.assertRaises(ReviewerRelayError) as caught:
-            self.prepare(
-                reviewer_artifact(role="reviewer-a", head=HEAD_A, status="fail", blocking=1),
+        # The reviewer wrote no structured records, but it still left a valid
+        # prose artifact for the parent to normalize rather than reject.
+        self.assertEqual(prepared.findings, ())
+        published = publication_copy(
+            prepared, reviewer="A", signature=REVIEWER_SIGNATURE, findings=lane
+        )
+
+        self.assertEqual([record.id for record in published.findings], ["null-deref"])
+        self.assertIn(
+            "FINDING: SEVERITY=blocking ID=null-deref -- crashes on empty input",
+            published.body.splitlines(),
+        )
+        self.assertTrue(
+            artifact_matches(
+                Comment(
+                    identifier="IC_canonical",
+                    author=REVIEWER_LOGIN,
+                    body=published.body,
+                    kind="comment",
+                ),
+                author=REVIEWER_LOGIN,
+                signature=REVIEWER_SIGNATURE,
+                role="reviewer-a",
+                head=HEAD_A,
                 status="fail",
                 blocking=1,
-                findings=[make_finding("null-deref", summary="crashes on empty input")],
+                findings=lane,
             )
-        self.assertIn("BLOCKING=1 over 0 blocking FINDING: line(s)", caught.exception.message)
-        self.assertEqual(caught.exception.reason, "relay-failure")
-        self.assertEqual(caught.exception.evidence["artifact_finding_count"], 0)
-        self.assertEqual(caught.exception.evidence["lane_finding_count"], 1)
+        )
 
     def test_the_same_review_stated_on_both_surfaces_validates(self) -> None:
         """Non-vacuity for every case below: parity is satisfiable, and this is it."""
@@ -1390,10 +1410,10 @@ class PublicationRedactionLoopTests(LoopHarness):
                 self, comment.body, PLACEHOLDER, f"published artifact {comment.identifier}"
             )
 
-    def test_the_published_artifact_is_the_lanes_own_words_minus_the_credential(
+    def test_the_published_artifact_preserves_prose_and_renders_the_final_verdict(
         self,
     ) -> None:
-        """Exact non-secret text, declarations, signature, verdict, and parity."""
+        """Reviewer prose survives; structured records come from the final verdict once."""
         loop = self.build()
         self.arrange()
 
@@ -1401,24 +1421,25 @@ class PublicationRedactionLoopTests(LoopHarness):
         self.assertEqual(result.outcome, MERGE_READY, result.reason)
         published = self.remote.comments[0].body
 
-        # Byte-for-byte the artifact reviewer A wrote, with only the sanitizer
-        # applied. Anything dropped, clipped, or reordered fails here.
-        assert_same_text(
-            self, published, scrub(self.body("reviewer-a")), "the published artifact"
-        )
+        # The artifact's narrative/declaration surface remains intact after
+        # redaction, but any model-written FINDING line is replaced by the
+        # canonical record parsed from the final verdict.
+        assert_carries(self, published, "KILL-SWITCH:", "the published artifact")
+        assert_carries(self, published, REVIEWER_SIGNATURE, "the published artifact")
         claim = parse_artifact(published).claim
         self.assertEqual(claim.role, "reviewer-a")
         self.assertEqual(claim.head, HEAD_A)
         self.assertEqual(claim.status, "pass")
         self.assertEqual(claim.blocking, 0)
         self.assertTrue(claim.kill_switches)
-        assert_carries(self, published, REVIEWER_SIGNATURE, "the published artifact")
-        # The finding survives as a record, redacted and still the lane's.
+        # The finding survives as one canonical record, redacted and still the
+        # exact finding the lane's final verdict carried.
         records = published_findings(published)
         self.assertEqual([record.id for record in records], ["pasted-header"])
         assert_same_text(
             self, records[0].summary, scrub(self.NOTE[2]), "the published summary"
         )
+        self.assertEqual(published.count("FINDING: SEVERITY="), 1)
         # And the shipped readback predicate accepts that body for this lane.
         self.assertTrue(
             artifact_matches(

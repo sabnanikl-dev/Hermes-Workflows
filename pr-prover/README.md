@@ -430,6 +430,13 @@ Headings, narrative, command output, and token-like words such as
 `stale-pr-evidence` are prose even when they resemble an identifier; they cannot
 create a lane finding or cause relay parity to fail.
 
+The final message is the reviewer’s single structured source of truth. The
+control plane parses those records once and renders the canonical block into the
+relay artifact. A prepared artifact may contain no `FINDING:` records at all;
+its narrative still travels. If it does include structured records, they are a
+second machine claim and must exactly match the final verdict or the run fails
+closed before publication.
+
 ### What the relay actually publishes
 
 Not the reviewer's own bytes. An artifact is child output, and the artifact is
@@ -440,12 +447,13 @@ written a credential into that document. Nothing downstream catches it: parsing
 scrubs the *records* it extracts, in memory, and hands on the body it read them
 out of exactly as it found it, so readback re-parses, re-scrubs, and agrees.
 
-So the body is scrubbed once, whole, by the same `redaction.scrub` every other
-surface goes through, and the result is written to its own path beside the
-original. That copy is what `{artifact_file}` resolves to for the relay, and it
-is revalidated first — signature, declarations, verdict, and one-to-one finding
-parity — on its own bytes, because a check applied to bytes nobody publishes
-proves nothing about the bytes that are.
+So the parent renders the canonical final-verdict records, then scrubs the whole
+body once by the same `redaction.scrub` every other surface goes through. The
+result is written to its own path beside the original. That copy is what
+`{artifact_file}` resolves to for the relay, and it is revalidated first —
+signature, declarations, verdict, and canonical finding parity — on its own
+bytes, because a check applied to bytes nobody publishes proves nothing about
+the bytes that are.
 
 Only the credential-shaped runs change; every other character survives, which is
 why this uses `scrub` and not the clipping `sanitize`/`evidence` the report and
@@ -748,38 +756,30 @@ value, which is the difference the one-to-one comparison below is trying to see.
 An actual credential in a summary is redacted, and that is the only thing that
 may differ from what the lane wrote.
 
-That grammar is stated verbatim in the prompt the reviewer adapter generates,
-and the two are held together by a round trip rather than by care: a fixture the
-shape of the nine-blocker artifact the PAPI-96 pilot produced is written the way
-the prompt asks for it and parsed by the parser that will judge it. A prompt
-that describes findings in prose while the parser reads a grammar is how a
-reviewer declares nine blockers over a count of zero, which is the second way
-that pilot stopped.
+That grammar is stated verbatim in the prompt the reviewer adapter generates and
+round-tripped through the parser that will judge the **final message**. The
+control plane then renders those parsed records into the relay artifact. A
+reviewer no longer has to reproduce the same machine-readable data in both its
+final message and a prose artifact, which removes the transport failure where a
+real blocker existed but had no relayable record.
 
 Parsing is unforgiving on purpose. Exactly one `DONE:` line may appear, it must
-be the final non-empty line, the SHA must equal the bound head byte for byte,
-and `BLOCKING=<count>` must reconcile with the findings above it — which in turn
-must equal the `BLOCKING=` the published artifact declares. Lane output is
-untrusted, so a body that quotes or forges a marker, repeats a finding id, or
-echoes the grammar back as an example fails the run closed instead of being read
-as a verdict.
+be the final non-empty line, the SHA must equal the bound head byte for byte, and
+`BLOCKING=<count>` must reconcile with the findings above it. The prepared
+artifact's `STATUS` and `BLOCKING` declarations must match that verdict. Lane
+output is untrusted, so a body that quotes or forges a marker, repeats a finding
+id, or echoes the grammar back as an example fails the run closed instead of
+being read as a verdict.
 
-A count is not a record, so the artifact is held to the findings as well as to
-the count. `BLOCKING=9` says how many blockers there were; the artifact's own
-`FINDING:` lines say what they were, and an artifact that declares the first
-while carrying none of the second passes every declaration check above and still
-leaves the Integration Auditor and Karan nothing to reconcile — the mirror image
-of the pilot failure where the reviewer declared nine and the parser counted
-zero. So before a relay is allowed to publish anything, the artifact's finding
-lines are read by
-[`verdicts.finding_records`](src/pr_prover/verdicts.py) — the same function that
-read the lane's final message, not a second reader that could drift from it —
-and reconciled one to one with the findings that lane reported: the declared
-count is the number of blocking lines actually present, and every id appears
-exactly once with the same severity and the same summary, with nothing extra
-beside it. Order is not part of it; identity, count, severity, and text are. A
-missing, extra, duplicated, malformed, renamed, or rewritten record stops the run
-as a relay failure, and nothing reaches the pull request.
+A count is not a record, so the **published** artifact is held to the canonical
+final-message records as well as to the count. Before relay, the parent renders
+those records deterministically into its publication copy; a prepared artifact
+with no structured records is therefore relayable without losing the reviewer's
+narrative. If the prepared artifact does include `FINDING:` records, the same
+[`verdicts.finding_records`](src/pr_prover/verdicts.py) parser reads them and
+requires exact parity with the final verdict. Missing prepared records are
+normalized; extra, conflicting, duplicated, malformed, renamed, or rewritten
+records still stop the run before publication.
 
 That check runs twice, on the two surfaces it has to be true of. Validating the
 prepared file proves what the relay was *handed*; it says nothing about what

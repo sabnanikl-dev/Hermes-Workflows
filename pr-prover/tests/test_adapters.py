@@ -41,7 +41,7 @@ from pr_prover.github import GoverningIssue, PullRequest, ReviewEvidence
 from pr_prover.loop import MERGE_READY, NEEDS_KARAN
 from pr_prover.packet import REQUIRED_SURFACES, build_packet, write_packet
 from pr_prover.report import as_dict
-from pr_prover.reviewers import CREDENTIAL_ENV, parse_artifact, read_prepared
+from pr_prover.reviewers import CREDENTIAL_ENV, parse_artifact, publication_copy, read_prepared
 from pr_prover.state import MAX_ATTEMPTS
 from pr_prover.verdicts import parse_reviewer_verdict
 from test_loop import LoopHarness
@@ -87,14 +87,10 @@ printf 'DONE: STATUS=pass BLOCKING=0 HEAD=%s\\n' "$PR_PROVER_STUB_HEAD"
 # adapter-to-relay lifecycle the adapter never actually produced — the artifact
 # would exist because the test wrote it, not because the reviewer did. So the
 # scratch write is the stub's, derived from the prompt like everything else it
-# knows, and the artifact it composes restates the findings from its own final
-# message because that is the parity the relay holds a real one to.
-#
-# The knobs are all "what a defective lane does": PR_PROVER_STUB_FINAL replaces
-# the answer, PR_PROVER_STUB_NO_FINAL writes none, PR_PROVER_STUB_NO_ARTIFACT
-# writes no artifact, and PR_PROVER_STUB_ARTIFACT_FINDINGS replaces the finding
-# lines in the artifact without touching the ones in the final message, which is
-# how an artifact comes to disagree with the verdict it reports.
+# knows. The artifact deliberately keeps its human-readable narrative/declaration
+# surface only: the parent renders the final message's canonical finding records
+# into the relay copy. PR_PROVER_STUB_ARTIFACT_FINDINGS is the defect knob that
+# adds independent artifact records without touching the final message.
 CODEX_STUB = """#!/bin/sh
 printf '%s\\n' "$@" > "$PR_PROVER_STUB_ARGV"
 final=""
@@ -149,8 +145,6 @@ if [ -z "${PR_PROVER_STUB_NO_ARTIFACT:-}" ] && [ -n "$artifact" ]; then
 			if [ -n "$PR_PROVER_STUB_ARTIFACT_FINDINGS" ]; then
 				printf '%s\\n' "$PR_PROVER_STUB_ARTIFACT_FINDINGS"
 			fi
-		elif [ -n "$stated" ]; then
-			printf '%s\\n' "$stated"
 		fi
 		printf '%s\\n' "$signature"
 	} > "$artifact"
@@ -894,9 +888,11 @@ class NineBlockerRoundTripTests(ReviewerLaneHarness):
         self.assertIn(
             f"DONE: STATUS=pass|fail BLOCKING=<number of blocking findings> HEAD={HEAD}", lines
         )
+        self.assertIn("but do not write FINDING: records there", prompt)
+        self.assertIn("parent renders the canonical structured finding block", prompt)
 
-    def test_the_artifact_for_that_review_validates_against_the_same_counts(self) -> None:
-        """One-to-one: marker, artifact, and parsed findings tell one story.
+    def test_the_publication_copy_renders_the_same_records_as_the_final_verdict(self) -> None:
+        """The lane writes prose; the control plane adds canonical records once.
 
         The artifact is the one the run itself produced. Nothing here writes it
         after the adapter returned, because an artifact the test fabricated
@@ -925,9 +921,15 @@ class NineBlockerRoundTripTests(ReviewerLaneHarness):
         )
         self.assertEqual(prepared.claim.blocking, 9)
         self.assertEqual(prepared.claim.status, "fail")
-        # And the findings are the same eleven records, not merely the same count.
+        self.assertEqual(prepared.findings, ())
+        published = publication_copy(
+            prepared,
+            reviewer="A",
+            signature=self.SIGNATURE,
+            findings=verdict.findings,
+        )
         self.assertEqual(
-            [record.id for record in prepared.findings],
+            [record.id for record in published.findings],
             [item.id for item in verdict.findings],
         )
 
@@ -1334,32 +1336,47 @@ class OrderedRelayLifecycleTests(LoopHarness):
         self.assertEqual(self.published(), [], "an artifact was published anyway")
         self.assertNotIn(RELAY, [call.argv[0] for call in self.runner.calls])
 
-    def test_an_artifact_declaring_blockers_it_does_not_state_never_publishes(self) -> None:
-        """The frozen reproducer, through everything that ships.
+    def test_an_artifact_without_records_relays_the_final_verdicts_canonical_block(self) -> None:
+        """The frozen reproducer now reaches the builder with a relayable record.
 
-        ``STATUS=fail``, ``BLOCKING=1``, and no ``FINDING:`` line at all. Every
-        declaration in it is well-formed and agrees with the lane's own marker;
-        what is missing is the record the Integration Auditor and Karan are
-        expected to reconcile, and that is enough to stop the run.
+        ``STATUS=fail``, ``BLOCKING=1``, and no ``FINDING:`` line in the prepared
+        artifact remains valid reviewer prose. The final message has the one
+        canonical record; the relay copy must render it, preserve the A → B →
+        Auditor lifecycle, and reach the ordinary bounded-builder path rather
+        than stopping at a transport error.
         """
+        blocker = "FINDING: SEVERITY=blocking ID=deleted-coverage -- the failing test was removed"
         loop = self.build(
             reviewers=self.lanes(
                 reviewer_a={
-                    "PR_PROVER_STUB_FINAL": (
-                        "FINDING: SEVERITY=blocking ID=deleted-coverage -- the failing test "
-                        f"was removed\nDONE: STATUS=fail BLOCKING=1 HEAD={HEAD_A}"
-                    ),
+                    "PR_PROVER_STUB_FINAL": f"{blocker}\nDONE: STATUS=fail BLOCKING=1 HEAD={HEAD_A}",
                     "PR_PROVER_STUB_ARTIFACT_FINDINGS": "",
                 }
             )
         )
+        # Keep the test at this exact head after the complete review lifecycle:
+        # the builder is deliberately a failed bounded attempt, not the subject
+        # of this transport-normalization proof.
+        for _ in range(MAX_ATTEMPTS):
+            self.script.add(
+                "lane-builder",
+                builder_output(HEAD_A, addressed=["deleted-coverage"], status="failure"),
+                returncode=1,
+            )
 
         result = loop.run()
 
         self.assertEqual(result.outcome, NEEDS_KARAN)
-        self.assertEqual(result.reason, "relay-failure")
-        self.assertEqual(self.published(), [])
-        self.assertNotIn(RELAY, [call.argv[0] for call in self.runner.calls])
+        self.assertNotEqual(result.reason, "relay-failure")
+        self.assertEqual([verdict.status for verdict in result.verdicts], ["fail", "pass", "pass"])
+        self.assertEqual(
+            [item.finding.id for item in result.classification.blocking], ["deleted-coverage"]
+        )
+        published = self.published()
+        self.assertEqual(len(published), 3)
+        self.assertIn(blocker, published[0].splitlines())
+        self.assertEqual(published[0].count("FINDING: SEVERITY="), 1)
+        self.assertEqual([call.argv[0] for call in self.runner.calls].count(RELAY), 3)
 
 
 class BuilderAdapterTests(AdapterHarness):
