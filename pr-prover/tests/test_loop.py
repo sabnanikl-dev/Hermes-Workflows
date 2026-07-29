@@ -27,6 +27,7 @@ from _support import (
     make_source_repo,
     reviewer_output,
 )
+from pr_prover import cli
 from pr_prover.errors import ScopeContamination, StateError
 from pr_prover.feedback import publication_evidence
 from pr_prover.findings import Finding
@@ -243,7 +244,7 @@ class LaneWorktreeIsolationTests(LoopHarness):
 
         retained = [path for path in result.retained_paths if "worktrees" in path]
         self.assertEqual(len(retained), 1)
-        self.assertTrue(retained[0].endswith("reviewer-a"))
+        self.assertIn("reviewer-a-run", retained[0])
         self.assertTrue((Path(retained[0]) / self.WITNESS).exists(), "kept for inspection")
 
     def test_a_second_lane_cannot_see_what_a_failed_first_lane_left(self) -> None:
@@ -296,6 +297,50 @@ class LaneWorktreeIsolationTests(LoopHarness):
         self.assertEqual(result.outcome, MERGE_READY)
         self.assertEqual(result.retained_paths, ())
         self.assertEqual(list((self.tmp / "worktrees").iterdir()), [])
+
+
+class RetainedWorktreeRetryTests(LoopHarness):
+    def test_reset_then_retry_uses_a_new_path_without_deleting_retained_evidence(self) -> None:
+        """A terminal relay failure leaves inspectable evidence but cannot dead-end retry."""
+        failed = self.build()
+        self.review_round(HEAD_A)
+        self.runner.relay_failures = 1
+
+        first = failed.run()
+
+        self.assertEqual(first.reason, "relay-failure")
+        retained = next(
+            Path(path) for path in first.retained_paths if Path(path).is_relative_to(self.config.worktree_root)
+        )
+        self.assertTrue(retained.is_dir())
+        self.assertEqual(self.runner.worktree_oids[str(retained.resolve())], HEAD_A)
+        self.assertTrue(self.config.state_file.exists())
+
+        self.assertEqual(cli._reset(self.config, force=False), 0)
+        self.assertFalse(self.config.state_file.exists())
+        paths_before_retry = {
+            call.argv[6]
+            for call in self.runner.calls
+            if call.argv[0] == "git" and call.argv[3:5] == ("worktree", "add")
+        }
+
+        retry = self.build()
+        self.review_round(HEAD_A)
+        second = retry.run()
+
+        self.assertEqual(second.outcome, MERGE_READY)
+        self.assertTrue(retained.is_dir(), "reset must preserve retained evidence")
+        fresh_paths = {
+            call.argv[6]
+            for call in self.runner.calls
+            if call.argv[0] == "git" and call.argv[3:5] == ("worktree", "add")
+        }
+        fresh_paths = fresh_paths - paths_before_retry
+        self.assertNotIn(str(retained.resolve()), fresh_paths)
+        self.assertTrue(
+            any(Path(path).name.startswith("pr7-aaaaaaaaaaaa-reviewer-a-run") for path in fresh_paths),
+            f"retry did not create a fresh reviewer worktree: {sorted(fresh_paths)}",
+        )
 
 
 class NeedsKaranClassificationTests(LoopHarness):

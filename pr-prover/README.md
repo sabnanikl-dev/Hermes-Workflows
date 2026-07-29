@@ -425,6 +425,11 @@ itself must be from the configured login and bound to this head — by GitHub's
 own review `commit_id` where there is one, *and* by the canonical declaration in
 every case.
 
+Only a complete `FINDING: SEVERITY=… ID=… -- …` line is a finding record.
+Headings, narrative, command output, and token-like words such as
+`stale-pr-evidence` are prose even when they resemble an identifier; they cannot
+create a lane finding or cause relay parity to fail.
+
 ### What the relay actually publishes
 
 Not the reviewer's own bytes. An artifact is child output, and the artifact is
@@ -1006,6 +1011,10 @@ An unforced reset that finds a lock decides the refusal **first** and removes
 nothing at all: a held lock may mean a run is still in flight, and its state file
 is the only record of which attempt it is on and what verification it owes.
 After confirming no run is active, `pr-prover reset --force` discards both.
+Reset never guesses at worktree ownership or deletes worktrees. Every run gives
+each gate, reviewer, and builder attempt a fresh opaque run suffix, so a retained
+clean exact-head checkout remains inspectable while reset plus a retry creates a
+new path instead of colliding with it.
 
 ### Persistence fails closed
 
@@ -1050,9 +1059,10 @@ bounded with explicit markers.
 - The source clone is reachable only through `git fetch`, `git rev-parse`, and
   `git worktree`. Checkout, commit, reset, clean, and push are unreachable by
   construction, so the operational clone is never modified.
-- Every attempt gets a fresh worktree, detached at one verified SHA. An existing
-  path is refused rather than reused, and worktrees this run did not create
-  cannot be removed.
+- Every attempt gets a fresh worktree, detached at one verified SHA. Each path
+  carries a new opaque per-run suffix, so an existing retained path is refused
+  rather than reused and cannot block a reset plus retry; worktrees this run did
+  not create cannot be removed.
 - **So does every gate and every reviewer lane, one each.** The acceptance
   lifecycle is sequential, so a shared checkout would put whatever Reviewer A
   left behind in front of Reviewer B and then the Integration Auditor — the two

@@ -1156,6 +1156,33 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.cli(["reset", "--config", str(self.config_path)]), 0)
         self.assertFalse(state.exists())
 
+    def test_reset_never_sweeps_worktrees_it_cannot_prove_it_owns(self) -> None:
+        """Retry safety comes from fresh names, not deletion guesses.
+
+        These witness paths cover the cleanup cases that must remain untouched:
+        outside the configured root, and root-local trees that could be another
+        repository, another head, or dirty retained evidence. A held lock is
+        separately refused below before reset removes even the state file.
+        """
+        state = self.tmp / "state.json"
+        state.write_text("{}", encoding="utf-8")
+        root = self.tmp / "worktrees"
+        witnesses = (
+            self.tmp / "outside-controlled-root",
+            root / "wrong-repository",
+            root / "wrong-exact-head",
+            root / "dirty-retained-evidence",
+        )
+        for witness in witnesses:
+            witness.mkdir(parents=True, exist_ok=True)
+            (witness / "do-not-delete").write_text("evidence\n", encoding="utf-8")
+
+        self.assertEqual(self.cli(["reset", "--config", str(self.config_path)]), 0)
+
+        self.assertFalse(state.exists())
+        for witness in witnesses:
+            self.assertEqual((witness / "do-not-delete").read_text(encoding="utf-8"), "evidence\n")
+
     def test_reset_refuses_a_held_lock_without_force(self) -> None:
         lock = self.tmp / "run.lock"
         lock.write_text("held\n", encoding="utf-8")

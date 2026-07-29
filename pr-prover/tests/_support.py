@@ -780,7 +780,7 @@ class FakeRunner:
         return [call.argv[3] for call in self.calls if call.argv[0] == "git" and call.argv[2] == target]
 
 
-_ATTEMPT = re.compile(r"-attempt\d+\Z")
+_ATTEMPT = re.compile(r"-attempt\d+(?:-run[0-9a-f]{12})?\Z")
 
 
 def _is_attempt(path: str) -> bool:

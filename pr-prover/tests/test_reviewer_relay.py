@@ -164,6 +164,21 @@ class PreparedArtifactTests(unittest.TestCase):
         self.assertGreater(artifact.size, 0)
         self.assertEqual(artifact.claim.head, HEAD_A)
 
+    def test_passing_narrative_tokens_are_not_machine_findings(self) -> None:
+        """Only complete ``FINDING:`` records may create a finding."""
+        for token in ("stale-pr-evidence", "redirect-wiring-substring"):
+            with self.subTest(token=token):
+                artifact = self.prepare(
+                    reviewer_artifact(
+                        role="reviewer-a",
+                        head=HEAD_A,
+                        extra=f"FINDING: {token} (narrative heading; no finding was raised)",
+                    )
+                )
+                self.assertEqual(artifact.claim.status, "pass")
+                self.assertEqual(artifact.claim.blocking, 0)
+                self.assertEqual(artifact.findings, ())
+
     def test_a_lane_that_wrote_nothing_stops_the_run(self) -> None:
         """A silently failed lane must not have an empty artifact relayed for it."""
         with self.assertRaises(ReviewerRelayError) as caught:
@@ -612,6 +627,28 @@ class RelayLifecycleLoopTests(LoopHarness):
             self.assertEqual(item.identity, REVIEWER_LOGIN)
             self.assertEqual(item.head, HEAD_A)
             self.assertTrue(item.identifier)
+
+    def test_passing_prose_tokens_relay_without_a_false_finding(self) -> None:
+        """The relay path uses structured artifact records, never prose."""
+        loop = self.build()
+        self.review_round(HEAD_A)
+        self.runner.reviewer_artifact = lambda argv, status, blocking: reviewer_artifact(
+            role=argv[argv.index("--role") + 1],
+            head=HEAD_A,
+            status=status,
+            blocking=blocking,
+            extra=(
+                "FINDING: stale-pr-evidence (narrative heading; no finding was raised)\n"
+                "FINDING: redirect-wiring-substring (narrative heading; no finding was raised)"
+            ),
+        )
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.reason, "no-blocking-findings")
+        self.assertEqual([verdict.findings for verdict in result.verdicts], [(), (), ()])
+        self.assertTrue(all(item.read_back for item in result.transport))
 
     def test_the_ordered_lifecycle_runs_a_then_b_then_the_auditor(self) -> None:
         """The auditor reconciles two artifacts, so it cannot be the first to run."""
