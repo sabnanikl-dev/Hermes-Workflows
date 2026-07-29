@@ -49,7 +49,11 @@ FULL_SHA = re.compile(r"\A[0-9a-f]{40}\Z")
 MAX_SUMMARY = 300
 
 _DONE_CANDIDATE = re.compile(r"\ADONE\s*:", re.IGNORECASE)
-_FINDING_CANDIDATE = re.compile(r"\AFINDING\s*:", re.IGNORECASE)
+# A prose heading may legitimately say ``FINDING: stale-pr-evidence``. It is
+# not a machine record until it starts one of the record fields. Once it does,
+# near-miss validation stays intentionally strict: a partial record cannot hide
+# beside a valid one and must fail closed.
+_FINDING_CANDIDATE = re.compile(r"\AFINDING\s*:\s*(?:(?:SEVERITY|ID)=|--)", re.IGNORECASE)
 _ADDRESSED_CANDIDATE = re.compile(r"\AADDRESSED\s*:", re.IGNORECASE)
 
 _REVIEWER_DONE = re.compile(

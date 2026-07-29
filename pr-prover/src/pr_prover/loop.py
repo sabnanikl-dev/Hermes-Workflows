@@ -123,6 +123,7 @@ import os
 import re
 import shutil
 import tempfile
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -334,6 +335,9 @@ class ProverLoop:
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
         self._failures: list[FailureRecord] = []
         self._retained: list[str] = []
+        # Retained worktrees are evidence, never a retry namespace. A new loop
+        # must not collide with a prior failed run for the same PR/head/role.
+        self._worktree_run_token = uuid.uuid4().hex[:12]
         # Strictly increasing across the whole run, so a frozen evidence packet
         # is bound to the one lane it was written for and no lane can be handed
         # another's — including across a second fix cycle on a re-proved head.
@@ -1025,7 +1029,7 @@ class ProverLoop:
         the next verdict. A lane that fails either keeps its worktree for
         inspection, exactly as a failed attempt does.
         """
-        worktree = self.worktrees.create(label, head)
+        worktree = self.worktrees.create(self._worktree_label(label), head)
         try:
             self._assert_lane_worktree(worktree, head=head, lane=lane, when="before")
             yield worktree
@@ -1034,6 +1038,10 @@ class ProverLoop:
             self._retain(worktree, why=f"{lane} failed")
             raise
         self.worktrees.remove(worktree)
+
+    def _worktree_label(self, label: str) -> str:
+        """Name a worktree without ever reusing a retained evidence path."""
+        return f"{label}-run{self._worktree_run_token}"
 
     def _assert_lane_worktree(
         self, worktree: Path, *, head: str, lane: str, when: str
@@ -1307,7 +1315,7 @@ class ProverLoop:
         # comment this attempt is looking for.
         known_comments = self._comment_identities()
         worktree = self.worktrees.create(
-            f"pr{pull.number}-{head[:12]}-attempt{state.attempt}", head
+            self._worktree_label(f"pr{pull.number}-{head[:12]}-attempt{state.attempt}"), head
         )
         try:
             report = self._invoke_builder(
