@@ -97,6 +97,12 @@ class ReviewerVerdictTests(unittest.TestCase):
         with self.assertRaises(MalformedVerdict):
             parse_reviewer_verdict("A", output, expected_head=HEAD_A)
 
+    def test_finding_field_with_whitespace_before_equals_fails_closed(self) -> None:
+        """A malformed field token cannot be downgraded into narrative prose."""
+        output = f"FINDING: SEVERITY =blocking ID=hidden -- malformed record\nDONE: STATUS=pass BLOCKING=0 HEAD={HEAD_A}\n"
+        with self.assertRaises(MalformedVerdict):
+            parse_reviewer_verdict("A", output, expected_head=HEAD_A)
+
     def test_duplicate_finding_id_fails_closed(self) -> None:
         output = reviewer_output(
             HEAD_A, [("blocking", "x", "one"), ("blocking", "x", "two")]
