@@ -270,10 +270,15 @@ no "as of" is not an exact-head claim. A run that completed no live read reports
 **Which gates, and what their results are about.** `configured_gates` lists
 every gate the run was *configured* with — including one that was skipped, which
 belongs to the proof scope and not to the executed evidence — with its kind, its
-sanitized invocation shape, its operator-declared coverage, and its evidence
-mode. Coverage is carried verbatim and unverified: nothing here infers what a
-gate covers, whether the configured set is sufficient, or what a URL in an argv
-array means.
+sanitized invocation shape, its operator-declared coverage, its `execution`, and
+its evidence mode. Coverage is carried verbatim and unverified: nothing here
+infers what a gate covers, whether the configured set is sufficient, or what a
+URL in an argv array means.
+
+`execution` is one of `not-run`, `skipped`, `completed`, or `failed`, and it is
+the difference between listing a gate and describing its result. Configured
+scope says which gates the run meant to perform; only this says which ones
+performed anything, and an external gate's evidence sentence depends on it.
 
 **Who reviewed, without claiming they were independent.** `reviewer_topology`
 names each lane's configured adapter entrypoint beside the `RUNTIME=` its
@@ -312,6 +317,14 @@ nothing about which commit that something was built from. So `{head}` in an
 argv array and a URL beside it **cannot** raise the mode — they are strings the
 operator typed, and a gate with no `environment` block is reported as local
 however its command reads.
+
+The middle row's sentence also makes a second claim — that a live endpoint *was
+checked* — and that one is about execution rather than binding. An external gate
+that was skipped, that the run never reached, or that exited non-zero or timed
+out gets **live endpoint not checked; this gate did not complete on this head,
+so its result establishes nothing about the environment it declares** instead.
+A command that timed out may never have opened the connection, so `checked` is
+printed only where `execution` is `completed`.
 
 Elevation is earned once, by a file:
 

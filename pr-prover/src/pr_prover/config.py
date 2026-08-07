@@ -225,6 +225,17 @@ GATE_EVIDENCE_MODES = (
 # is: the sentence is the disclosure, and a sentence something could compose per
 # gate is a sentence something could compose into a weaker one.
 UNBOUND_STATEMENT = "live endpoint checked; revision binding not established"
+# The same disclosure for an external gate whose command did not complete on
+# this head. The sentence above says the endpoint *was* checked, and that half
+# of it is a claim about execution rather than about binding: a gate that was
+# skipped, that the run never reached, or that exited non-zero or timed out may
+# never have opened the connection at all. Reporting "checked" for it would
+# state a live observation nothing performed — a smaller error than claiming the
+# binding, and the same kind of error.
+UNCHECKED_STATEMENT = (
+    "live endpoint not checked; this gate did not complete on this head, so its "
+    "result establishes nothing about the environment it declares"
+)
 # How long an operator's coverage declaration may be. One sentence, printed
 # whole in every report; a paragraph here is documentation, and documentation
 # belongs in the repository rather than in a field a reader takes as a summary.
@@ -554,7 +565,10 @@ class RunConfig:
         A gate declared to observe an external environment without binding
         evidence gets a note too, because what its reports will say is a fact
         worth reading before the run rather than after it: the endpoint was
-        checked, and which revision it served was not established.
+        checked, and which revision it served was not established. The note says
+        "when it completes" rather than "always", because that sentence is also
+        a claim about execution — a run where the gate is skipped or fails
+        reports that nothing was checked.
         """
         notes: list[str] = []
         if self.operator_acknowledgements:
@@ -574,7 +588,8 @@ class RunConfig:
             notes.append(
                 f"gate {gate.name!r} declares that it observes the external environment "
                 f"{gate.environment.identifier!r} without binding evidence, so every "
-                f"report will say: {UNBOUND_STATEMENT}"
+                f"report in which it completes will say: {UNBOUND_STATEMENT}; a run "
+                f"where it is skipped or fails will say: {UNCHECKED_STATEMENT}"
             )
         for lane, timeout in self._budgets():
             if timeout is None:
@@ -1234,6 +1249,7 @@ __all__ = [
     "REQUIRED_REVIEWER_ROLES",
     "SCHEMA_VERSION",
     "UNBOUND_STATEMENT",
+    "UNCHECKED_STATEMENT",
     "BuilderConfig",
     "GateConfig",
     "GateEnvironment",

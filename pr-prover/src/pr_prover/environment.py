@@ -28,6 +28,13 @@ is not a general diagnostic ingestion format: no findings, no severities, no
 free-form records, no nested payloads. Every key is required, no key is
 optional, and an unknown key means this is not the file this tool asked for.
 
+Every scalar it carries is also held to the shape a *report* can state. A
+timestamp is parsed as a real UTC instant rather than pattern-matched, and the
+two free-text fields must be single-line printable text, because this envelope's
+contents are rendered back to a human: a value that is not a moment, or one that
+carries its own line breaks, is not bounded evidence that happens to look odd —
+it is a claim the reader would have to reconstruct.
+
 What this establishes is bounded in one further way, and the report says so
 rather than leaving it implied: the revision is what an operator-owned gate
 observed and wrote down. ``pr-prover`` reconciles that claim against the run's
@@ -38,6 +45,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +86,28 @@ MAX_BINDING_SOURCE_CHARACTERS = 200
 # exactly as :func:`pr_prover.findings.utc_now` produces it. A gate that offers
 # an offset, a fractional second, or a local time is offering a value two
 # readers could disagree about, which is not what an observation time is for.
+#
+# The shape is only half of that. ``\d{2}`` is satisfied by a 99th month and a
+# 61st second, so this pattern *alone* accepted ``9999-99-99T99:99:99Z`` and
+# promoted it into a head-bound binding's observation time — a value that is not
+# a moment, printed in the report as the instant an environment was observed.
+# :func:`_observation_time` therefore parses the value as a real UTC instant and
+# requires it to render back byte for byte, so shape, calendar, and canonical
+# formatting all have to agree before anything is bound on it.
 _OBSERVED_AT = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+_OBSERVED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+# What a gate wrote and this tool prints back has to be one printable line.
+# Refused here, at the boundary, rather than escaped at the end of the pipeline:
+# a URL or a binding source carrying its own line breaks is not a bounded scalar
+# this envelope describes, and the renderer is not the right place to discover
+# that. The report escapes what reaches it as well — this is the half that keeps
+# such a value from being called validated evidence in the first place.
+#
+# Written as escapes rather than as the characters themselves: U+2028 and U+2029
+# are line breaks a reader of this file cannot see, and a character class nobody
+# can read is a character class nobody can review.
+_UNPRINTABLE = re.compile("[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]")
 
 
 @dataclass(frozen=True)
@@ -233,13 +262,9 @@ def read_binding(
         what="how it read that revision out of the environment",
         context=context,
     )
-    observed_at = payload.get("observed_at")
-    if not isinstance(observed_at, str) or not _OBSERVED_AT.match(observed_at):
-        raise EnvironmentEvidenceError(
-            f"gate {gate!r} recorded no usable UTC observation time for the environment "
-            "it observed; the required form is YYYY-MM-DDTHH:MM:SSZ",
-            evidence={**context, "observed_at": redact_evidence(str(observed_at), limit=80)},
-        )
+    observed_at = _observation_time(
+        payload.get("observed_at"), gate=gate, context=context
+    )
     return EnvironmentBinding(
         gate=gate,
         environment=environment,
@@ -318,7 +343,7 @@ def _payload(path: Path, *, gate: str, context: dict[str, Any]) -> dict[str, Any
 def _bounded_text(
     value: Any, *, field: str, limit: int, gate: str, what: str, context: dict[str, Any]
 ) -> str:
-    """One required, non-empty, bounded string field, or a stop."""
+    """One required, non-empty, bounded, single-line string field, or a stop."""
     if not isinstance(value, str) or not value.strip():
         raise EnvironmentEvidenceError(
             f"gate {gate!r}'s environment binding evidence does not say {what}",
@@ -330,7 +355,51 @@ def _bounded_text(
             "this envelope allows",
             evidence={**context, "field": field, "characters": len(value), "limit": limit},
         )
-    return value.strip()
+    text = value.strip()
+    if _UNPRINTABLE.search(text):
+        # A line break here is not cosmetic. This value is printed back into the
+        # report as one bullet's worth of evidence, and a field carrying its own
+        # newlines is a field that can write bullets of its own.
+        raise EnvironmentEvidenceError(
+            f"gate {gate!r}'s environment binding evidence states {field} with line "
+            "breaks or control characters; this envelope carries single-line printable "
+            "text, because every field in it is rendered back into the run's report",
+            evidence={**context, "field": field},
+        )
+    return text
+
+
+def _observation_time(value: Any, *, gate: str, context: dict[str, Any]) -> str:
+    """The one moment this envelope is allowed to be dated at, or a stop.
+
+    Shape, calendar, and canonical formatting each have to agree. The shape
+    regex is not enough on its own — it accepts a 99th month and a 61st second —
+    and :func:`datetime.strptime` is not enough on its own either, because it
+    reads an unpadded ``2026-8-3T...`` that this tool never writes. Parsing the
+    value and requiring it to render back byte for byte is both checks at once,
+    so nothing is bound on a timestamp that is not a real UTC instant.
+    """
+    if not isinstance(value, str) or not _OBSERVED_AT.match(value):
+        raise EnvironmentEvidenceError(
+            f"gate {gate!r} recorded no usable UTC observation time for the environment "
+            "it observed; the required form is YYYY-MM-DDTHH:MM:SSZ",
+            evidence={**context, "observed_at": redact_evidence(str(value), limit=80)},
+        )
+    try:
+        moment = datetime.strptime(value, _OBSERVED_AT_FORMAT)
+    except ValueError as exc:
+        raise EnvironmentEvidenceError(
+            f"gate {gate!r} recorded an observation time that is not a real UTC moment: "
+            f"{exc}",
+            evidence={**context, "observed_at": redact_evidence(value, limit=80)},
+        ) from exc
+    if moment.strftime(_OBSERVED_AT_FORMAT) != value:
+        raise EnvironmentEvidenceError(
+            f"gate {gate!r} recorded an observation time that is not in this tool's "
+            "canonical UTC form; the required form is YYYY-MM-DDTHH:MM:SSZ",
+            evidence={**context, "observed_at": redact_evidence(value, limit=80)},
+        )
+    return value
 
 
 __all__ = [

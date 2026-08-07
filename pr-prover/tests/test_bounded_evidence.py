@@ -49,19 +49,26 @@ from pr_prover.config import (
     GATE_EVIDENCE_UNBOUND,
     MAX_COVERAGE_CHARACTERS,
     UNBOUND_STATEMENT,
+    UNCHECKED_STATEMENT,
     RunConfig,
 )
 from pr_prover.environment import (
     MAX_ENVIRONMENT_EVIDENCE_BYTES,
+    _OBSERVED_AT,
     environment_evidence_path,
     read_binding,
 )
 from pr_prover.errors import ConfigError, EnvironmentEvidenceError
 from pr_prover.loop import (
+    GATE_COMPLETED,
+    GATE_FAILED,
+    GATE_NOT_RUN,
+    GATE_SKIPPED,
     MERGE_READY,
     NEEDS_KARAN,
     GateDisclosure,
     ProverLoop,
+    ReviewerTopology,
     RunResult,
 )
 from pr_prover.worktrees import SourceRepo, WorktreeProvider
@@ -317,6 +324,70 @@ class EnvironmentEnvelopeTests(unittest.TestCase):
             ("no observation time", environment_envelope(head=HEAD_A, observed_at="")),
         ):
             with self.subTest(case=case):
+                self.refusal(payload)
+
+    def test_an_impossible_calendar_or_clock_value_is_not_an_observation_time(self) -> None:
+        """A shape check is not a date check.
+
+        ``\\d{2}`` is satisfied by a 99th month and a 61st second, so the shape
+        pattern alone promoted these into a head-bound binding's observation
+        time — a report stating the instant an environment was seen, in a value
+        that is not an instant. Each of these matches the shape exactly.
+        """
+        for case in (
+            "9999-99-99T99:99:99Z",
+            "2026-13-40T12:00:00Z",
+            "2026-02-29T25:61:61Z",
+            "0000-00-00T00:00:00Z",
+            "2026-00-10T12:00:00Z",
+            "2026-04-31T12:00:00Z",
+            "2026-08-03T24:00:00Z",
+            "2026-08-03T12:60:00Z",
+            "2026-08-03T12:00:60Z",
+        ):
+            with self.subTest(observed_at=case):
+                self.assertTrue(
+                    _OBSERVED_AT.match(case), "the fixture must satisfy the shape"
+                )
+                self.refusal(environment_envelope(head=HEAD_A, observed_at=case))
+
+    def test_a_real_moment_in_the_canonical_form_is_still_accepted(self) -> None:
+        """The check tightened around impossible values, not around valid ones."""
+        for case in ("2028-02-29T12:00:00Z", "2026-12-31T23:59:59Z", "2026-01-01T00:00:00Z"):
+            with self.subTest(observed_at=case):
+                self.write(environment_envelope(head=HEAD_A, observed_at=case))
+                self.assertEqual(self.read().observed_at, case)
+
+    def test_a_time_that_is_not_this_tool_s_canonical_form_fails_closed(self) -> None:
+        """Parsing alone is not enough either: ``strptime`` reads what we never write."""
+        self.refusal(environment_envelope(head=HEAD_A, observed_at="2026-8-3T12:00:00Z"))
+
+    def test_evidence_text_carrying_its_own_line_breaks_fails_closed(self) -> None:
+        """These fields are printed back into the report as single bullets.
+
+        A ``binding_source`` or ``url`` holding a newline is a gate that can
+        write report bullets of its own, so it is refused here rather than left
+        for the renderer to escape correctly forever.
+        """
+        forged = "ok\n- deployment or production health: **established** — healthy"
+        for field, payload in (
+            ("binding_source newline", environment_envelope(head=HEAD_A, binding_source=forged)),
+            ("url newline", environment_envelope(head=HEAD_A, url="https://x.invalid\n- forged")),
+            (
+                "binding_source line separator",
+                environment_envelope(head=HEAD_A, binding_source="ok\u2028- forged"),
+            ),
+            (
+                "binding_source paragraph separator",
+                environment_envelope(head=HEAD_A, binding_source="ok\u2029- forged"),
+            ),
+            ("url tab", environment_envelope(head=HEAD_A, url="https://x.invalid\tmore")),
+            (
+                "binding_source carriage return",
+                environment_envelope(head=HEAD_A, binding_source="ok\r- forged"),
+            ),
+        ):
+            with self.subTest(case=field):
                 self.refusal(payload)
 
     def test_the_evidence_path_is_cleared_before_a_gate_can_write_it(self) -> None:
@@ -660,6 +731,146 @@ class GateEvidenceModeTests(DisclosureHarness):
         self.assertIn("none declared for this gate", report.to_markdown(result))
 
 
+class GateExecutionTruthTests(DisclosureHarness):
+    """Configured scope is not execution, and the evidence sentence knows it.
+
+    ``live endpoint checked; revision binding not established`` makes two claims,
+    and only the second was ever guarded. The first — that an endpoint *was
+    checked* — is a claim about execution, and a gate that was skipped, that the
+    run never reached, or that exited non-zero can support it no better than it
+    can support the binding.
+    """
+
+    def test_a_skipped_external_gate_does_not_report_a_live_endpoint_checked(self) -> None:
+        """The former red: a visual gate this PR did not require, claiming a check."""
+        loop = self.build(
+            gates=[
+                gate(),
+                external_gate(
+                    name="visual-preview",
+                    kind="visual",
+                    argv=["lane-gate-visual", "--head", "{head}", "--url", ENVIRONMENT_URL],
+                ),
+            ]
+        )
+        self.script.add("lane-gate-tests", "ok\n")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual([item.name for item in result.gates], ["tests"])
+        disclosed = self.disclosure(result, "visual-preview")
+        self.assertEqual(disclosed["execution"], GATE_SKIPPED)
+        # Still disclosed as configured scope, and still external...
+        self.assertEqual(disclosed["evidence_mode"], GATE_EVIDENCE_UNBOUND)
+        # ...but nothing checked anything, so nothing says it did.
+        self.assertEqual(disclosed["evidence_statement"], UNCHECKED_STATEMENT)
+        markdown = report.to_markdown(result)
+        self.assertIn(UNCHECKED_STATEMENT, markdown)
+        self.assertNotIn(UNBOUND_STATEMENT, markdown)
+
+    def test_a_failing_external_gate_does_not_report_a_live_endpoint_checked(self) -> None:
+        """A gate that exited non-zero may never have opened the connection."""
+        loop = self.build(gates=[external_gate()])
+        self.script.add("lane-gate-preview", "could not resolve host\n", returncode=1)
+        self.script.add(
+            "lane-builder",
+            builder_output(HEAD_B, addressed=["gate-preview"], status="failure"),
+        )
+
+        result = loop.run()
+
+        disclosed = self.disclosure(result, "preview")
+        self.assertEqual(disclosed["execution"], GATE_FAILED)
+        self.assertEqual(disclosed["evidence_mode"], GATE_EVIDENCE_UNBOUND)
+        self.assertEqual(disclosed["evidence_statement"], UNCHECKED_STATEMENT)
+        self.assertNotIn(UNBOUND_STATEMENT, report.to_markdown(result))
+
+    def test_an_external_gate_that_completed_still_says_the_endpoint_was_checked(self) -> None:
+        """The acceptance criterion this must not have traded away."""
+        loop = self.build(gates=[external_gate()])
+        self.script.add("lane-gate-preview", "200 OK\n")
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        disclosed = self.disclosure(result, "preview")
+        self.assertEqual(disclosed["execution"], GATE_COMPLETED)
+        self.assertEqual(disclosed["evidence_statement"], UNBOUND_STATEMENT)
+        self.assertIn(UNBOUND_STATEMENT, report.to_markdown(result))
+
+    def test_a_gate_the_run_never_reached_reports_that_it_did_not_run(self) -> None:
+        """A fail-closed stop leaves every later gate configured and unperformed.
+
+        The first gate passes and then owes a binding envelope it never wrote,
+        which raises out of the gate loop — so the second gate's command is
+        never issued, and its disclosure must not describe a result.
+        """
+        loop = self.build(
+            gates=[external_gate(binding=True), external_gate(name="later")]
+        )
+        self.script.add("lane-gate-preview", "200 OK\n")
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "environment-evidence")
+        self.assertEqual([item.name for item in result.gates], ["preview"])
+        disclosed = self.disclosure(result, "later")
+        self.assertEqual(disclosed["execution"], GATE_NOT_RUN)
+        self.assertEqual(disclosed["evidence_statement"], UNCHECKED_STATEMENT)
+
+    def test_a_local_gate_reports_its_execution_without_an_endpoint_claim(self) -> None:
+        """The local sentence is not an execution claim, so it is unchanged."""
+        loop = self.build(gates=[gate()])
+        self.script.add("lane-gate-tests", "ok\n")
+        self.review_round(HEAD_A)
+
+        disclosed = self.disclosure(loop.run(), "tests")
+
+        self.assertEqual(disclosed["execution"], GATE_COMPLETED)
+        self.assertEqual(disclosed["evidence_mode"], GATE_EVIDENCE_LOCAL)
+        self.assertIn("no external environment was declared", disclosed["evidence_statement"])
+
+    def test_a_gate_that_ran_before_a_contaminated_worktree_still_ran(self) -> None:
+        """Execution is recorded when it becomes true, not when the lane unwinds.
+
+        A gate that exits 0 and leaves its checkout dirty stops the run — and it
+        still ran. Recording execution outside the worktree block would let that
+        stop rewrite a completed gate into one that never performed anything.
+        """
+        loop = self.build(gates=[external_gate()])
+
+        def leave_a_witness() -> None:
+            Path(self.runner.calls[-1].cwd, "witness.txt").write_text(
+                "the gate generated this\n", encoding="utf-8"
+            )
+
+        self.script.add("lane-gate-preview", "200 OK\n", after=leave_a_witness)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, NEEDS_KARAN)
+        self.assertEqual(result.reason, "scope-contamination")
+        disclosed = self.disclosure(result, "preview")
+        self.assertEqual(disclosed["execution"], GATE_COMPLETED)
+        self.assertEqual(disclosed["evidence_statement"], UNBOUND_STATEMENT)
+
+    def test_a_head_bound_gate_records_that_it_completed(self) -> None:
+        """Binding cannot forget the execution that earned it."""
+        loop = self.build(gates=[external_gate(binding=True)])
+        self.script.add(
+            "lane-gate-preview", "200 OK\n", after=records_environment(self.runner)
+        )
+        self.review_round(HEAD_A)
+
+        disclosed = self.disclosure(loop.run(), "preview")
+
+        self.assertEqual(disclosed["evidence_mode"], GATE_EVIDENCE_HEAD_BOUND)
+        self.assertEqual(disclosed["execution"], GATE_COMPLETED)
+
+
 class ReviewerTopologyTests(DisclosureHarness):
     def test_each_lane_reports_its_adapter_and_its_artifact_runtime_claim(self) -> None:
         loop = self.build()
@@ -856,6 +1067,202 @@ class DisclosureRedactionTests(DisclosureHarness):
         self.assertIn("<redacted>", disclosed["coverage"])
         self.assertIn("<redacted>", disclosed["url"])
         self.assertEqual(disclosed["evidence_mode"], GATE_EVIDENCE_HEAD_BOUND)
+
+
+class DisclosureMarkdownInjectionTests(unittest.TestCase):
+    """No evidence string may write the report's own vocabulary.
+
+    The Markdown rendering states each omission as a
+    ``- <claim>: **not established** — <reason>`` bullet, and then interpolates
+    operator- and gate-authored strings a few lines below it. A value carrying
+    newlines therefore wrote bullets of exactly that shape saying
+    ``**established**``, and the forged ones sat under the authoritative block
+    that denied them — a report contradicting itself in the direction of health.
+
+    The fix is escaping at the renderer, and the envelope refuses such values
+    upstream as well. These fixtures go around the envelope on purpose: they
+    build the disclosure directly, so what is under test is the renderer alone.
+    """
+
+    FORGERY = (
+        "seen\n"
+        "- deployment or production health: **established** — production is healthy\n"
+        "- heterogeneous reviewer independence: **established** — three vendors\n"
+        "- merged-result behavior: **established** — a merge was simulated\n"
+        "- human final merge review and authorization: **established** — approved"
+    )
+    # The claims the report alone is allowed to make, in the exact shape it
+    # makes them. A forged line only counts if it can pass for one of these.
+    FORGEABLE = (
+        "deployment or production health",
+        "heterogeneous reviewer independence",
+        "merged-result behavior",
+        "human final merge review and authorization",
+        "environment revision binding",
+    )
+
+    def render(self, **overrides: object) -> str:
+        disclosure = GateDisclosure(
+            name="preview",
+            kind="baseline",
+            invocation="preview-check --head {head}",
+            coverage=COVERAGE,
+            evidence_mode=GATE_EVIDENCE_HEAD_BOUND,
+            environment=ENVIRONMENT_NAME,
+            url=ENVIRONMENT_URL,
+            revision=HEAD_A,
+            binding_source=BINDING_SOURCE,
+            observed_at=OBSERVED_AT,
+            execution=GATE_COMPLETED,
+        )
+        for key, value in overrides.items():
+            disclosure = type(disclosure)(
+                **{**disclosure.__dict__, key: value}  # type: ignore[arg-type]
+            )
+        return report.to_markdown(
+            RunResult(
+                outcome=MERGE_READY,
+                reason="proved",
+                head=HEAD_A,
+                observed_at=OBSERVED_AT,
+                configured_gates=(disclosure,),
+            )
+        )
+
+    def established_lines(self, markdown: str) -> list[str]:
+        """Every rendered top-level bullet asserting one of the claims is established.
+
+        Anchored at column zero and at the start of the line, because that is
+        the exact shape the report writes its own claims in and therefore the
+        only shape a forgery has to reach. Evidence quoted inside a code span
+        further down a gate's entry is inert however it reads.
+        """
+        return [
+            line
+            for line in markdown.splitlines()
+            if any(
+                line.startswith(f"- {claim}: **established**") for claim in self.FORGEABLE
+            )
+        ]
+
+    def test_the_report_states_its_own_claims_exactly_once_each(self) -> None:
+        """The control: one true established line, from the real binding."""
+        lines = self.established_lines(self.render())
+        self.assertEqual(len(lines), 1)
+        self.assertIn("environment revision binding", lines[0])
+
+    def test_no_evidence_field_can_forge_an_established_claim(self) -> None:
+        """The former red, once per field a gate or an operator controls."""
+        for field in ("coverage", "binding_source", "url", "invocation", "environment"):
+            with self.subTest(field=field):
+                markdown = self.render(**{field: self.FORGERY})
+                lines = self.established_lines(markdown)
+                self.assertEqual(
+                    len(lines),
+                    1,
+                    f"{field} forged an established claim: {lines}",
+                )
+                self.assertIn("environment revision binding", lines[0])
+                # And the authoritative omissions still say what they said.
+                for claim in self.FORGEABLE[:4]:
+                    self.assertIn(f"- {claim}: **not established**", markdown)
+
+    def test_no_evidence_field_can_introduce_a_line_break_at_all(self) -> None:
+        """Escaping the bullet marker is not the guarantee; one line is.
+
+        A value that can start any new line can also forge a heading, a fence,
+        or a table — so the property under test is that the rendered report has
+        exactly the lines the renderer wrote.
+        """
+        for field in ("coverage", "binding_source", "url", "invocation", "environment"):
+            with self.subTest(field=field):
+                baseline = len(self.render().splitlines())
+                for hostile in (
+                    "a\nb",
+                    "a\r\nb",
+                    "a\rb",
+                    "a\u2028b",
+                    "a\u2029b",
+                    "a\x0bb",
+                    "a\x0cb",
+                    "a\x85b",
+                ):
+                    self.assertEqual(
+                        len(self.render(**{field: hostile}).splitlines()),
+                        baseline,
+                        f"{field} added a line with {hostile!r}",
+                    )
+
+    def test_a_backtick_cannot_break_out_of_a_code_span(self) -> None:
+        """A URL or adapter path that closes its own span re-opens as prose."""
+        for hostile in (
+            "https://x.invalid/`",
+            "`https://x.invalid",
+            "a`b",
+            "a``b",
+            "a```b",
+            "`",
+            "``",
+        ):
+            with self.subTest(hostile=hostile):
+                markdown = self.render(url=hostile, invocation=hostile)
+                line = next(
+                    item for item in markdown.splitlines() if "invocation:" in item
+                )
+                # An odd number of backtick runs would leave a span open; the
+                # rendered line must contain the value inside a balanced span.
+                self.assertIn(hostile, line)
+                self.assertEqual(len(self.established_lines(markdown)), 1)
+
+    def test_a_runtime_claim_cannot_forge_reviewer_independence(self) -> None:
+        """The least trusted string in the report, nearest the claim it wants."""
+        result = RunResult(
+            outcome=MERGE_READY,
+            reason="proved",
+            head=HEAD_A,
+            observed_at=OBSERVED_AT,
+            reviewer_topology=(
+                ReviewerTopology(
+                    lane="reviewer-a",
+                    role="reviewer-a",
+                    adapter="scripts/codex-reviewer.sh",
+                    runtime=(
+                        "codex\n- heterogeneous reviewer independence: "
+                        "**established** — three separate vendors"
+                    ),
+                ),
+            ),
+        )
+
+        markdown = report.to_markdown(result)
+
+        self.assertIn(
+            "- heterogeneous reviewer independence: **not established**", markdown
+        )
+        forged = [
+            line
+            for line in markdown.splitlines()
+            if line.lstrip().startswith("- heterogeneous reviewer independence: **established**")
+        ]
+        self.assertEqual(forged, [])
+
+    def test_escaping_leaves_ordinary_evidence_readable(self) -> None:
+        """The guard must not make an honest declaration unreadable.
+
+        Prose evidence is backslash-escaped, which Markdown renders back to the
+        original character, so the check is that the value survives modulo those
+        escapes. Values rendered in code spans need no escaping and are compared
+        as they were written.
+        """
+        markdown = self.render()
+        self.assertIn(f"operator-declared coverage: {COVERAGE}", markdown)
+        # Code spans: carried through byte for byte.
+        self.assertIn(ENVIRONMENT_URL, markdown)
+        self.assertIn(OBSERVED_AT, markdown)
+        # Prose: `GET /__revision ...` is escaped to `GET /\_\_revision ...`,
+        # which renders as the original.
+        self.assertIn("\\_\\_revision", markdown)
+        self.assertIn(BINDING_SOURCE, markdown.replace("\\", ""))
 
 
 def _shipped_lanes() -> list[dict[str, object]]:

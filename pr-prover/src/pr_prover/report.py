@@ -61,6 +61,7 @@ told two different stories about one failure.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -70,9 +71,10 @@ from .config import (
     GATE_EVIDENCE_UNBOUND,
     REQUIRED_REVIEWER_ROLES,
     UNBOUND_STATEMENT,
+    UNCHECKED_STATEMENT,
 )
 from .findings import provenance_lines
-from .loop import GateDisclosure, NEEDS_KARAN, RunResult
+from .loop import GATE_COMPLETED, GateDisclosure, NEEDS_KARAN, RunResult
 from .redaction import sanitize
 
 # Who may merge, stated in every report in both renderings. ``merge-ready`` is
@@ -331,13 +333,26 @@ def _gate_disclosure(gate: GateDisclosure, head: str | None) -> dict[str, Any]:
     mode = gate.evidence_mode
     if not bound:
         mode = GATE_EVIDENCE_UNBOUND if gate.environment else GATE_EVIDENCE_LOCAL
+    # The unbound sentence says a live endpoint *was checked*, and only a gate
+    # whose command completed supports that half of it. A skipped visual gate, a
+    # gate the run never reached, and one that exited non-zero or timed out are
+    # each configured proof scope with no observation behind them, so they say
+    # so rather than borrowing a claim about an endpoint nothing reached.
+    statement = EVIDENCE_STATEMENTS[mode]
+    if mode == GATE_EVIDENCE_UNBOUND and gate.execution != GATE_COMPLETED:
+        statement = UNCHECKED_STATEMENT
     return {
         "name": gate.name,
         "kind": gate.kind,
         "invocation": gate.invocation,
         "coverage": gate.coverage,
+        # How far this gate's command actually got, beside what its result is
+        # evidence about. The list is configured scope; this is execution, and
+        # keeping them one field apart is what stops the first from reading as
+        # the second.
+        "execution": gate.execution,
         "evidence_mode": mode,
-        "evidence_statement": EVIDENCE_STATEMENTS[mode],
+        "evidence_statement": statement,
         "environment": gate.environment,
         "url": gate.url if bound else "",
         "revision": gate.revision if bound else "",
@@ -469,35 +484,45 @@ def to_markdown(result: RunResult) -> str:
     if payload["configured_gates"]:
         lines += ["", "### Configured gates and what their results are evidence about"]
         for gate in payload["configured_gates"]:
+            # Every interpolated value below is escaped. ``coverage`` is the
+            # operator's sentence and ``url``/``binding_source`` are strings a
+            # gate wrote; neither is trusted to be one line, and this block sits
+            # directly under the omissions it must not be able to contradict.
             lines.append(
-                f"- `{gate['name']}` ({gate['kind']}): {gate['evidence_mode']} — "
-                f"{gate['evidence_statement']}"
+                f"- {_code(gate['name'])} ({_text(gate['kind'])}): "
+                f"{_text(gate['evidence_mode'])} — {_text(gate['evidence_statement'])}"
             )
+            lines.append(f"  - execution: {_text(gate['execution'])}")
             lines.append(
                 "  - operator-declared coverage: "
                 + (
-                    f"{gate['coverage']}"
+                    _text(gate["coverage"])
                     if gate["coverage"]
                     else "none declared for this gate"
                 )
             )
-            lines.append(f"  - invocation: `{gate['invocation']}`")
+            lines.append(f"  - invocation: {_code(gate['invocation'])}")
             if gate["environment"]:
-                lines.append(f"  - declared environment: `{gate['environment']}`")
+                lines.append(f"  - declared environment: {_code(gate['environment'])}")
             if gate["evidence_mode"] == GATE_EVIDENCE_HEAD_BOUND:
                 lines += [
-                    f"  - observed at `{gate['url']}`: revision `{gate['revision']}` "
-                    f"via {gate['binding_source']}, at {gate['observed_at']}",
+                    f"  - observed at {_code(gate['url'])}: revision "
+                    f"{_code(gate['revision'])} via {_text(gate['binding_source'])}, "
+                    f"at {_text(gate['observed_at'])}",
                 ]
         lines.append(f"- {payload['gate_coverage_declaration']}")
 
     if payload["reviewer_topology"]:
         lines += ["", "### Reviewer topology (configuration and artifact claims)"]
         for entry in payload["reviewer_topology"]:
+            # ``runtime`` is a line a reviewer lane's own published artifact
+            # declared about itself, which makes it the least trusted string in
+            # this report and the one nearest the independence claim it must not
+            # be able to write.
             lines.append(
-                f"- `{entry['lane']}` (ROLE={entry['role']}): adapter "
-                f"`{entry['adapter']}`, RUNTIME= "
-                + (f"`{entry['runtime']}`" if entry["runtime"] else "not read back")
+                f"- {_code(entry['lane'])} (ROLE={_text(entry['role'])}): adapter "
+                f"{_code(entry['adapter'])}, RUNTIME= "
+                + (_code(entry["runtime"]) if entry["runtime"] else "not read back")
             )
         lines.append(f"- {_topology_summary(payload)}")
         lines.append(f"- {payload['reviewer_topology_declaration']}")
@@ -704,6 +729,57 @@ def _inline(value: Any) -> str:
     if value is None or isinstance(value, (bool, int, float, str)):
         return str(value)
     return json.dumps(value, sort_keys=True, default=str)
+
+
+# Every line break Markdown or a terminal will honour, including the two nobody
+# can see in a diff. Written as escapes for that reason.
+_LINE_BREAK = re.compile("\r\n|[\n\r\v\f\\x1c-\\x1e\\x85\\u2028\\u2029]")
+# What is left of C0/C1 once the line breaks above are gone.
+_CONTROL = re.compile("[\\x00-\\x1f\\x7f-\\x9f]")
+# The inline constructs a single line of evidence can still forge: emphasis that
+# turns a quoted string into the report's own **established** vocabulary, a link
+# or raw HTML that hides where text came from, a table cell that escapes its
+# column. Escaped, not stripped — the reader is entitled to the bytes the gate
+# or the operator actually wrote.
+_MARKDOWN_ACTIVE = re.compile(r"([\\`*_\[\]<>|~])")
+
+
+def _one_line(value: Any) -> str:
+    """One already-sanitized value flattened to a single visible line.
+
+    A newline in an evidence string is not a formatting nuisance. The report
+    states its omissions as ``- <claim>: **not established** — <reason>``
+    bullets, so a ``binding_source`` or ``coverage`` carrying its own newlines
+    could write bullets of the same shape saying **established**, and the forged
+    ones sat directly beneath the authoritative block that denied them. The
+    break is replaced by a visible ``\\n`` rather than dropped, because a value
+    that contained one is a value a reader should be able to see contained one.
+    """
+    text = _LINE_BREAK.sub("\\\\n", str(value))
+    return _CONTROL.sub("", text)
+
+
+def _text(value: Any) -> str:
+    """One already-sanitized value as inert single-line Markdown prose."""
+    return _MARKDOWN_ACTIVE.sub(r"\\\1", _one_line(value))
+
+
+def _code(value: Any) -> str:
+    """One already-sanitized value as a code span it cannot break out of.
+
+    A backtick inside a one-backtick span closes it, which is how a URL or an
+    adapter path re-opened as prose. CommonMark's own answer is used instead of
+    escaping: a span delimited by more backticks than the content contains can
+    hold any run of them, and a value that starts or ends with one is padded so
+    the delimiters stay unambiguous.
+    """
+    text = _one_line(value)
+    if not text:
+        return "``"
+    longest = max((len(run) for run in re.findall("`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 __all__ = ["as_dict", "failure_markdown", "to_json", "to_markdown"]

@@ -135,9 +135,9 @@ import re
 import shutil
 import tempfile
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +240,23 @@ class GateOutcome:
     output: str
 
 
+# How far one configured gate actually got on this head. Configuration says
+# which gates a run was meant to perform; only this says which ones performed
+# anything, and the disclosure needs both — an external gate's evidence sentence
+# claims a live endpoint *was checked*, which is true of a gate that ran and of
+# no other kind.
+#
+# ``not-run`` is the honest default and covers the gate a stop never reached.
+# ``skipped`` is the visual gate this PR did not require. ``failed`` is a gate
+# that ran and exited non-zero or timed out, which is already a blocking finding
+# and is also not an observation anything may be reported on: a command that
+# timed out may never have opened the connection.
+GATE_NOT_RUN = "not-run"
+GATE_SKIPPED = "skipped"
+GATE_COMPLETED = "completed"
+GATE_FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class GateDisclosure:
     """What one *configured* gate is, and what its result is evidence about.
@@ -248,6 +265,13 @@ class GateDisclosure:
     skipped, or one the run never reached, still appears: "these are the gates
     this run was configured with" is the claim, and a list that quietly omitted
     the ones that did not run would be a different, more flattering one.
+
+    Which is exactly why ``execution`` travels beside the rest. Listing a gate
+    the run never performed is honest; describing its *result* as evidence is
+    not, and the two live one field apart. A skipped or failed external gate
+    kept the configured ``live-endpoint-unbound`` sentence, so a visual gate this
+    PR did not require reported that a live endpoint had been checked — by
+    nothing, on a head where the command never ran.
 
     ``coverage`` is the operator's own sentence, carried verbatim and never
     inferred. ``evidence_mode`` starts at whatever configuration alone can
@@ -269,10 +293,11 @@ class GateDisclosure:
     revision: str = ""
     binding_source: str = ""
     observed_at: str = ""
+    execution: str = GATE_NOT_RUN
 
     @classmethod
     def declared(cls, gate: GateConfig) -> GateDisclosure:
-        """One gate as configuration alone describes it."""
+        """One gate as configuration alone describes it, before it has run."""
         return cls(
             name=gate.name,
             kind=gate.kind,
@@ -282,13 +307,19 @@ class GateDisclosure:
             environment="" if gate.environment is None else gate.environment.identifier,
         )
 
+    def ran(self, execution: str) -> GateDisclosure:
+        """The same gate, recording how far its command actually got."""
+        return replace(self, execution=execution)
+
     def bound(self, binding: EnvironmentBinding) -> GateDisclosure:
-        """The same gate, raised to head-bound by one validated envelope."""
-        return GateDisclosure(
-            name=self.name,
-            kind=self.kind,
-            invocation=self.invocation,
-            coverage=self.coverage,
+        """The same gate, raised to head-bound by one validated envelope.
+
+        ``execution`` is carried rather than re-derived: only a gate that
+        completed can reach this, and a binding that forgot how it was earned
+        would be a disclosure whose two halves disagree.
+        """
+        return replace(
+            self,
             evidence_mode=GATE_EVIDENCE_HEAD_BOUND,
             environment=binding.environment,
             url=binding.url,
@@ -757,6 +788,10 @@ class ProverLoop:
         findings: list[Finding] = []
         for index, gate in enumerate(self.config.gates, start=1):
             if gate.kind == "visual" and not self.config.visual_qa_required:
+                # Still disclosed as configured proof scope, and now recorded as
+                # what it is: a gate that performed nothing on this head, whose
+                # result is therefore evidence about nothing.
+                self._record_execution(gate.name, GATE_SKIPPED)
                 self._event(f"visual gate {gate.name!r} skipped: this PR does not require visual QA")
                 continue
             lane = f"gate {gate.name}"
@@ -805,6 +840,14 @@ class ProverLoop:
                         passed=result.ok,
                         output=output,
                     )
+                )
+                # Beside the outcome, and inside the same block, because this
+                # became true when the command exited: a worktree the check
+                # below finds contaminated stops the run, and the gate that ran
+                # before it still ran. Recording this outside would report a
+                # completed gate as never performed.
+                self._record_execution(
+                    gate.name, GATE_COMPLETED if result.ok else GATE_FAILED
                 )
             if result.ok:
                 self._event(f"gate {gate.name!r} passed on {head}")
@@ -871,6 +914,25 @@ class ProverLoop:
             )
         return findings
 
+    def _record_execution(self, name: str, execution: str) -> None:
+        """Record how far one configured gate's command got on this head."""
+        self._revise_disclosure(name, lambda item: item.ran(execution))
+
+    def _revise_disclosure(
+        self, name: str, revise: Callable[[GateDisclosure], GateDisclosure]
+    ) -> None:
+        """Replace one configured gate's disclosure in place.
+
+        The list is keyed by name because that is what configuration guarantees
+        is unique across gates; a gate the list does not hold is a programming
+        error rather than a run condition, so this quietly does nothing rather
+        than inventing a disclosure for a gate nobody configured.
+        """
+        for index, disclosure in enumerate(self._gate_disclosures):
+            if disclosure.name == name:
+                self._gate_disclosures[index] = revise(disclosure)
+                return
+
     def _bind_environment(
         self, gate: GateConfig, path: Path, *, pull: PullRequest, head: str
     ) -> None:
@@ -893,10 +955,7 @@ class ProverLoop:
             environment=_environment_id(gate),
             head=head,
         )
-        for index, disclosure in enumerate(self._gate_disclosures):
-            if disclosure.name == gate.name:
-                self._gate_disclosures[index] = disclosure.bound(binding)
-                break
+        self._revise_disclosure(gate.name, lambda item: item.bound(binding))
         self._event(
             f"gate {gate.name!r} bound {binding.environment!r} to {head}: revision "
             f"{binding.revision} observed at {binding.observed_at} via "
@@ -2379,6 +2438,10 @@ def _budget(timeout: float | None) -> str:
 
 __all__ = [
     "BLOCKED",
+    "GATE_COMPLETED",
+    "GATE_FAILED",
+    "GATE_NOT_RUN",
+    "GATE_SKIPPED",
     "MERGE_READY",
     "NEEDS_KARAN",
     "ArtifactTransport",
