@@ -38,6 +38,8 @@ from typing import Callable, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from _support import (
+    ENVIRONMENT_NAME,
+    ENVIRONMENT_URL,
     HEAD_A,
     HEAD_B,
     HEAD_C,
@@ -45,6 +47,7 @@ from _support import (
     REVIEWER_LOGIN,
     builder_output,
     fix_comment,
+    records_environment,
     reviewer_artifact,
     reviewer_output,
 )
@@ -1406,6 +1409,130 @@ class KillSwitchCompositionTests(LoopHarness):
         self.assertEqual(reviewer_a.status, "fail")
         self.assertEqual(reviewer_a.blocking, 1)
         self.assertTrue(reviewer_a.kill_switches)
+
+
+class BoundedEvidenceCompositionTests(LoopHarness):
+    """Two external gates on one head, and the difference between them.
+
+    Both are configured, both send requests somewhere that is not this checkout,
+    and both pass. One of them additionally recorded which revision the
+    environment it observed said it was serving, and reconciled it against the
+    run head. That single difference is the whole disclosure contract, so it is
+    proved here as one composed pass — the rendered report separating them —
+    rather than as two unit answers about a gate nobody ran.
+
+    The third case is the one an operator would run by hand: change nothing but
+    the recorded revision, and the run stops before the reviewers instead of
+    reporting a bound environment it no longer has evidence for.
+    """
+
+    UNBOUND = {
+        "name": "staging-smoke",
+        "argv": ["lane-gate-staging", "--head", "{head}", "--url", "https://staging.invalid"],
+        "coverage": "HTTP smoke of the staging endpoint",
+        "environment": {"identifier": "staging"},
+    }
+    BOUND = {
+        "name": "preview",
+        "argv": [
+            "lane-gate-preview",
+            "--head",
+            "{head}",
+            "--url",
+            ENVIRONMENT_URL,
+            "--environment-evidence",
+            "{environment_evidence_file}",
+        ],
+        "coverage": "HTTP smoke of the preview deployment, with its served revision",
+        "environment": {"identifier": ENVIRONMENT_NAME, "binding_evidence": True},
+    }
+
+    def two_external_gates(self, **overrides: object) -> None:
+        self.script.add("lane-gate-staging", "200 OK\n")
+        self.script.add(
+            "lane-gate-preview",
+            "200 OK\n",
+            after=records_environment(self.runner, **overrides),
+        )
+
+    def disclosures(self, result) -> dict[str, dict]:
+        return {
+            item["name"]: item for item in as_dict(result)["configured_gates"]
+        }
+
+    def test_one_head_two_endpoints_and_only_one_of_them_bound(self) -> None:
+        loop = self.build(gates=[self.UNBOUND, self.BOUND])
+        self.two_external_gates()
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertEqual(result.outcome, MERGE_READY)
+        disclosed = self.disclosures(result)
+        self.assertEqual(disclosed["staging-smoke"]["evidence_mode"], "live-endpoint-unbound")
+        self.assertEqual(
+            disclosed["staging-smoke"]["evidence_statement"],
+            "live endpoint checked; revision binding not established",
+        )
+        self.assertEqual(disclosed["preview"]["evidence_mode"], "head-bound-environment")
+        self.assertEqual(disclosed["preview"]["revision"], HEAD_A)
+        # Both gates passed, and the report does not let that make them equal.
+        self.assertEqual([gate.passed for gate in result.gates], [True, True])
+        markdown = to_markdown(result)
+        self.assertIn("live endpoint checked; revision binding not established", markdown)
+        self.assertIn(f"revision `{HEAD_A}`", markdown)
+        # And a merge-ready head still says what it did not establish.
+        self.assertIn("merged-result behavior: **not established**", markdown)
+        self.assertIn(
+            "human final merge review and authorization: **not established**", markdown
+        )
+
+    def test_changing_only_the_recorded_revision_stops_before_the_reviewers(self) -> None:
+        loop = self.build(gates=[self.UNBOUND, self.BOUND])
+        self.two_external_gates(revision=HEAD_B)
+        self.review_round(HEAD_A)
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        self.assertEqual(result.reason, "environment-evidence")
+        launched = [call.argv[0] for call in self.runner.calls if call.argv[0].startswith("lane-")]
+        self.assertIn("lane-gate-preview", launched)
+        self.assertNotIn("lane-reviewer-A", launched)
+        # The stop is rendered as the failure record every other one is, and it
+        # names the two revisions rather than only refusing.
+        self.assertIn(HEAD_B, to_markdown(result))
+        self.assertEqual(
+            self.disclosures(result)["preview"]["evidence_mode"], "live-endpoint-unbound"
+        )
+
+    def test_the_configured_scope_travels_with_a_stop_as_well_as_a_pass(self) -> None:
+        """A needs-Karan report discloses the same scope a merge-ready one does."""
+        loop = self.build(gates=[self.UNBOUND, self.BOUND])
+        self.two_external_gates()
+        self.script.add(
+            "lane-reviewer-A",
+            reviewer_output(
+                HEAD_A,
+                [("needs-karan", "authority", "this would need Karan to widen the mission")],
+            ),
+        )
+
+        result = loop.run()
+
+        self.assertNotEqual(result.outcome, MERGE_READY)
+        payload = as_dict(result)
+        self.assertEqual(
+            [item["name"] for item in payload["configured_gates"]],
+            ["staging-smoke", "preview"],
+        )
+        self.assertTrue(payload["proof_scope"]["environment_revision_binding"])
+        self.assertFalse(payload["proof_scope"]["heterogeneous_reviewer_independence"])
+        # The head this stop reports was observed, so it is dated; both
+        # renderings say when.
+        self.assertEqual(payload["head"], HEAD_A)
+        self.assertRegex(payload["observed_at"], r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+        self.assertIn(f"**Head observed at:** {payload['observed_at']}", to_markdown(result))
 
 
 if __name__ == "__main__":  # pragma: no cover

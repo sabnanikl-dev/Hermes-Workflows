@@ -102,6 +102,17 @@ elapsed time and quiet time while the lane runs, and reports how it ended. Quiet
 output is written down; it is never read as a hang, and only a lane's own
 configured budget ever ends one.
 
+**Bounded disclosure.** What a run establishes is narrower than what a reader
+may take from it, so the loop carries the difference into the report rather than
+leaving it to be inferred: the UTC moment the terminal live read happened, every
+*configured* gate with its operator-declared coverage and what its result is
+evidence about, and which adapter ran each reviewer lane beside the ``RUNTIME=``
+its published artifact claimed. One of those is earned rather than declared — a
+gate may report ``head-bound-environment`` only where it produced a binding
+envelope (:mod:`pr_prover.environment`) whose externally observed revision this
+loop reconciled against the run head, and a gate configured to produce one that
+did not stops the run before any reviewer launches.
+
 Push and comment verification is also *durable*. The attempt is journaled as
 in-flight before the builder is invoked and cleared only once that verification
 passes, so a run killed anywhere in between cannot restart, re-inspect its way
@@ -124,14 +135,21 @@ import re
 import shutil
 import tempfile
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from .commands import CommandResult, CommandRunner, Progress, render_argv
-from .config import LaneEnv, ReviewerConfig, RunConfig
+from .config import (
+    GATE_EVIDENCE_HEAD_BOUND,
+    GateConfig,
+    LaneEnv,
+    ReviewerConfig,
+    RunConfig,
+)
+from .environment import EnvironmentBinding, environment_evidence_path, read_binding
 from .errors import (
     AmbiguousPush,
     BuilderRefusal,
@@ -176,6 +194,7 @@ from .reviewers import (
     credential_free as credential_free_env,
     credential_free_config_dir,
     expected_block,
+    parse_artifact,
     publication_copy,
     read_prepared,
     relay_source,
@@ -219,6 +238,117 @@ class GateOutcome:
     returncode: int
     passed: bool
     output: str
+
+
+# How far one configured gate actually got on this head. Configuration says
+# which gates a run was meant to perform; only this says which ones performed
+# anything, and the disclosure needs both — an external gate's evidence sentence
+# claims a live endpoint *was checked*, which is true of a gate that ran and of
+# no other kind.
+#
+# ``not-run`` is the honest default and covers the gate a stop never reached.
+# ``skipped`` is the visual gate this PR did not require. ``failed`` is a gate
+# that ran and exited non-zero or timed out, which is already a blocking finding
+# and is also not an observation anything may be reported on: a command that
+# timed out may never have opened the connection.
+GATE_NOT_RUN = "not-run"
+GATE_SKIPPED = "skipped"
+GATE_COMPLETED = "completed"
+GATE_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class GateDisclosure:
+    """What one *configured* gate is, and what its result is evidence about.
+
+    Built from configuration rather than from execution, so a gate that was
+    skipped, or one the run never reached, still appears: "these are the gates
+    this run was configured with" is the claim, and a list that quietly omitted
+    the ones that did not run would be a different, more flattering one.
+
+    Which is exactly why ``execution`` travels beside the rest. Listing a gate
+    the run never performed is honest; describing its *result* as evidence is
+    not, and the two live one field apart. A skipped or failed external gate
+    kept the configured ``live-endpoint-unbound`` sentence, so a visual gate this
+    PR did not require reported that a live endpoint had been checked — by
+    nothing, on a head where the command never ran.
+
+    ``coverage`` is the operator's own sentence, carried verbatim and never
+    inferred. ``evidence_mode`` starts at whatever configuration alone can
+    justify and is raised to :data:`~pr_prover.config.GATE_EVIDENCE_HEAD_BOUND`
+    only where a validated binding envelope earned it; the four fields below it
+    are that envelope's bounded contents and are empty otherwise.
+    """
+
+    name: str
+    kind: str
+    # The configured argv *template*, not the rendered command: it is the stable
+    # shape across heads, and it shows a reader exactly what this tool refuses to
+    # read anything into — a ``{head}`` token or a URL sitting in an argv array.
+    invocation: str
+    coverage: str
+    evidence_mode: str
+    environment: str = ""
+    url: str = ""
+    revision: str = ""
+    binding_source: str = ""
+    observed_at: str = ""
+    execution: str = GATE_NOT_RUN
+
+    @classmethod
+    def declared(cls, gate: GateConfig) -> GateDisclosure:
+        """One gate as configuration alone describes it, before it has run."""
+        return cls(
+            name=gate.name,
+            kind=gate.kind,
+            invocation=" ".join(gate.argv),
+            coverage=gate.coverage,
+            evidence_mode=gate.declared_evidence_mode,
+            environment="" if gate.environment is None else gate.environment.identifier,
+        )
+
+    def ran(self, execution: str) -> GateDisclosure:
+        """The same gate, recording how far its command actually got."""
+        return replace(self, execution=execution)
+
+    def bound(self, binding: EnvironmentBinding) -> GateDisclosure:
+        """The same gate, raised to head-bound by one validated envelope.
+
+        ``execution`` is carried rather than re-derived: only a gate that
+        completed can reach this, and a binding that forgot how it was earned
+        would be a disclosure whose two halves disagree.
+        """
+        return replace(
+            self,
+            evidence_mode=GATE_EVIDENCE_HEAD_BOUND,
+            environment=binding.environment,
+            url=binding.url,
+            revision=binding.revision,
+            binding_source=binding.binding_source,
+            observed_at=binding.observed_at,
+        )
+
+
+@dataclass(frozen=True)
+class ReviewerTopology:
+    """Which adapter ran one reviewer lane, and what its artifact claimed to be.
+
+    Two facts of two different kinds, kept apart because conflating them is how
+    "three separate processes" becomes "three independent reviewers".
+    ``adapter`` is *configuration*: the entrypoint this operator pointed the lane
+    at, which says what will run and nothing about what it is. ``runtime`` is the
+    ``RUNTIME=`` line off the artifact this run validated and read back — a claim
+    the lane made about itself, which this tool records and does not attest.
+
+    Empty ``runtime`` means no artifact for this lane was ever read back, which
+    is a lane that has not stated what reviewed the head rather than one that
+    ran as nothing.
+    """
+
+    lane: str
+    role: str
+    adapter: str
+    runtime: str = ""
 
 
 @dataclass(frozen=True)
@@ -275,6 +405,11 @@ class RunResult:
     # current head to report, and local state cannot supply one, so the field
     # says "unknown" rather than presenting a recorded head as the live one.
     head: str | None = None
+    # When that observation happened, in UTC. It is set by the same read that
+    # set ``head`` and is ``None`` for exactly the same reason: a run that never
+    # read the live PR has no observation to time, and inventing one would date
+    # evidence this run does not have.
+    observed_at: str | None = None
     branch: str | None = None
     pr_url: str = ""
     attempts_used: int = 0
@@ -287,6 +422,15 @@ class RunResult:
     classification_head: str | None = None
     verdicts: tuple[ReviewerVerdict, ...] = ()
     gates: tuple[GateOutcome, ...] = ()
+    # Every gate this run was *configured* with, and what each one's result is
+    # evidence about. Separate from ``gates`` above, which is what actually ran:
+    # a skipped visual gate is part of the configured proof scope and none of
+    # the executed evidence, and a report has to be able to say both.
+    configured_gates: tuple[GateDisclosure, ...] = ()
+    # Which adapter ran each reviewer lane, and the runtime its artifact claimed.
+    # Neither says what actually executed, and the report says so where it
+    # renders them.
+    reviewer_topology: tuple[ReviewerTopology, ...] = ()
     # How each lane's process ended, and how each artifact actually reached
     # GitHub. Kept beside the verdicts rather than folded into them: a lane that
     # ran cleanly and an artifact that landed are transport facts, and the
@@ -330,6 +474,11 @@ class ProverLoop:
         self._state: RunState | None = None
         self._events: list[str] = []
         self._gates: list[GateOutcome] = []
+        # What this run was configured to prove, per gate. Built from the config
+        # so a stop before any gate ran still discloses the configured scope,
+        # and rebuilt per head so a previous head's binding cannot survive.
+        self._gate_disclosures: list[GateDisclosure] = self._declared_gates()
+        self._topology: list[ReviewerTopology] = []
         self._lanes: list[LaneObservation] = []
         self._transport: list[ArtifactTransport] = []
         self._verdicts: tuple[ReviewerVerdict, ...] = ()
@@ -347,6 +496,15 @@ class ProverLoop:
         # underneath the run, and a fail-closed report has to be able to tell
         # those apart rather than presenting the bound head as the current one.
         self._observed_head: str | None = None
+        # And when that observation happened. Kept beside the head rather than
+        # derived at report time, because "as of when" is half of what an
+        # exact-head claim means and the only honest source for it is the clock
+        # at the moment GitHub answered.
+        self._observed_at: str | None = None
+
+    def _declared_gates(self) -> list[GateDisclosure]:
+        """Every configured gate, as configuration alone describes it."""
+        return [GateDisclosure.declared(gate) for gate in self.config.gates]
 
     # -- entry point ------------------------------------------------------
     def run(self) -> RunResult:
@@ -507,8 +665,15 @@ class ProverLoop:
         live" has one definition instead of being re-derived at each terminal.
         It is deliberately not ``state.head``: binding is the head this run chose
         to work against, observing is the head GitHub reported.
+
+        The observation time is recorded in the same statement as the head, so
+        the two can never describe different moments. A report that named a head
+        without saying when it was seen would be making a claim about the live
+        PR with the perishable half left out — gates and reviewer lanes run for
+        hours, and "this was the head" is only meaningful with an "as of".
         """
         self._observed_head = pull.head_ref_oid
+        self._observed_at = self.clock()
         return pull
 
     def _inspect(self, state: RunState) -> PullRequest:
@@ -602,6 +767,12 @@ class ProverLoop:
         self._verdicts = ()
         self._failures = []
         self._transport = []
+        # Including the per-head halves of the disclosure. A binding envelope
+        # validated against the previous head is evidence about that head, and
+        # carrying it forward would report the new one as environment-bound on
+        # the strength of an observation nobody repeated.
+        self._gate_disclosures = self._declared_gates()
+        self._topology = []
         findings = list(self._run_gates(pull, head))
         if findings:
             self._event(
@@ -617,15 +788,37 @@ class ProverLoop:
         findings: list[Finding] = []
         for index, gate in enumerate(self.config.gates, start=1):
             if gate.kind == "visual" and not self.config.visual_qa_required:
+                # Still disclosed as configured proof scope, and now recorded as
+                # what it is: a gate that performed nothing on this head, whose
+                # result is therefore evidence about nothing.
+                self._record_execution(gate.name, GATE_SKIPPED)
                 self._event(f"visual gate {gate.name!r} skipped: this PR does not require visual QA")
                 continue
             lane = f"gate {gate.name}"
+            # Where a gate that declares head-bound environment evidence writes
+            # it: outside its own checkout, cleared before the gate can run, so
+            # a file an earlier cycle left behind can never be read as this
+            # gate's observation of this head.
+            binding_file = (
+                environment_evidence_path(self._scratch_dir(), gate=gate.name, head=head)
+                if gate.binds_environment
+                else None
+            )
             with self._lane_worktree(
                 f"pr{pull.number}-{head[:12]}-gate{index}-{_slug(gate.name)}", head, lane=lane
             ) as worktree:
                 argv = render_argv(
                     gate.argv,
-                    self._values(pull, head, worktree),
+                    self._values(
+                        pull,
+                        head,
+                        worktree,
+                        extra=(
+                            {"environment_evidence_file": str(binding_file)}
+                            if binding_file is not None
+                            else None
+                        ),
+                    ),
                     what=f"gate {gate.name!r}",
                 )
                 result = self._run_lane(
@@ -648,10 +841,36 @@ class ProverLoop:
                         output=output,
                     )
                 )
+                # Beside the outcome, and inside the same block, because this
+                # became true when the command exited: a worktree the check
+                # below finds contaminated stops the run, and the gate that ran
+                # before it still ran. Recording this outside would report a
+                # completed gate as never performed.
+                self._record_execution(
+                    gate.name, GATE_COMPLETED if result.ok else GATE_FAILED
+                )
             if result.ok:
                 self._event(f"gate {gate.name!r} passed on {head}")
+                # Deliberately here: after the gate has exited *and* after the
+                # worktree above was proved clean and still on the bound SHA. A
+                # gate that wrote into the tree it was judging has already
+                # stopped the run, so nothing this validates can be evidence a
+                # contaminating lane produced.
+                if binding_file is not None:
+                    self._bind_environment(gate, binding_file, pull=pull, head=head)
                 continue
             self._event(f"gate {gate.name!r} failed on {head} (exit {result.returncode})")
+            if binding_file is not None:
+                # A failed gate is already a blocking finding, and this head is
+                # not going anywhere on it. Demanding its binding envelope as
+                # well would replace that finding with a second stop about the
+                # evidence for a check that did not pass; the disclosure keeps
+                # saying the endpoint was unbound, which is exactly what a gate
+                # that did not finish established.
+                self._event(
+                    f"gate {gate.name!r} failed before it could bind "
+                    f"{_environment_id(gate)!r} to {head}"
+                )
             identifier = f"gate-{gate.name}".lower().replace(" ", "-")
             findings.append(
                 Finding(
@@ -695,6 +914,54 @@ class ProverLoop:
             )
         return findings
 
+    def _record_execution(self, name: str, execution: str) -> None:
+        """Record how far one configured gate's command got on this head."""
+        self._revise_disclosure(name, lambda item: item.ran(execution))
+
+    def _revise_disclosure(
+        self, name: str, revise: Callable[[GateDisclosure], GateDisclosure]
+    ) -> None:
+        """Replace one configured gate's disclosure in place.
+
+        The list is keyed by name because that is what configuration guarantees
+        is unique across gates; a gate the list does not hold is a programming
+        error rather than a run condition, so this quietly does nothing rather
+        than inventing a disclosure for a gate nobody configured.
+        """
+        for index, disclosure in enumerate(self._gate_disclosures):
+            if disclosure.name == name:
+                self._gate_disclosures[index] = revise(disclosure)
+                return
+
+    def _bind_environment(
+        self, gate: GateConfig, path: Path, *, pull: PullRequest, head: str
+    ) -> None:
+        """Reconcile one gate's environment binding evidence, or stop the run.
+
+        This is the only path to ``head-bound-environment``. What the gate wrote
+        is untrusted output from an operator-owned command, so it is held to
+        this run's repository, pull request, gate name, declared environment,
+        head, and — the question the whole envelope exists for — a revision the
+        gate observed externally that equals the head under review. Anything
+        else raises out of the gate loop, which is before any reviewer lane is
+        launched, because a run that was configured to prove revision binding
+        and could not is not a run that may go on and report around it.
+        """
+        binding = read_binding(
+            path,
+            repo=self.config.repo,
+            pr=pull.number,
+            gate=gate.name,
+            environment=_environment_id(gate),
+            head=head,
+        )
+        self._revise_disclosure(gate.name, lambda item: item.bound(binding))
+        self._event(
+            f"gate {gate.name!r} bound {binding.environment!r} to {head}: revision "
+            f"{binding.revision} observed at {binding.observed_at} via "
+            f"{binding.binding_source}"
+        )
+
     def _run_reviewers(self, pull: PullRequest, head: str) -> tuple[ReviewerVerdict, ...]:
         """Run the ordered acceptance lifecycle against one exact head.
 
@@ -720,6 +987,15 @@ class ProverLoop:
         self, reviewer: ReviewerConfig, pull: PullRequest, head: str
     ) -> ReviewerVerdict:
         relayed = reviewer.relay is not None
+        # What is about to run this lane, as configured. Recorded before the
+        # lane launches, so a lane that never produced a readable artifact still
+        # appears in the topology as a configured adapter with no runtime claim
+        # rather than vanishing from it.
+        self._topology.append(
+            ReviewerTopology(
+                lane=reviewer.name, role=reviewer.role, adapter=reviewer.argv[0]
+            )
+        )
         # Where a credential-free lane leaves its finished artifact. Outside
         # every repository, and cleared before the lane can be launched.
         prepared_path = artifact_path(self._scratch_dir(), reviewer=reviewer.name, head=head)
@@ -971,9 +1247,17 @@ class ProverLoop:
                 findings=findings,
             ):
                 continue
+            # The runtime this artifact declares, taken from the body GitHub is
+            # actually showing rather than from the file a lane wrote, so what
+            # the report attributes to a lane is what a reader of the PR can see
+            # for themselves. It is the lane's own claim either way; carrying it
+            # is disclosure, not proof of what ran.
+            claim = parse_artifact(artifact.body).claim
+            self._record_runtime(reviewer, "" if claim is None else claim.runtime)
             self._event(
                 f"reviewer {reviewer.name} {artifact.kind} {artifact.identifier} "
-                f"read back for {head} as ROLE={reviewer.role}"
+                f"read back for {head} as ROLE={reviewer.role} "
+                f"RUNTIME={'' if claim is None else claim.runtime}"
             )
             self._retain_artifact(artifact, lane=f"reviewer {reviewer.name}")
             self._mark_transport(read_back=True, identifier=artifact.identifier)
@@ -1179,6 +1463,18 @@ class ProverLoop:
             self._event(
                 f"{lane} artifact {artifact.identifier} retained as this run's own publication"
             )
+
+    def _record_runtime(self, reviewer: ReviewerConfig, runtime: str) -> None:
+        """Attach one validated artifact's ``RUNTIME=`` claim to its lane."""
+        for index, entry in enumerate(self._topology):
+            if entry.lane == reviewer.name and entry.role == reviewer.role:
+                self._topology[index] = ReviewerTopology(
+                    lane=entry.lane,
+                    role=entry.role,
+                    adapter=entry.adapter,
+                    runtime=runtime,
+                )
+                return
 
     def _mark_transport(self, **changes: Any) -> None:
         """Advance the artifact-transport record this lane is currently filling in."""
@@ -2000,6 +2296,9 @@ class ProverLoop:
             outcome=outcome,
             reason=reason,
             head=pull.head_ref_oid,
+            # The freshness assertion above is this run's terminal live read, so
+            # the time it recorded is the time the reported head was observed.
+            observed_at=self._observed_at,
             branch=pull.head_ref_name,
             pr_url=pull.url,
             attempts_used=state.attempt,
@@ -2008,6 +2307,8 @@ class ProverLoop:
             classification_head=pull.head_ref_oid,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
+            configured_gates=tuple(self._gate_disclosures),
+            reviewer_topology=tuple(self._topology),
             lanes=tuple(self._lanes),
             transport=tuple(self._transport),
             events=tuple(self._events),
@@ -2061,6 +2362,10 @@ class ProverLoop:
             outcome=NEEDS_KARAN,
             reason=exc.reason,
             head=head,
+            # Set in the same statement as the head it dates, so a stop that
+            # observed nothing reports no observation time either rather than
+            # stamping the moment the run gave up onto evidence it never got.
+            observed_at=self._observed_at,
             branch=self.config.branch,
             attempts_used=getattr(state, "attempt", 0),
             corrective_reruns=getattr(state, "corrective_rerun_attempts", ()),
@@ -2068,6 +2373,8 @@ class ProverLoop:
             classification_head=bound_head if classification else None,
             verdicts=self._verdicts,
             gates=tuple(self._gates),
+            configured_gates=tuple(self._gate_disclosures),
+            reviewer_topology=tuple(self._topology),
             lanes=tuple(self._lanes),
             transport=tuple(self._transport),
             events=tuple(self._events),
@@ -2094,6 +2401,11 @@ def _combined(result: CommandResult) -> str:
     # No marker, or a marker on both streams: hand the parser everything so it
     # fails closed on "missing" or "ambiguous" with the full evidence.
     return "\n".join(part for part in (stdout, stderr) if part.strip())
+
+
+def _environment_id(gate: GateConfig) -> str:
+    """The environment a gate declared it observes, or ``""`` for none."""
+    return "" if gate.environment is None else gate.environment.identifier
 
 
 def _is_full_sha(value: str) -> bool:
@@ -2126,11 +2438,17 @@ def _budget(timeout: float | None) -> str:
 
 __all__ = [
     "BLOCKED",
+    "GATE_COMPLETED",
+    "GATE_FAILED",
+    "GATE_NOT_RUN",
+    "GATE_SKIPPED",
     "MERGE_READY",
     "NEEDS_KARAN",
     "ArtifactTransport",
+    "GateDisclosure",
     "GateOutcome",
     "LaneObservation",
     "ProverLoop",
+    "ReviewerTopology",
     "RunResult",
 ]

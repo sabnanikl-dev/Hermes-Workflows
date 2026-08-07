@@ -106,6 +106,27 @@ grammar, immutable-id matching, chronology, the single unresolved-to-cleared
 transition, residual prose, native review/thread resolution, and the refusal to
 let this run's own verified artifacts acknowledge anything at all.
 
+A gate may also declare two things about itself, and both are *declarations*
+rather than anything this tool verifies. ``coverage`` is one sentence saying
+what the operator believes the gate covers; it is printed in every report as an
+operator declaration, and nothing infers sufficiency from it. ``environment``
+says the gate observes something outside this checkout — a preview deployment,
+a staging endpoint — and it is what turns the gate's reported evidence mode from
+``local-or-unspecified`` into ``live-endpoint-unbound``. Neither is inferable
+from a command name, an argv string, or a URL, so neither is inferred: a gate
+with no ``environment`` block is reported as local or unspecified however many
+URLs its argv contains.
+
+The third mode, ``head-bound-environment``, is the only one that claims the
+environment was serving the head under review, and it is earned rather than
+declared. Setting ``environment.binding_evidence`` requires the gate's argv to
+receive ``{environment_evidence_file}``; the gate writes the envelope
+:mod:`pr_prover.environment` defines to that path, outside its own worktree, and
+the loop reconciles it against this run's repository, PR, gate, environment,
+head, and revision after the gate exits. Missing, malformed, oversized, or
+contradictory evidence stops the run before the reviewers rather than quietly
+reporting the endpoint as bound.
+
 ``env``/``env_unset`` are a small named overlay on the inherited environment,
 not a replacement for it: the trusted lanes run as the operator's own user with
 the normal Claude OAuth/keychain session, so the session variables cannot be
@@ -180,6 +201,67 @@ _BODY_EVIDENCE = re.compile(r"\A[0-9a-f]{64}\Z")
 # refuse.
 _ACKNOWLEDGEMENT_KEYS = frozenset({"id", "body_evidence"})
 GATE_KINDS = ("baseline", "visual")
+# What one gate's result is evidence *about*. Three values, finite and ordered
+# from weakest to strongest, because a report that cannot say which of these a
+# gate produced is a report whose reader supplies the difference themselves.
+#
+# ``local-or-unspecified`` is the default and the answer for every gate that
+# does not declare otherwise: it ran a command in a checkout of this head, and
+# what else it reached is unspecified. ``live-endpoint-unbound`` is an operator
+# declaring that the gate observes an external environment — real evidence about
+# that endpoint, and no evidence at all that the endpoint served this head.
+# ``head-bound-environment`` is the only one that claims otherwise, and it is
+# never a configured value: it is what a validated binding envelope produces.
+GATE_EVIDENCE_LOCAL = "local-or-unspecified"
+GATE_EVIDENCE_UNBOUND = "live-endpoint-unbound"
+GATE_EVIDENCE_HEAD_BOUND = "head-bound-environment"
+GATE_EVIDENCE_MODES = (
+    GATE_EVIDENCE_LOCAL,
+    GATE_EVIDENCE_UNBOUND,
+    GATE_EVIDENCE_HEAD_BOUND,
+)
+# What an external gate with no validated binding evidence says, word for word,
+# in both renderings. It is a constant for the same reason ``merge_authority``
+# is: the sentence is the disclosure, and a sentence something could compose per
+# gate is a sentence something could compose into a weaker one.
+UNBOUND_STATEMENT = "live endpoint checked; revision binding not established"
+# The same disclosure for an external gate whose command never ran at all. The
+# sentence above says the endpoint *was* checked, and that half of it is a claim
+# about execution rather than about binding: a gate that was skipped or that the
+# run never reached issued no command, so nothing opened a connection and saying
+# so is a fact this run holds. Reporting "checked" for it would state a live
+# observation nothing performed — a smaller error than claiming the binding, and
+# the same kind of error.
+UNCHECKED_STATEMENT = (
+    "live endpoint not checked; this gate's command never ran on this head, so "
+    "its result establishes nothing about the environment it declares"
+)
+# And the disclosure for an external gate whose command ran and did not succeed.
+# "Not checked" is itself a claim, and a failing command does not support it: a
+# gate that exits non-zero *after* the endpoint answers — an HTTP smoke recording
+# `503 Service Unavailable` and exiting 22 — reached exactly the environment it
+# declares, and one that timed out may have reached it and then hung. This run
+# knows the command did not complete and does not know how far it got, so the
+# statement claims neither direction. Replacing an unsupported positive with an
+# unsupported negative would be the same failure pointed the other way.
+INDETERMINATE_STATEMENT = (
+    "whether the live endpoint was checked is not established; this gate's "
+    "command did not complete on this head, so neither its result nor any "
+    "binding establishes anything about the environment it declares"
+)
+# How long an operator's coverage declaration may be. One sentence, printed
+# whole in every report; a paragraph here is documentation, and documentation
+# belongs in the repository rather than in a field a reader takes as a summary.
+MAX_COVERAGE_CHARACTERS = 300
+# How an environment is named. Bounded, printable, and free of whitespace at the
+# ends, because this value is compared byte for byte against what a gate writes
+# into its binding evidence: a near-match would be an operator believing one
+# environment was reconciled while another was, and a label that differs from
+# another only by a space nobody can see is exactly that mistake.
+_ENVIRONMENT_ID = re.compile(
+    r"\A[A-Za-z0-9](?:[A-Za-z0-9 ._:/-]{0,118}[A-Za-z0-9._:/-])?\Z"
+)
+_ENVIRONMENT_KEYS = frozenset({"identifier", "binding_evidence"})
 # The acceptance lifecycle, as configuration rather than operator convention.
 #
 # The mission fixes one ordered review sequence for a merge-readiness run:
@@ -221,7 +303,9 @@ _TOP_LEVEL_KEYS = frozenset(
         "builder",
     }
 )
-_GATE_KEYS = frozenset({"name", "argv", "kind", "timeout", "env", "env_unset"})
+_GATE_KEYS = frozenset(
+    {"name", "argv", "kind", "timeout", "env", "env_unset", "coverage", "environment"}
+)
 _REVIEWER_KEYS = frozenset(
     {
         "name",
@@ -244,6 +328,12 @@ _ARTIFACT_FILE = "{artifact_file}"
 # receives the frozen packet has been asked to judge a pull request it has no
 # way to read.
 _EVIDENCE_PACKET = "{evidence_packet}"
+# Where a gate that declares head-bound environment evidence writes it. Required
+# in that gate's argv for the same reason ``{artifact_file}`` is required in a
+# relayed lane's: a gate asked to produce a file with nowhere to put it is
+# misconfigured, and finding that out from the absence afterwards cannot tell
+# "the gate did not write" apart from "the gate was never told where".
+_ENVIRONMENT_EVIDENCE_FILE = "{environment_evidence_file}"
 _BUILDER_KEYS = frozenset(
     {"argv", "signature", "comment_author", "timeout", "env", "env_unset"}
 )
@@ -306,6 +396,27 @@ class OperatorAcknowledgement:
 
 
 @dataclass(frozen=True)
+class GateEnvironment:
+    """One operator declaration that a gate observes something outside this tree.
+
+    ``identifier`` names the environment as the operator knows it — ``preview``,
+    ``staging``, a hostname — and it is what the gate's own binding evidence must
+    name back. It is a label, not a URL this tool visits: nothing here fetches,
+    deploys, or discovers anything.
+
+    ``binding_evidence`` is the opt-in that lets this gate be reported as
+    head-bound at all. False, and the gate reports
+    :data:`GATE_EVIDENCE_UNBOUND`: real evidence about a live endpoint, and no
+    claim about which revision it served. True, and the gate owes the envelope in
+    :mod:`pr_prover.environment` at the path it is handed — which it either
+    produces and reconciles, or the run stops.
+    """
+
+    identifier: str
+    binding_evidence: bool = False
+
+
+@dataclass(frozen=True)
 class GateConfig:
     """One baseline gate, or one browser/visual QA gate."""
 
@@ -314,6 +425,29 @@ class GateConfig:
     kind: str = "baseline"
     timeout: float | None = None
     env: LaneEnv = LaneEnv()
+    # What the operator says this gate covers, verbatim and unverified. Empty is
+    # the honest default: a run that says nothing about coverage is better than
+    # one that invents a description from a command name.
+    coverage: str = ""
+    environment: GateEnvironment | None = None
+
+    @property
+    def declared_evidence_mode(self) -> str:
+        """The strongest mode this gate can reach from configuration alone.
+
+        Never :data:`GATE_EVIDENCE_HEAD_BOUND`. That one is not a configured
+        value at all — it is what a validated binding envelope produces at run
+        time — so the floor an operator can declare stops one step below it, and
+        an argv full of ``{head}`` tokens and URLs cannot raise it.
+        """
+        if self.environment is None:
+            return GATE_EVIDENCE_LOCAL
+        return GATE_EVIDENCE_UNBOUND
+
+    @property
+    def binds_environment(self) -> bool:
+        """Does this gate owe a validated environment binding envelope?"""
+        return self.environment is not None and self.environment.binding_evidence
 
 
 @dataclass(frozen=True)
@@ -440,6 +574,15 @@ class RunConfig:
         they preauthorized. The bodies those ids were pinned to are not printed —
         a digest read back to the person who wrote it proves nothing, and the run
         itself compares them against what GitHub currently serves.
+
+        A gate declared to observe an external environment without binding
+        evidence gets a note too, because what its reports will say is a fact
+        worth reading before the run rather than after it: the endpoint was
+        checked, and which revision it served was not established. The note says
+        "when it completes" rather than "always", because that sentence is also
+        a claim about execution — a run where the gate never ran reports that
+        nothing was checked, and one where its command failed or timed out
+        reports that whether anything was checked is not established.
         """
         notes: list[str] = []
         if self.operator_acknowledgements:
@@ -452,6 +595,17 @@ class RunConfig:
                 "each one is an authorization rather than a login-wide exemption, and "
                 "each is refused if the post no longer says what its pinned "
                 "body_evidence was taken over"
+            )
+        for gate in self.gates:
+            if gate.environment is None or gate.binds_environment:
+                continue
+            notes.append(
+                f"gate {gate.name!r} declares that it observes the external environment "
+                f"{gate.environment.identifier!r} without binding evidence, so every "
+                f"report in which it completes will say: {UNBOUND_STATEMENT}; a run "
+                f"where its command never ran will say: {UNCHECKED_STATEMENT}; and a "
+                f"run where its command failed or timed out will say: "
+                f"{INDETERMINATE_STATEMENT}"
             )
         for lane, timeout in self._budgets():
             if timeout is None:
@@ -832,13 +986,99 @@ def _gate(item: object, index: int) -> GateConfig:
         raise ConfigError(
             f"gates[{index}] kind must be one of {list(GATE_KINDS)}", evidence={"kind": kind}
         )
+    name = _checked_name(item, what="gates", index=index)
+    argv = validate_argv(item.get("argv"), what=f"gates[{index}].argv")
+    environment = _gate_environment(item.get("environment"), index=index)
+    receives_evidence_file = any(_ENVIRONMENT_EVIDENCE_FILE in part for part in argv)
+    if environment is not None and environment.binding_evidence:
+        # Both halves of the handoff, for the same reason a relayed lane needs
+        # both: a gate asked to prove revision binding with nowhere to write its
+        # evidence fails as an absence nothing can explain.
+        if not receives_evidence_file:
+            raise ConfigError(
+                f"gates[{index}] declares environment.binding_evidence but its argv never "
+                f"receives {_ENVIRONMENT_EVIDENCE_FILE}, so the gate has nowhere to record "
+                "the revision it observed",
+                evidence={"gate": name},
+            )
+    elif receives_evidence_file:
+        raise ConfigError(
+            f"gates[{index}].argv receives {_ENVIRONMENT_EVIDENCE_FILE} but the gate does "
+            "not declare environment.binding_evidence, so nothing would read what it "
+            "wrote there and the gate would still report an unbound endpoint",
+            evidence={"gate": name},
+        )
     return GateConfig(
-        name=_checked_name(item, what="gates", index=index),
-        argv=validate_argv(item.get("argv"), what=f"gates[{index}].argv"),
+        name=name,
+        argv=argv,
         kind=kind,
         timeout=_timeout(item, what=f"gates[{index}]"),
         env=_lane_env(item, what=f"gates[{index}]"),
+        coverage=_gate_coverage(item.get("coverage"), index=index),
+        environment=environment,
     )
+
+
+def _gate_coverage(value: object, *, index: int) -> str:
+    """One operator sentence about what this gate covers, or nothing.
+
+    Optional, and absent means the report says this gate declared no coverage —
+    which is the truthful answer, and a better one than a description inferred
+    from the command name. Present, it is bounded and non-empty: a field a
+    reader takes as the operator's statement must not be able to be whitespace.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            f"gates[{index}].coverage must be a non-empty sentence when present: it is "
+            "printed in every report as the operator's own declaration of what this gate "
+            "covers, and nothing infers it from the command",
+            evidence={"index": index},
+        )
+    text = value.strip()
+    if len(text) > MAX_COVERAGE_CHARACTERS:
+        raise ConfigError(
+            f"gates[{index}].coverage is longer than {MAX_COVERAGE_CHARACTERS} characters",
+            evidence={"index": index, "characters": len(text), "limit": MAX_COVERAGE_CHARACTERS},
+        )
+    return text
+
+
+def _gate_environment(value: object, *, index: int) -> GateEnvironment | None:
+    """The external-environment declaration for one gate, or ``None``.
+
+    Absent is the conservative default and the answer for every configuration
+    written before this field existed: the gate is reported as
+    ``local-or-unspecified``, whatever its argv happens to contain. Declaring
+    the block is the operator saying, explicitly, that this gate's result is
+    evidence about something that is not this checkout — which is the only way
+    a run reports a live endpoint at all.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not set(value) <= _ENVIRONMENT_KEYS:
+        raise ConfigError(
+            f"gates[{index}].environment must be an object of 'identifier' and optional "
+            "'binding_evidence'; it declares that this gate observes an external "
+            "environment and is never inferred from the command or its arguments",
+            evidence={"index": index, "known_keys": sorted(_ENVIRONMENT_KEYS)},
+        )
+    identifier = value.get("identifier")
+    if not isinstance(identifier, str) or not _ENVIRONMENT_ID.match(identifier):
+        raise ConfigError(
+            f"gates[{index}].environment.identifier must name the environment this gate "
+            "observes, as a bounded label with no leading or trailing whitespace; the "
+            "gate's own binding evidence is held to this exact value",
+            evidence={"index": index},
+        )
+    binding = value.get("binding_evidence", False)
+    if not isinstance(binding, bool):
+        raise ConfigError(
+            f"gates[{index}].environment.binding_evidence must be a boolean",
+            evidence={"index": index},
+        )
+    return GateEnvironment(identifier=identifier, binding_evidence=binding)
 
 
 def _reviewer(item: object, index: int) -> ReviewerConfig:
@@ -1012,15 +1252,24 @@ def _reject_duplicates(names: list[str], *, what: str) -> None:
 
 
 __all__ = [
+    "GATE_EVIDENCE_HEAD_BOUND",
+    "GATE_EVIDENCE_LOCAL",
+    "GATE_EVIDENCE_MODES",
+    "GATE_EVIDENCE_UNBOUND",
     "GATE_KINDS",
+    "INDETERMINATE_STATEMENT",
+    "MAX_COVERAGE_CHARACTERS",
     "MAX_GOVERNING_ISSUES",
     "MAX_OPERATOR_ACKNOWLEDGEMENTS",
     "REALISTIC_BUILDER_BUDGET",
     "REALISTIC_REVIEWER_BUDGET",
     "REQUIRED_REVIEWER_ROLES",
     "SCHEMA_VERSION",
+    "UNBOUND_STATEMENT",
+    "UNCHECKED_STATEMENT",
     "BuilderConfig",
     "GateConfig",
+    "GateEnvironment",
     "LaneEnv",
     "OperatorAcknowledgement",
     "RelayConfig",

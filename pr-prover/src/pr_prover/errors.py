@@ -120,6 +120,22 @@ class EvidencePacketError(FailClosed):
     reason = "evidence-packet"
 
 
+class EnvironmentEvidenceError(FailClosed):
+    """A gate's declared environment revision binding could not be established.
+
+    Distinct from :class:`EvidencePacketError`, which is about the evidence a
+    reviewer lane is *given*. This one is about evidence a gate was configured to
+    *produce*: an operator declared that the gate observes an external
+    environment and binds it to this head, and the file that would have proved
+    it is missing, malformed, or names another repository, PR, gate,
+    environment, head, or revision. The endpoint may well have answered; what
+    failed is the claim that it was serving this head, and reporting around that
+    is exactly what the disclosure contract forbids.
+    """
+
+    reason = "environment-evidence"
+
+
 class HumanFeedbackPresent(FailClosed):
     """The PR carries human feedback this run cannot prove anybody resolved.
 
@@ -179,6 +195,7 @@ FAILURE_CLASSES = (
     ReadbackMismatch.reason,
     ReviewerRelayError.reason,
     EvidencePacketError.reason,
+    EnvironmentEvidenceError.reason,
     HumanFeedbackPresent.reason,
     ScopeContamination.reason,
     BuilderRefusal.reason,
@@ -309,6 +326,15 @@ _PLAYBOOK: dict[str, _Playbook] = {
             "always: the frozen packet is this run's own read of GitHub, so a lane that cannot "
             "get one bound to the current head has nothing to review and the builder has "
             "nothing to fix about it"
+        ),
+    ),
+    EnvironmentEvidenceError.reason: _Playbook(
+        remediation=_STOP_ONLY,
+        escalation=(
+            "always: which environment a gate observes, and whether that gate can prove "
+            "the revision it served, are the operator's configuration and the gate's own "
+            "output; the builder never writes a gate's binding evidence and never relaxes "
+            "the declaration that asked for it"
         ),
     ),
     HumanFeedbackPresent.reason: _Playbook(
@@ -480,6 +506,7 @@ __all__ = [
     "BuilderRefusal",
     "CommandContractError",
     "ConfigError",
+    "EnvironmentEvidenceError",
     "EvidencePacketError",
     "FailClosed",
     "FailureRecord",
