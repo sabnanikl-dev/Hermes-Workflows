@@ -69,12 +69,21 @@ from .config import (
     GATE_EVIDENCE_HEAD_BOUND,
     GATE_EVIDENCE_LOCAL,
     GATE_EVIDENCE_UNBOUND,
+    INDETERMINATE_STATEMENT,
     REQUIRED_REVIEWER_ROLES,
     UNBOUND_STATEMENT,
     UNCHECKED_STATEMENT,
 )
 from .findings import provenance_lines
-from .loop import GATE_COMPLETED, GateDisclosure, NEEDS_KARAN, RunResult
+from .loop import (
+    GATE_COMPLETED,
+    GATE_FAILED,
+    GATE_NOT_RUN,
+    GATE_SKIPPED,
+    GateDisclosure,
+    NEEDS_KARAN,
+    RunResult,
+)
 from .redaction import sanitize
 
 # Who may merge, stated in every report in both renderings. ``merge-ready`` is
@@ -110,6 +119,20 @@ EVIDENCE_STATEMENTS = {
         "the environment this gate observed reported serving this exact head, "
         "reconciled from the gate's own binding evidence"
     ),
+}
+
+# What a declared external gate says when it did not complete, keyed by how far
+# it got. Only the two states in which no command was ever issued support the
+# flat "not checked"; every other state — today ``failed``, which carries both
+# the non-zero exit and the timeout — leaves this run unable to say whether the
+# endpoint was reached, so it says that instead. ``.get`` defaults to the
+# indeterminate sentence rather than the flat denial on purpose: a fifth
+# execution state added later should fall to the weaker claim, not inherit an
+# assertion nobody checked it could support.
+EXECUTION_STATEMENTS = {
+    GATE_NOT_RUN: UNCHECKED_STATEMENT,
+    GATE_SKIPPED: UNCHECKED_STATEMENT,
+    GATE_FAILED: INDETERMINATE_STATEMENT,
 }
 
 # What reviewer topology is, and — more to the point — what it is not. The
@@ -334,13 +357,15 @@ def _gate_disclosure(gate: GateDisclosure, head: str | None) -> dict[str, Any]:
     if not bound:
         mode = GATE_EVIDENCE_UNBOUND if gate.environment else GATE_EVIDENCE_LOCAL
     # The unbound sentence says a live endpoint *was checked*, and only a gate
-    # whose command completed supports that half of it. A skipped visual gate, a
-    # gate the run never reached, and one that exited non-zero or timed out are
-    # each configured proof scope with no observation behind them, so they say
-    # so rather than borrowing a claim about an endpoint nothing reached.
+    # whose command completed supports that half of it. What the others say is
+    # not one answer, because "not checked" is a claim of its own: a skipped
+    # gate and one a fail-closed stop never reached issued no command, so
+    # nothing was checked and this run knows it, while a gate that exited
+    # non-zero or timed out may have reached the endpoint and failed after it.
+    # Those get the statement that claims neither direction.
     statement = EVIDENCE_STATEMENTS[mode]
     if mode == GATE_EVIDENCE_UNBOUND and gate.execution != GATE_COMPLETED:
-        statement = UNCHECKED_STATEMENT
+        statement = EXECUTION_STATEMENTS.get(gate.execution, INDETERMINATE_STATEMENT)
     return {
         "name": gate.name,
         "kind": gate.kind,

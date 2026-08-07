@@ -47,6 +47,7 @@ from pr_prover.config import (
     GATE_EVIDENCE_LOCAL,
     GATE_EVIDENCE_MODES,
     GATE_EVIDENCE_UNBOUND,
+    INDETERMINATE_STATEMENT,
     MAX_COVERAGE_CHARACTERS,
     UNBOUND_STATEMENT,
     UNCHECKED_STATEMENT,
@@ -739,6 +740,12 @@ class GateExecutionTruthTests(DisclosureHarness):
     checked* — is a claim about execution, and a gate that was skipped, that the
     run never reached, or that exited non-zero can support it no better than it
     can support the binding.
+
+    ``not checked`` is a claim of its own, though, and the two states are not
+    interchangeable. A gate that never issued a command checked nothing, and this
+    run knows that; a gate whose command failed or timed out may have reached the
+    endpoint first, so the report says which of those it is holding rather than
+    denying a check it did not disprove.
     """
 
     def test_a_skipped_external_gate_does_not_report_a_live_endpoint_checked(self) -> None:
@@ -769,22 +776,83 @@ class GateExecutionTruthTests(DisclosureHarness):
         self.assertIn(UNCHECKED_STATEMENT, markdown)
         self.assertNotIn(UNBOUND_STATEMENT, markdown)
 
-    def test_a_failing_external_gate_does_not_report_a_live_endpoint_checked(self) -> None:
-        """A gate that exited non-zero may never have opened the connection."""
+    def _failed_external_gate(self, output: str, **scripted: object) -> dict[str, object]:
+        """One declared external gate whose command ran and did not succeed."""
         loop = self.build(gates=[external_gate()])
-        self.script.add("lane-gate-preview", "could not resolve host\n", returncode=1)
+        self.script.add("lane-gate-preview", output, **scripted)  # type: ignore[arg-type]
         self.script.add(
             "lane-builder",
             builder_output(HEAD_B, addressed=["gate-preview"], status="failure"),
         )
+        self.result = loop.run()
+        return self.disclosure(self.result, "preview")
 
-        result = loop.run()
+    def test_a_failing_external_gate_does_not_report_a_live_endpoint_checked(self) -> None:
+        """A gate that exited non-zero may never have opened the connection."""
+        disclosed = self._failed_external_gate("could not resolve host\n", returncode=1)
 
-        disclosed = self.disclosure(result, "preview")
         self.assertEqual(disclosed["execution"], GATE_FAILED)
         self.assertEqual(disclosed["evidence_mode"], GATE_EVIDENCE_UNBOUND)
-        self.assertEqual(disclosed["evidence_statement"], UNCHECKED_STATEMENT)
-        self.assertNotIn(UNBOUND_STATEMENT, report.to_markdown(result))
+        self.assertEqual(disclosed["evidence_statement"], INDETERMINATE_STATEMENT)
+        self.assertNotIn(UNBOUND_STATEMENT, report.to_markdown(self.result))
+
+    def test_a_gate_that_exited_non_zero_after_a_response_does_not_deny_the_check(self) -> None:
+        """The former red: an unsupported positive traded for an unsupported negative.
+
+        The gate reached exactly the environment it declares — the endpoint
+        answered `503`, and the command exited 22 *because* it did — so a report
+        saying the live endpoint was **not** checked states something this run
+        disproved. Both halves are claims; a failing exit supports neither.
+        """
+        disclosed = self._failed_external_gate(
+            "HTTP/1.1 503 Service Unavailable from live preview\n", returncode=22
+        )
+
+        self.assertEqual(disclosed["execution"], GATE_FAILED)
+        self.assertEqual(disclosed["evidence_mode"], GATE_EVIDENCE_UNBOUND)
+        self.assertEqual(disclosed["evidence_statement"], INDETERMINATE_STATEMENT)
+        markdown = report.to_markdown(self.result)
+        # Neither direction is asserted: not "checked", and not "not checked".
+        self.assertNotIn(UNBOUND_STATEMENT, markdown)
+        self.assertNotIn(UNCHECKED_STATEMENT, markdown)
+        self.assertIn(INDETERMINATE_STATEMENT, markdown)
+
+    def test_a_gate_that_timed_out_after_a_response_does_not_deny_the_check(self) -> None:
+        """A timeout can land after the endpoint answered and before the gate ends."""
+        disclosed = self._failed_external_gate(
+            "HTTP/1.1 200 OK from live preview\nverifying deployment revision...\n",
+            timed_out=True,
+            returncode=124,
+        )
+
+        self.assertEqual(disclosed["execution"], GATE_FAILED)
+        self.assertEqual(disclosed["evidence_statement"], INDETERMINATE_STATEMENT)
+        markdown = report.to_markdown(self.result)
+        self.assertNotIn(UNBOUND_STATEMENT, markdown)
+        self.assertNotIn(UNCHECKED_STATEMENT, markdown)
+
+    def test_only_a_gate_that_never_ran_says_the_endpoint_was_not_checked(self) -> None:
+        """The flat denial is reserved for the two states that support it.
+
+        ``not-run`` and ``skipped`` issued no command, so nothing was checked and
+        this run knows it. Every other execution state falls to the statement
+        that claims neither direction — including one added later, which must not
+        inherit an assertion nobody checked it could support.
+        """
+        self.assertEqual(
+            {
+                state
+                for state, statement in report.EXECUTION_STATEMENTS.items()
+                if statement == UNCHECKED_STATEMENT
+            },
+            {GATE_NOT_RUN, GATE_SKIPPED},
+        )
+        self.assertEqual(report.EXECUTION_STATEMENTS[GATE_FAILED], INDETERMINATE_STATEMENT)
+        self.assertNotIn(GATE_COMPLETED, report.EXECUTION_STATEMENTS)
+        self.assertEqual(
+            report.EXECUTION_STATEMENTS.get("some-later-state", INDETERMINATE_STATEMENT),
+            INDETERMINATE_STATEMENT,
+        )
 
     def test_an_external_gate_that_completed_still_says_the_endpoint_was_checked(self) -> None:
         """The acceptance criterion this must not have traded away."""

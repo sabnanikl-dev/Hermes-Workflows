@@ -225,16 +225,29 @@ GATE_EVIDENCE_MODES = (
 # is: the sentence is the disclosure, and a sentence something could compose per
 # gate is a sentence something could compose into a weaker one.
 UNBOUND_STATEMENT = "live endpoint checked; revision binding not established"
-# The same disclosure for an external gate whose command did not complete on
-# this head. The sentence above says the endpoint *was* checked, and that half
-# of it is a claim about execution rather than about binding: a gate that was
-# skipped, that the run never reached, or that exited non-zero or timed out may
-# never have opened the connection at all. Reporting "checked" for it would
-# state a live observation nothing performed — a smaller error than claiming the
-# binding, and the same kind of error.
+# The same disclosure for an external gate whose command never ran at all. The
+# sentence above says the endpoint *was* checked, and that half of it is a claim
+# about execution rather than about binding: a gate that was skipped or that the
+# run never reached issued no command, so nothing opened a connection and saying
+# so is a fact this run holds. Reporting "checked" for it would state a live
+# observation nothing performed — a smaller error than claiming the binding, and
+# the same kind of error.
 UNCHECKED_STATEMENT = (
-    "live endpoint not checked; this gate did not complete on this head, so its "
-    "result establishes nothing about the environment it declares"
+    "live endpoint not checked; this gate's command never ran on this head, so "
+    "its result establishes nothing about the environment it declares"
+)
+# And the disclosure for an external gate whose command ran and did not succeed.
+# "Not checked" is itself a claim, and a failing command does not support it: a
+# gate that exits non-zero *after* the endpoint answers — an HTTP smoke recording
+# `503 Service Unavailable` and exiting 22 — reached exactly the environment it
+# declares, and one that timed out may have reached it and then hung. This run
+# knows the command did not complete and does not know how far it got, so the
+# statement claims neither direction. Replacing an unsupported positive with an
+# unsupported negative would be the same failure pointed the other way.
+INDETERMINATE_STATEMENT = (
+    "whether the live endpoint was checked is not established; this gate's "
+    "command did not complete on this head, so neither its result nor any "
+    "binding establishes anything about the environment it declares"
 )
 # How long an operator's coverage declaration may be. One sentence, printed
 # whole in every report; a paragraph here is documentation, and documentation
@@ -567,8 +580,9 @@ class RunConfig:
         worth reading before the run rather than after it: the endpoint was
         checked, and which revision it served was not established. The note says
         "when it completes" rather than "always", because that sentence is also
-        a claim about execution — a run where the gate is skipped or fails
-        reports that nothing was checked.
+        a claim about execution — a run where the gate never ran reports that
+        nothing was checked, and one where its command failed or timed out
+        reports that whether anything was checked is not established.
         """
         notes: list[str] = []
         if self.operator_acknowledgements:
@@ -589,7 +603,9 @@ class RunConfig:
                 f"gate {gate.name!r} declares that it observes the external environment "
                 f"{gate.environment.identifier!r} without binding evidence, so every "
                 f"report in which it completes will say: {UNBOUND_STATEMENT}; a run "
-                f"where it is skipped or fails will say: {UNCHECKED_STATEMENT}"
+                f"where its command never ran will say: {UNCHECKED_STATEMENT}; and a "
+                f"run where its command failed or timed out will say: "
+                f"{INDETERMINATE_STATEMENT}"
             )
         for lane, timeout in self._budgets():
             if timeout is None:
@@ -1241,6 +1257,7 @@ __all__ = [
     "GATE_EVIDENCE_MODES",
     "GATE_EVIDENCE_UNBOUND",
     "GATE_KINDS",
+    "INDETERMINATE_STATEMENT",
     "MAX_COVERAGE_CHARACTERS",
     "MAX_GOVERNING_ISSUES",
     "MAX_OPERATOR_ACKNOWLEDGEMENTS",

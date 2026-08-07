@@ -319,12 +319,22 @@ operator typed, and a gate with no `environment` block is reported as local
 however its command reads.
 
 The middle row's sentence also makes a second claim — that a live endpoint *was
-checked* — and that one is about execution rather than binding. An external gate
-that was skipped, that the run never reached, or that exited non-zero or timed
-out gets **live endpoint not checked; this gate did not complete on this head,
-so its result establishes nothing about the environment it declares** instead.
-A command that timed out may never have opened the connection, so `checked` is
+checked* — and that one is about execution rather than binding. `checked` is
 printed only where `execution` is `completed`.
+
+`not checked` is a claim too, though, so it is not the answer for everything
+else. An external gate that was skipped or that the run never reached issued no
+command at all, and gets **live endpoint not checked; this gate's command never
+ran on this head, so its result establishes nothing about the environment it
+declares**. A gate whose command *did* run and failed or timed out is a
+different state: an HTTP smoke that records `503 Service Unavailable` and exits
+`22` reached exactly the environment it declares, and a command that timed out
+may have reached it and then hung. Those get **whether the live endpoint was
+checked is not established; this gate's command did not complete on this head,
+so neither its result nor any binding establishes anything about the environment
+it declares** — the statement that claims neither direction, because trading an
+unsupported positive for an unsupported negative is the same error pointed the
+other way.
 
 Elevation is earned once, by a file:
 
