@@ -79,6 +79,70 @@ GOVERNING_ISSUE_BODY = "ACCEPTANCE: the governing issue contract body"
 PR_BODY = "This change claims: the live pull request body"
 
 
+# One external environment a gate may be declared to observe, and the shape of
+# the binding evidence such a gate writes. Both live here because the gate half
+# of the disclosure contract is exercised from more than one module, and a
+# second hand-written envelope beside this one is a second grammar to keep in
+# step with the validator.
+ENVIRONMENT_NAME = "preview"
+ENVIRONMENT_URL = "https://preview.invalid/pr-7"
+BINDING_SOURCE = "GET /__revision on the preview deployment"
+OBSERVED_AT = "2026-08-03T12:00:00Z"
+
+
+def environment_envelope(
+    *,
+    head: str,
+    gate: str = "preview",
+    repo: str = "example/repo",
+    pr: int = 7,
+    environment: str = ENVIRONMENT_NAME,
+    revision: str | None = None,
+    url: str = ENVIRONMENT_URL,
+    binding_source: str = BINDING_SOURCE,
+    observed_at: str = OBSERVED_AT,
+    schema_version: object = 1,
+) -> dict[str, object]:
+    """One well-formed environment binding envelope.
+
+    ``revision`` defaults to ``head``, which is the only combination that
+    establishes anything: an envelope whose externally observed revision is the
+    head under review. A test that means to write the other kind says so.
+    """
+    return {
+        "schema_version": schema_version,
+        "repo": repo,
+        "pr": pr,
+        "gate": gate,
+        "environment": environment,
+        "url": url,
+        "revision": head if revision is None else revision,
+        "binding_source": binding_source,
+        "observed_at": observed_at,
+        "head": head,
+    }
+
+
+def records_environment(runner: FakeRunner, **overrides: object) -> Callable[[], None]:
+    """A gate ``after`` hook that writes what the gate observed, the way one would.
+
+    The path comes out of the argv the loop actually rendered, rather than being
+    handed to the test, so a run that stopped substituting
+    ``{environment_evidence_file}`` fails here instead of quietly writing to a
+    path nothing reads.
+    """
+
+    def write() -> None:
+        argv = runner.calls[-1].argv
+        target = _flag(argv, "--environment-evidence")
+        if not target:  # pragma: no cover - the loop always renders the path
+            raise AssertionError(f"gate was handed no evidence path: {list(argv)}")
+        payload = environment_envelope(**{"head": _flag(argv, "--head"), **overrides})  # type: ignore[arg-type]
+        Path(target).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    return write
+
+
 def reviewer_artifact(
     *,
     role: str,

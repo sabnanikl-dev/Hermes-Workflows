@@ -32,6 +32,7 @@ Nothing here assumes a later slice's module has already landed.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import unittest
@@ -643,6 +644,50 @@ class RepoContractTests(unittest.TestCase):
         # Advice, never permission. A field a run could set to "approved" is a
         # field something could be made to set.
         self.assertNotIn("karan_approved", report)
+
+    def test_m13_also_names_the_bounded_evidence_disclosure(self) -> None:
+        """The row that owns reports owes the disclosure half of them too.
+
+        A report can separate transport, verdict, readiness, and authority
+        perfectly and still leave a reader to supply what the run was in a
+        position to prove at all. The contract, the operator documentation, and
+        the shipped example are the three places that has to be written down,
+        and each of them is read here rather than assumed.
+        """
+        _, seams = self.proof_map()["M13"]
+        for named in ("environment.py", "local-or-unspecified", "head-bound-environment"):
+            with self.subTest(seam=named):
+                self.assertIn(named, seams)
+
+        readme = (PR_PROVER / "README.md").read_text(encoding="utf-8")
+        for documented in (
+            "live endpoint checked; revision binding not established",
+            "observed_at",
+            "reviewer_topology",
+            "environment_evidence_file",
+            "environment-evidence",
+        ):
+            with self.subTest(readme=documented):
+                self.assertIn(documented, readme)
+
+        example = json.loads(
+            (PR_PROVER / "examples" / "run.example.json").read_text(encoding="utf-8")
+        )
+        declared = {
+            gate["name"]: gate.get("environment") for gate in example["gates"]
+        }
+        # One of each kind, so the example shows the difference rather than
+        # describing it: a local gate, a declared endpoint with no binding, and
+        # a gate that records the revision it observed.
+        self.assertIsNone(declared["tests"])
+        self.assertEqual(declared["staging-smoke"], {"identifier": "staging"})
+        self.assertEqual(
+            declared["preview"], {"identifier": "preview", "binding_evidence": True}
+        )
+        self.assertTrue(
+            all(gate.get("coverage") for gate in example["gates"]),
+            "the example no longer shows the operator-declared coverage field",
+        )
 
     def test_m5_m6_and_m7_name_the_module_that_makes_them_deterministic(self) -> None:
         """A row that moved to shipped has to say what proves it, not who owed it."""

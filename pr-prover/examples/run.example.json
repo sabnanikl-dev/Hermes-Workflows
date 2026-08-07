@@ -16,13 +16,36 @@
       "name": "tests",
       "kind": "baseline",
       "argv": ["make", "test"],
+      "coverage": "the repository's own test suite, in a checkout of this head",
       "timeout": 900
     },
     {
       "name": "visual",
       "kind": "visual",
       "argv": ["./scripts/visual-qa.sh", "--head", "{head}"],
+      "coverage": "browser rendering of the print, mobile, and contrast assertions this PR requires",
       "timeout": 900
+    },
+    {
+      "name": "staging-smoke",
+      "kind": "baseline",
+      "argv": ["./scripts/staging-smoke.sh", "--url", "https://staging.example.invalid"],
+      "coverage": "HTTP smoke of the staging endpoint's public routes",
+      "environment": {"identifier": "staging"},
+      "timeout": 300
+    },
+    {
+      "name": "preview",
+      "kind": "baseline",
+      "argv": [
+        "./scripts/preview-check.sh",
+        "--url", "https://preview.example.invalid",
+        "--head", "{head}",
+        "--environment-evidence", "{environment_evidence_file}"
+      ],
+      "coverage": "HTTP smoke of the preview deployment, plus the revision it reports serving",
+      "environment": {"identifier": "preview", "binding_evidence": true},
+      "timeout": 300
     }
   ],
   "reviewers": [

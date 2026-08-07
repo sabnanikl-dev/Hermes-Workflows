@@ -32,6 +32,23 @@ in both renderings, that Karan alone decides and that nothing here is
 permission. It is a module constant, not a computed field, because a value
 something could set is a value something could set to the wrong thing.
 
+Those four say what the run concluded. A fifth block says what the run was in a
+position to conclude at all, because the gap between the two is where a reader
+supplies the difference themselves. So every report also carries: the UTC moment
+the reported head was observed, and no time at all when nothing was observed;
+every *configured* gate — not only the ones that ran — with the operator's own
+coverage sentence, its sanitized invocation shape, and which of three evidence
+modes its result belongs to; which adapter ran each reviewer lane beside the
+``RUNTIME=`` its published artifact declared, with whether the lanes share
+either; and five claims a green report is easily read as making, each stated
+false unless the bounded evidence for it exists.
+
+Coverage is labelled an operator declaration wherever it appears. Nothing here
+infers what a gate covers, whether the gate set is sufficient, or what a URL in
+an argv array means — and ``head-bound-environment`` is the one evidence mode
+that is not configurable at all, because it is what a validated binding envelope
+produces rather than what a config file may assert.
+
 Two things are rendered rather than summarized. A ``needs-Karan`` escalation
 prints each finding's provenance inline — who found it, on which head, at which
 surface, and the verbatim excerpt — so the decision does not require re-reading
@@ -47,9 +64,15 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from .config import REQUIRED_REVIEWER_ROLES
+from .config import (
+    GATE_EVIDENCE_HEAD_BOUND,
+    GATE_EVIDENCE_LOCAL,
+    GATE_EVIDENCE_UNBOUND,
+    REQUIRED_REVIEWER_ROLES,
+    UNBOUND_STATEMENT,
+)
 from .findings import provenance_lines
-from .loop import NEEDS_KARAN, RunResult
+from .loop import GateDisclosure, NEEDS_KARAN, RunResult
 from .redaction import sanitize
 
 # Who may merge, stated in every report in both renderings. ``merge-ready`` is
@@ -60,13 +83,111 @@ MERGE_AUTHORITY = (
     "evidence about one exact head, and none of it is merge permission."
 )
 
+# What a configured gate's ``coverage`` field is, said where it is rendered.
+# The operator wrote that sentence; nothing here checked it, and nothing here
+# concluded from the gate set that the gate set is enough.
+COVERAGE_DECLARATION = (
+    "Gate coverage is the operator's own declaration of what each gate is for. "
+    "It is carried verbatim and unverified: pr-prover does not infer gate "
+    "sufficiency, coverage quality, or repository risk from a command, an "
+    "argument, or a URL, and a configured gate set being complete is not "
+    "something this run establishes."
+)
+
+# What each evidence mode means, in the words the report says it in. Keyed by
+# the mode so the JSON and the Markdown cannot describe one gate two ways, and
+# constant for the same reason ``MERGE_AUTHORITY`` is: the unbound sentence is
+# the disclosure, and a composed one is a disclosure something could weaken.
+EVIDENCE_STATEMENTS = {
+    GATE_EVIDENCE_LOCAL: (
+        "local or unspecified scope; no external environment was declared for "
+        "this gate"
+    ),
+    GATE_EVIDENCE_UNBOUND: UNBOUND_STATEMENT,
+    GATE_EVIDENCE_HEAD_BOUND: (
+        "the environment this gate observed reported serving this exact head, "
+        "reconciled from the gate's own binding evidence"
+    ),
+}
+
+# What reviewer topology is, and — more to the point — what it is not. The
+# adapter is configuration and the runtime is a line the artifact declares about
+# itself; neither is a measurement of what actually executed.
+TOPOLOGY_DECLARATION = (
+    "Adapter is the configured entrypoint for each lane; runtime is the "
+    "RUNTIME= line the lane's own published artifact declares. Neither is a "
+    "measurement of what actually executed, and neither establishes that the "
+    "lanes are independent of one another."
+)
+
+# The five claims a reader may take from a report that this run does not make,
+# as ``(key, label, why it is not established, what establishing it means)``.
+# Each carries the reason, because "not established" on its own reads like an
+# omission somebody could close by looking harder.
+#
+# Only the first is ever true, and only from bounded evidence: a gate whose
+# validated binding envelope reconciled an externally observed revision against
+# this run's head. The other four have no proven note at all, because nothing
+# this tool does can establish them — it never merges, never deploys, never
+# observes production, and is never the human review Karan performs.
+PROOF_SCOPE = (
+    (
+        "environment_revision_binding",
+        "environment revision binding",
+        "no configured gate produced validated evidence that an external "
+        "environment was serving this exact head",
+        "at least one configured gate recorded an externally observed revision "
+        "equal to this head, reconciled from that gate's own binding evidence; "
+        "the environment, URL, and source are listed with the gate below",
+    ),
+    (
+        "heterogeneous_reviewer_independence",
+        "heterogeneous reviewer independence",
+        "reviewer lanes are separate processes with configured adapters and "
+        "self-declared runtimes; this run does not verify what actually "
+        "executed, so it cannot establish that the lanes fail independently",
+        "",
+    ),
+    (
+        "merged_result_behavior",
+        "merged-result behavior",
+        "every gate, artifact, and verdict here is about the pull request head, "
+        "not about the tree that would exist after a merge",
+        "",
+    ),
+    (
+        "deployment_or_production_health",
+        "deployment or production health",
+        "this tool never deploys, releases, or observes a production system",
+        "",
+    ),
+    (
+        "human_final_merge_review",
+        "human final merge review and authorization",
+        "no automated step here is Karan reading the change and deciding to "
+        "merge it",
+        "",
+    ),
+)
+
 
 def as_dict(result: RunResult) -> dict[str, Any]:
     """The machine-readable report, sanitized as a whole before it is returned."""
+    # One list, read twice: what each gate discloses, and what the run therefore
+    # established. Deriving the second from the first is what keeps a gate line
+    # and the proof-scope boolean above it from ever disagreeing.
+    gates = [_gate_disclosure(gate, result.head) for gate in result.configured_gates]
+    scope = _proof_scope(gates)
     payload: dict[str, Any] = {
         "outcome": result.outcome,
         "reason": result.reason,
         "head": result.head,
+        # When the live PR was observed on that head, and ``null`` whenever the
+        # head is. The two are one fact: a head with no observation time is a
+        # SHA with no "as of", and an observation time with no head would be a
+        # timestamp for a read that never happened. Read off the head rather
+        # than trusted from the result, so the pair cannot come apart here.
+        "observed_at": result.observed_at if result.head else None,
         "branch": result.branch,
         "pr_url": result.pr_url,
         "attempts_used": result.attempts_used,
@@ -82,6 +203,12 @@ def as_dict(result: RunResult) -> dict[str, Any]:
             }
             for gate in result.gates
         ],
+        # Every gate this run was *configured* with, whether or not it ran, and
+        # what each one's result is evidence about. The list above is execution;
+        # this one is proof scope, and a skipped visual gate belongs to exactly
+        # one of them.
+        "configured_gates": gates,
+        "gate_coverage_declaration": COVERAGE_DECLARATION,
         "reviewers": [
             {
                 "reviewer": verdict.reviewer,
@@ -124,6 +251,34 @@ def as_dict(result: RunResult) -> dict[str, Any]:
             for item in result.transport
         ],
         "transport_complete": _transport_is_complete(result),
+        # Which adapter ran each reviewer lane, and what its published artifact
+        # declared it ran as. Rendered beside the two shared-ness answers,
+        # because "three roles" and "three independent judgements" are different
+        # claims and a list of three lanes reads as the second one.
+        "reviewer_topology": [
+            {
+                "lane": entry.lane,
+                "role": entry.role,
+                "adapter": entry.adapter,
+                "runtime": entry.runtime,
+            }
+            for entry in result.reviewer_topology
+        ],
+        "reviewer_adapters_shared": _all_alike(
+            [entry.adapter for entry in result.reviewer_topology]
+        ),
+        "reviewer_runtimes_shared": _all_alike(
+            [entry.runtime for entry in result.reviewer_topology]
+        ),
+        "reviewer_topology_declaration": TOPOLOGY_DECLARATION,
+        # What this run did and did not establish, one boolean per claim, each
+        # false unless the bounded evidence for it exists.
+        "proof_scope": scope,
+        # The same sentence the Markdown prints for each claim, in the same
+        # state: a machine reader that only reads the booleans is not the only
+        # reader, and a note that stayed on "not established" while the boolean
+        # said otherwise would be the two renderings disagreeing.
+        "proof_scope_notes": _proof_scope_notes(scope),
         # The fourth claim, said rather than implied. Everything above is
         # evidence; none of it is permission, and ``merge-ready`` is the outcome
         # most easily misread as one. It is a constant on purpose: a field whose
@@ -145,6 +300,76 @@ def as_dict(result: RunResult) -> dict[str, Any]:
     if result.evidence:
         payload["fail_closed"] = result.evidence
     return sanitize(payload)
+
+
+def _all_alike(values: list[str]) -> bool:
+    """Do two or more lanes report the same non-empty value?
+
+    False for one lane, because a single lane shares nothing, and false for a
+    value no lane stated: an empty runtime is a lane that never published a
+    readable artifact, and reading three unknowns as "all the same" would turn
+    missing evidence into a finding about the run's topology.
+    """
+    return len(values) > 1 and all(values) and len(set(values)) == 1
+
+
+def _gate_disclosure(gate: GateDisclosure, head: str | None) -> dict[str, Any]:
+    """One configured gate as this report states it, for the head it is about.
+
+    A binding is evidence about the head whose revision the envelope named. If
+    that is not the head being reported — a stop that observed a newer head
+    before this run measured anything on it — then nothing here is bound, and
+    the gate reads as the live endpoint it currently is rather than carrying a
+    revision a reader has to notice is some other commit. Downgrading is the
+    only direction available: no head makes a gate stronger.
+    """
+    bound = (
+        gate.evidence_mode == GATE_EVIDENCE_HEAD_BOUND
+        and bool(head)
+        and gate.revision == head
+    )
+    mode = gate.evidence_mode
+    if not bound:
+        mode = GATE_EVIDENCE_UNBOUND if gate.environment else GATE_EVIDENCE_LOCAL
+    return {
+        "name": gate.name,
+        "kind": gate.kind,
+        "invocation": gate.invocation,
+        "coverage": gate.coverage,
+        "evidence_mode": mode,
+        "evidence_statement": EVIDENCE_STATEMENTS[mode],
+        "environment": gate.environment,
+        "url": gate.url if bound else "",
+        "revision": gate.revision if bound else "",
+        "binding_source": gate.binding_source if bound else "",
+        "observed_at": gate.observed_at if bound else "",
+    }
+
+
+def _proof_scope(gates: list[dict[str, Any]]) -> dict[str, bool]:
+    """Which of the five claims this run established, each defaulting to false.
+
+    Only the first can be true, and only from evidence: one configured gate this
+    report is disclosing as ``head-bound-environment``. It is read off the
+    rendered gates rather than recomputed, so the boolean and the gate line it
+    summarizes cannot answer differently. The other four are false by
+    construction — they are the claims a reader most easily takes from a green
+    report, and nothing this tool does supports any of them, so they are stated
+    rather than computed.
+    """
+    scope = {key: False for key, _, _, _ in PROOF_SCOPE}
+    scope["environment_revision_binding"] = any(
+        gate["evidence_mode"] == GATE_EVIDENCE_HEAD_BOUND for gate in gates
+    )
+    return scope
+
+
+def _proof_scope_notes(scope: Mapping[str, bool]) -> dict[str, str]:
+    """The sentence each claim is rendered with, in the state it is actually in."""
+    return {
+        key: (proven if scope[key] else unproven)
+        for key, _, unproven, proven in PROOF_SCOPE
+    }
 
 
 def _transport_is_complete(result: RunResult) -> bool:
@@ -211,6 +436,7 @@ def to_markdown(result: RunResult) -> str:
         "",
         f"**Reason:** {payload['reason']}",
         _head_line(payload["head"]),
+        _observed_line(payload["head"], payload["observed_at"]),
         f"**Branch:** {payload['branch'] or 'unknown'}",
         f"**Attempts used:** {payload['attempts_used']}/{payload['attempt_cap']}",
     ]
@@ -223,11 +449,58 @@ def to_markdown(result: RunResult) -> str:
         lines.append(f"**PR:** {payload['pr_url']}")
     lines.append(f"**Merge authority:** {payload['merge_authority']}")
 
+    # Before the evidence rather than after it, because these are the claims a
+    # reader most easily takes *from* the evidence, and a disclosure printed
+    # under the run log is one somebody has already stopped reading.
+    lines += ["", "### What this run established, and what it did not"]
+    for key, label, unproven, proven in PROOF_SCOPE:
+        established = payload["proof_scope"][key]
+        lines.append(
+            f"- {label}: **{'established' if established else 'not established'}** — "
+            + (proven if established else unproven)
+        )
+
     if payload["gates"]:
         lines += ["", "### Gates"]
         for gate in payload["gates"]:
             status = "pass" if gate["passed"] else f"FAIL (exit {gate['returncode']})"
             lines.append(f"- `{gate['name']}` ({gate['kind']}): {status}")
+
+    if payload["configured_gates"]:
+        lines += ["", "### Configured gates and what their results are evidence about"]
+        for gate in payload["configured_gates"]:
+            lines.append(
+                f"- `{gate['name']}` ({gate['kind']}): {gate['evidence_mode']} — "
+                f"{gate['evidence_statement']}"
+            )
+            lines.append(
+                "  - operator-declared coverage: "
+                + (
+                    f"{gate['coverage']}"
+                    if gate["coverage"]
+                    else "none declared for this gate"
+                )
+            )
+            lines.append(f"  - invocation: `{gate['invocation']}`")
+            if gate["environment"]:
+                lines.append(f"  - declared environment: `{gate['environment']}`")
+            if gate["evidence_mode"] == GATE_EVIDENCE_HEAD_BOUND:
+                lines += [
+                    f"  - observed at `{gate['url']}`: revision `{gate['revision']}` "
+                    f"via {gate['binding_source']}, at {gate['observed_at']}",
+                ]
+        lines.append(f"- {payload['gate_coverage_declaration']}")
+
+    if payload["reviewer_topology"]:
+        lines += ["", "### Reviewer topology (configuration and artifact claims)"]
+        for entry in payload["reviewer_topology"]:
+            lines.append(
+                f"- `{entry['lane']}` (ROLE={entry['role']}): adapter "
+                f"`{entry['adapter']}`, RUNTIME= "
+                + (f"`{entry['runtime']}`" if entry["runtime"] else "not read back")
+            )
+        lines.append(f"- {_topology_summary(payload)}")
+        lines.append(f"- {payload['reviewer_topology_declaration']}")
 
     if payload["reviewers"]:
         lines += ["", "### Reviewers"]
@@ -383,6 +656,47 @@ def _head_line(head: Any) -> str:
         "**Head:** `unknown` — this run read nothing live, "
         "so the pull request's current head is unverified"
     )
+
+
+def _observed_line(head: Any, observed_at: Any) -> str:
+    """When the reported head was seen, or say there was no observation.
+
+    Printed even when there is nothing to print, because the absence is the
+    information: a run that read nothing live has a head it cannot date, and a
+    report that simply omitted the line would leave a reader to assume the SHA
+    above it was current as of now.
+    """
+    if head and observed_at:
+        return f"**Head observed at:** {observed_at} (UTC)"
+    return (
+        "**Head observed at:** never — this run completed no live read of the "
+        "pull request, so nothing here is dated against GitHub"
+    )
+
+
+def _topology_summary(payload: Mapping[str, Any]) -> str:
+    """One sentence on whether the reviewer lanes share a family, and what that means.
+
+    The independence half of the sentence does not vary with the answer, and
+    that is deliberate: distinct adapters and distinct declared runtimes are
+    still configuration and self-description, so a run with three different ones
+    has not established independence either — it has only stopped having the
+    most obvious reason it could not.
+    """
+    shared_adapter = payload["reviewer_adapters_shared"]
+    shared_runtime = payload["reviewer_runtimes_shared"]
+    if shared_adapter and shared_runtime:
+        observed = "every reviewer lane ran the same configured adapter and declared the same runtime"
+    elif shared_adapter:
+        observed = "every reviewer lane ran the same configured adapter"
+    elif shared_runtime:
+        observed = "every reviewer lane declared the same runtime"
+    else:
+        observed = (
+            "the reviewer lanes do not all share one configured adapter and one "
+            "declared runtime"
+        )
+    return f"{observed}; heterogeneous reviewer independence was not established"
 
 
 def _inline(value: Any) -> str:

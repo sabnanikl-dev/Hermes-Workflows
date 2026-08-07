@@ -80,6 +80,7 @@ tokens, and an unknown token fails the run rather than rendering literally:
 | `{reviewer}` `{role}` | reviewer lanes | the lane name, and the mission role it runs as |
 | `{artifact_file}` | reviewer lanes and their relay | where this lane prepares its artifact, under the OS temp directory — the relay is given the redacted copy of that file, not the lane's own bytes |
 | `{evidence_packet}` | reviewer lanes | the frozen read-only PR evidence this lane judges from, under the OS temp directory |
+| `{environment_evidence_file}` | a gate that declares `environment.binding_evidence` | where that gate records the revision the environment it observed reported serving, under the OS temp directory |
 | `{attempt}` `{mode}` `{blockers_file}` | the builder lane | attempt number, `initial`/`corrective`, and the frozen blocker set as JSON |
 
 `builder.comment_author` is **required** and must be the exact GitHub login the
@@ -141,8 +142,16 @@ gate is a configuration error, so browser/visual QA is never silently skipped.
 What a visual gate then owes is [a semantic
 answer](#a-visual-gate-answers-about-what-was-rendered), not a file.
 
-`check-config` also prints **advisories**: a lane with no timeout, or a builder
-budget too short for a real fix cycle. They are notes rather than errors, because
+A gate may also carry `coverage` — one bounded sentence, printed in every report
+as the **operator's** declaration of what that gate is for — and `environment`,
+which declares that the gate observes something outside this checkout. Both are
+declarations: see [what each gate's result is evidence
+about](#what-each-gates-result-is-evidence-about).
+
+`check-config` also prints **advisories**: a lane with no timeout, a builder
+budget too short for a real fix cycle, or a gate declared to observe an external
+environment without binding evidence — for which it prints the exact sentence
+every report will then carry. They are notes rather than errors, because
 a repository with a two-minute suite may genuinely know better — but a trusted
 agent cut off mid-verification looks exactly like a hang, and that is not a thing
 to discover for the first time at minute forty of a live run.
@@ -245,6 +254,118 @@ times; it cannot prove that the loop runs the three required roles in order or
 relays what each of them actually wrote.
 
 Gates remain the operator's own commands.
+
+## What a report says this run established
+
+A green report is easy to read as more than it is. So every report — JSON and
+Markdown, on every outcome — also states the shape of what was proved, and the
+shape of what was not.
+
+**When.** The head is printed with the UTC moment the live PR was observed on it
+(`observed_at`), because gates and reviewer lanes run for hours and a SHA with
+no "as of" is not an exact-head claim. A run that completed no live read reports
+`"head": null` and `"observed_at": null`, and the Markdown says
+`**Head observed at:** never` rather than dating evidence this run never got.
+
+**Which gates, and what their results are about.** `configured_gates` lists
+every gate the run was *configured* with — including one that was skipped, which
+belongs to the proof scope and not to the executed evidence — with its kind, its
+sanitized invocation shape, its operator-declared coverage, and its evidence
+mode. Coverage is carried verbatim and unverified: nothing here infers what a
+gate covers, whether the configured set is sufficient, or what a URL in an argv
+array means.
+
+**Who reviewed, without claiming they were independent.** `reviewer_topology`
+names each lane's configured adapter entrypoint beside the `RUNTIME=` its
+published artifact declared, read off the body GitHub is actually showing, plus
+`reviewer_adapters_shared` and `reviewer_runtimes_shared`. The adapter is
+configuration and the runtime is a claim the lane made about itself; neither
+measures what executed. The shipped example runs all three roles through one
+adapter, so its reports say so — and the independence line does not change when
+they differ, because distinct configuration is still not proof of independent
+failure.
+
+**What was not established.** Five claims are stated, each false unless the
+bounded evidence for it exists, and four of them are false by construction:
+
+| Claim | When it can be true |
+|---|---|
+| environment revision binding | a configured gate reconciled an externally observed revision against this head |
+| heterogeneous reviewer independence | never here — what executed is not measured |
+| merged-result behavior | never here — every claim is about the PR head, not the merged tree |
+| deployment or production health | never here — this tool never deploys or observes production |
+| human final merge review and authorization | never here — that is Karan, and it is the `merge_authority` line |
+
+### What each gate's result is evidence about
+
+Three modes, and a gate is only ever in one of them:
+
+| Mode | What it means | How a gate gets it |
+|---|---|---|
+| `local-or-unspecified` | it ran a command in a checkout of this head; what else it reached is unspecified | the default, and the answer for every config written before this field existed |
+| `live-endpoint-unbound` | **live endpoint checked; revision binding not established** | the operator declared `environment` |
+| `head-bound-environment` | the environment it observed reported serving this exact head | the gate produced binding evidence this run reconciled |
+
+The middle row is the reporting hazard this exists for. A gate that sends
+requests to a named preview URL proves that something answered there; it proves
+nothing about which commit that something was built from. So `{head}` in an
+argv array and a URL beside it **cannot** raise the mode — they are strings the
+operator typed, and a gate with no `environment` block is reported as local
+however its command reads.
+
+Elevation is earned once, by a file:
+
+```json
+{
+  "name": "preview",
+  "argv": ["./scripts/preview-check.sh", "--url", "https://preview.example.invalid",
+           "--head", "{head}", "--environment-evidence", "{environment_evidence_file}"],
+  "coverage": "HTTP smoke of the preview deployment, plus the revision it reports serving",
+  "environment": {"identifier": "preview", "binding_evidence": true}
+}
+```
+
+The gate writes exactly this envelope to `{environment_evidence_file}` — a path
+under the OS temp directory, outside its own worktree, cleared before the gate
+runs so an earlier cycle's file can never be read as this observation:
+
+```json
+{
+  "schema_version": 1,
+  "repo": "owner/name",
+  "pr": 89,
+  "gate": "preview",
+  "environment": "preview",
+  "url": "https://preview.example.invalid",
+  "revision": "<the full 40-hex lowercase revision the environment reported>",
+  "binding_source": "how the gate read that revision out of the environment",
+  "observed_at": "2026-08-03T12:00:00Z",
+  "head": "<the full 40-hex head this run is proving>"
+}
+```
+
+Every key is required, no other key is allowed, and `observed_at` is
+second-resolution UTC in exactly that form. The loop reads it back **after** the
+gate exits and after that gate's worktree is proved clean and still on the bound
+SHA, then holds it to this run's repository, PR, gate name, declared
+environment, head, and — the whole point — a `revision` equal to the head under
+review. Missing, empty, oversized, malformed, wrong-repo/PR/gate/environment/head,
+or revision-mismatched evidence is an `environment-evidence` stop **before any
+reviewer lane launches**, because a run configured to prove revision binding
+that could not has nothing to report around.
+
+Two deliberate non-behaviours. A gate that *failed* owes no envelope — it is
+already a blocking finding, and its disclosure keeps saying the endpoint was
+unbound, which is what a check that did not finish established. And a binding
+never survives the push that invalidated it: a new head is a new observation,
+and the previous head's envelope is evidence about the previous head.
+
+This envelope is deliberately narrow — one environment, one revision, one time.
+It is not a general diagnostic ingestion format, and it carries no findings,
+severities, or nested payloads. What it establishes is bounded in one further
+way the report states rather than implies: the revision is what an
+operator-owned gate observed and wrote down, reconciled by `pr-prover` against
+its own head. Nothing here attests the deployment or the provider.
 
 ## A visual gate answers about what was rendered
 
@@ -1031,8 +1152,9 @@ reported; the save failure is noted in the run log rather than replacing it.
 
 `invalid-config` · `invalid-command` · `lock-contention` · `unexpected-state` ·
 `malformed-verdict` · `lane-failure` · `stale-head` · `ambiguous-push` ·
-`readback-mismatch` · `relay-failure` · `evidence-packet` · `human-feedback` ·
-`scope-contamination` · `builder-refusal` · `github-error` · `worktree-error`
+`readback-mismatch` · `relay-failure` · `evidence-packet` ·
+`environment-evidence` · `human-feedback` · `scope-contamination` ·
+`builder-refusal` · `github-error` · `worktree-error`
 
 Each carries evidence, and the worktree plus scratch directory are retained so
 the failure can be inspected. Each also reaches a failure record — what failed,
