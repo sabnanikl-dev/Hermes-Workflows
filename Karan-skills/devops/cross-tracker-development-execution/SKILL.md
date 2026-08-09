@@ -1,7 +1,7 @@
 ---
 name: cross-tracker-development-execution
 description: Operate coding work that uses Linear for mission acceptance and GitHub Issues/branches/PRs for implementation, with visible pickup state, isolated builders, exact-head review gates, and progressive acceptance evidence.
-version: 0.3.1
+version: 0.4.4
 metadata:
   hermes:
     tags: [linear, github, pull-requests, orchestration, verification, multi-agent]
@@ -37,6 +37,31 @@ Before mutation:
 
 If the active work was intentionally paused or the prior worker stopped mid-migration, resume from a verified durable handoff before selecting or resetting anything. Read `references/cross-session-pause-resume-handoff.md`: it defines the pause/resume tracker packets, stale-evidence rule, diagnostic baseline, deterministic Claude-session continuation check, worker cleanup, and post-resume verification gates.
 
+### 1.0 Commission a prerequisite-gated Backlog child
+
+When Karan says “work on `<Linear ID>`” and that exact child is still Backlog only because it requires a linked GitHub implementation issue before coding:
+
+1. Treat the new direct instruction as fresh authority for the bounded repository issue/branch/PR/review workflow; do not reinterpret the issue's earlier “creation did not authorize coding” note as overriding the new instruction.
+2. Preserve separate gates for merge, tag, release, install, deploy, force-push, client/live/account mutation, credentials, purchases, and public/client communication.
+3. Ground and create the exact GitHub implementation issue, then verify it by readback before changing Linear.
+4. Update Linear with the exact GitHub URL and bounded authority sentence, publish a revision-bound claim, and verify the claim by immutable comment ID.
+5. If execution is starting immediately, move the child to `In Progress` and verify state name/type rather than parking active work in `Ready`.
+6. Create and verify an issue-linked remote branch and isolated tracking worktree from the proven default-branch head before launching the builder.
+
+Use `references/backlog-child-commissioning.md` for the full authority interpretation, incident/pilot issue pattern, body/claim readbacks, and verification checklist.
+
+### 1.1 Post-merge next-child handoff
+
+When Karan merges a child PR between sessions, do not jump straight to the next branch:
+
+1. verify the PR is actually merged through GitHub API readback and capture the merge commit plus former PR head;
+2. fetch `origin/main`; for a squash merge, compare `origin/main^{tree}` with `<accepted-pr-head>^{tree}` because ancestry alone can correctly return false even when the exact snapshot landed;
+3. reconcile stale Linear parent/child state and GitHub umbrella status before selection, preserving superseded evidence and directly reading back every mutation;
+4. select the earliest live-parent-ordered unblocked child, then create and verify its issue-linked branch and isolated worktree from the proven main revision;
+5. only then launch the bounded builder and record the active child’s branch/worktree/start evidence.
+
+Use `references/post-merge-next-child-pickup.md` for the complete squash-merge proof, stale-active-child reconciliation, umbrella-issue branch pattern, output contract, and builder-start readback checklist.
+
 ### 2. Make pickup visibility explicit
 
 Choose one mode and disclose it. For Karan's GitHub-native coding missions, **GitHub-visible is the default** once branch creation is inside the approved scope; use local-first only when explicitly requested or when remote branch mutation is not yet authorized.
@@ -52,8 +77,10 @@ For GitHub-visible pickup:
 2. Verify both the issue association and remote ref before starting the builder (`gh issue develop <N> --list` when supported, plus `git ls-remote --heads origin <branch>`).
 3. Fetch the remote branch and create an isolated tracking worktree from it. Do not separately create a same-named local-only branch first.
 4. Produce the first coherent bounded commit and push it to that branch.
-5. Open one draft PR with `Closes #N` outside code fences/quotes.
-6. Verify the remote ref, PR `headRefOid`, last commit, draft state, base branch, and `closingIssuesReferences`.
+5. Open one draft PR with the linkage required by the live contract: normally `Closes #N` for a dedicated implementation issue, but `Refs #N` for an interim child in a staged train where only the designated final integration PR may close the umbrella. Keep the keyword outside code fences/quotes.
+6. Before creating an interim PR, scan the **entire body** case-insensitively for closing-keyword prose (`close*`, `fix*`, `resolve*`), not only keyword-plus-issue-number lines. GitHub can attach a closing relationship from ordinary prose such as “Closes the remaining proof gap,” and editing the body afterward may leave `closingIssuesReferences` contaminated. Use neutral verbs (`addresses`, `implements`, `covers`) everywhere except the one final standalone `Closes #N` line.
+7. Verify the remote ref, PR `headRefOid`, last commit, draft state, base branch, and `closingIssuesReferences`; for an interim `Refs` PR, require the closing-reference list to be empty.
+8. If an interim PR has a persistent accidental closing reference, comment with the reason, close it unmerged, and create a clean replacement from the **same branch and exact head**. Verify the replacement has zero closing references and preserve the contaminated PR as historical evidence; do not force-push or manufacture a commit merely to get a new PR number.
 
 An issue-linked baseline branch is visible work-order state, not an empty-commit substitute; do not create a fake commit just to make a PR possible. If native branch association cannot be created or verified, disclose the fallback immediately and use local-first until the first real commit can support a linked draft PR.
 
@@ -129,8 +156,36 @@ When all child criteria are proven:
 5. Move the child to `In Review` or `Done` only as its contract allows.
 6. Update the parent roll-up criterion only after the child is fully accepted—not merely because a draft PR exists.
 7. Preserve human gates for merge, deploy, install, client/live mutation, credentials, purchases, and publication.
+8. Treat tracker mutation responses as acknowledgements, not final proof: capture returned comment IDs, re-query exact comments, and verify completed state by both name and type. See `references/linear-helper-readback-shapes.md` for command-specific helper response shapes and safe recovery when a post-mutation parser assertion fails.
+9. After a verified merge, re-read the child and parent bodies even if Linear already reports the child `Done`; status and acceptance checkboxes can drift independently.
 
-### 7.1 Close out a deliberately blocked PR
+### 7.1 Reconcile post-merge checkboxes
+
+When the merged child is complete but tracker checkboxes lag:
+
+1. verify the merge, reviewed head, required gates/reviews, and any requested branch cleanup;
+2. fetch the complete live child and parent descriptions;
+3. check every evidence-backed child acceptance box and only that child's parent roll-up box;
+4. preserve sibling/future-child boxes and non-blocking follow-ups unchanged;
+5. update each full description once, then directly re-read both issues;
+6. assert the child checked-box count, zero unintended unchecked child criteria, correct child state name/type, the exact checked parent line, and unchanged unrelated parent boxes.
+
+Do not use `Done` status alone as proof and do not leave a completed child unchecked merely because a separate research follow-up remains open. Use `references/post-merge-checkbox-reconciliation.md` for the full evidence gate and readback procedure.
+
+### 7.1.1 Hydrate accepted PR history for post-squash archived evidence
+
+A squash-merged `main` can have the exact accepted tree while omitting the individual PR commit objects that a repository-owned archived-evidence binder references. If a clean main checkout fails only because `git show <bound-pr-commit>:<path>` cannot resolve those immutable historical objects:
+
+1. verify the PR is merged and freeze its accepted `headRefOid` plus squash merge commit;
+2. fetch the immutable GitHub pull-request head explicitly, for example `git fetch origin refs/pull/<N>/head:refs/remotes/origin/pr-<N>-accepted`;
+3. require the fetched ref to equal the recorded accepted PR head;
+4. compare `origin/main^{tree}` with the fetched accepted-head tree and require equality;
+5. rerun the unchanged repository suite with that history available;
+6. classify success as **evidence-graph hydration**, not a product repair, and record the fetch prerequisite in the operational handoff.
+
+Do not widen or rewrite a finite archived-proof framework merely because a main-only clone lacks squash-discarded PR objects. Conversely, do not waive a real byte/tree mismatch: if the accepted PR tree and merged-main tree differ, stop and investigate.
+
+### 7.2 Close out a deliberately blocked PR
 
 When exact-head review still blocks and the authorized repair cycles/exceptions are exhausted, do not treat a general “continue until mergeable” instruction as unlimited exception authority. Finish the currently authorized evidence, then ask whether to approve another bounded pass, keep blocked, or close/split.
 
@@ -144,6 +199,34 @@ If Karan chooses **keep blocked**:
 6. Verify the handoff through its returned comment ID, not comment ordering.
 
 Use `references/exact-head-blocked-pr-handoff.md` for the full checklist and trusted-agent boundary probes.
+
+### 7.3 Recover a churn-heavy mega-PR into a staged train
+
+When a large draft PR contains independently shippable child-owned slices but has become the unit of repeated review/fix churn, do not keep repairing it by default and do not merge “known-good sections” directly from it.
+
+1. Freeze the draft as evidence and map every surface to an ordered Linear child.
+2. Amend the Linear parent, affected children, and GitHub umbrella issue together.
+3. Use one clean current-`main` PR per child; interim PRs use `Refs`, and only the final integration PR uses `Closes`.
+4. Extract accepted commits/files into a new worktree, prove patch/file provenance, and run complete slice gates.
+5. Treat every extracted SHA as new evidence: fresh exact-head review is mandatory and historical approvals do not transfer.
+6. Close the mega-PR unmerged only after the first replacement PR is live; preserve its branch until extraction completes.
+7. If the foundation review is blocked, keep it draft, record the decision packet, and stop downstream children. A review/pause authorization does not silently authorize a repair pass.
+
+Use `references/staged-pr-train-recovery.md` for the decision gate, tracker/GitHub amendment sequence, patch-ID provenance, exact-head review boundary, foundation false-success probes, and readback checklist.
+
+### 7.4 Execute a post-merge tagged release/install child
+
+When a Linear child begins only after Karan has merged the final integration PR and owns tag/backup/install/smoke work:
+
+1. re-qualify the exact merge source, final reviewer artifacts, complete feedback surfaces, and real-agent launch/readback evidence before tagging;
+2. create one annotated tag on the verified merge commit and prove the remote ref **and peeled target commit**;
+3. resolve the accepted install shape from repository docs—do not fabricate a global/PATH binary when the contract intentionally uses a repo-local executable;
+4. stage replacement bytes with `git archive <verified-tag>`, reject unsafe/unexpected members, and compare complete manifests;
+5. back up every replaced active path outside skill discovery with private permissions, atomically swap the tagged active files, and exercise rollback in a disposable target;
+6. smoke the actual active skill and repo-local executable on every supported runtime;
+7. check the release child and only its proven parent rollups, preserve the downstream pilot unchanged, verify exact comments by ID, and move the child to `Done` last.
+
+Use `references/post-merge-tagged-release-install-closeout.md` for the complete remote-tag peeling, tagged archive, backup/atomic-swap, installed-path smoke, rollback, evidence-packet, and Linear reconciliation procedure.
 
 ## Failure rules
 
@@ -175,7 +258,14 @@ Avoid saying “running automatically” when only a one-time poll occurred. Dis
 
 ## References
 
+- `references/backlog-child-commissioning.md` — commission a prerequisite-gated Backlog Linear coding child after fresh human direction: create/verify the GitHub contract, persist bounded authority, publish/read back the claim, activate the child, and create visible isolated pickup.
+- `references/post-merge-next-child-pickup.md` — verify a human merge including squash-tree equality, reconcile stale cross-tracker state, select the next child, create an umbrella-linked branch/worktree, and start the bounded builder with direct readback.
+- `references/post-merge-checkbox-reconciliation.md` — reconcile a completed Linear child's acceptance boxes and its exact parent roll-up after verified merge while preserving sibling criteria and proving full-description readback.
 - `references/cross-session-pause-resume-handoff.md` — durable Linear/GitHub/repository pause packets and safe fresh-session resume for uncommitted or mid-migration work, including stale-evidence handling and deterministic Claude continuation.
 - `references/visible-pickup-and-progressive-acceptance.md` — compact command/readback patterns and the Linear `[X]` checkbox normalization pitfall.
+- `references/linear-helper-readback-shapes.md` — command-specific `linear_api.py` JSON shapes, exact comment-ID verification, state name/type readback, parser-failure recovery, and ready-without-merge cross-system ordering.
 - `references/credential-bearing-agent-launcher-review.md` — effective-authority review matrix for agent launchers: provider permissions, raw credential/HOME containment, model-auth exceptions, descendant cleanup, reviewer isolation, artifact state, and legacy-lane parity.
 - `references/exact-head-blocked-pr-handoff.md` — exact-head blocked closeout across GitHub and Linear: mechanical-vs-acceptance state, final artifact readback, frozen blocker ledger, repair-budget stop, direct comment verification, resumption contract, and adversarial trusted-agent boundary probes.
+- `references/staged-pr-train-recovery.md` — recover a churn-heavy mega-PR into child-owned clean PRs: synchronized Linear/GitHub contract amendments, `Refs`/final-`Closes` linkage, patch-ID provenance, superseded-branch preservation, fresh exact-head review, and reusable foundation false-success probes.
+- `references/interim-pr-closing-link-contamination.md` — prevent accidental closing links from ordinary PR prose and recover by replacing a metadata-contaminated interim PR from the same exact branch/head.
+- `references/post-merge-tagged-release-install-closeout.md` — execute a final post-merge release child safely: re-qualify exact evidence, create and peel an annotated remote tag, install only tagged bytes, preserve private rollback, smoke active paths, and reconcile only proven Linear rows.

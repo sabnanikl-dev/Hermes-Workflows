@@ -53,13 +53,15 @@ When the request names exact lineages, a strict cutoff, or redaction rules, foll
 
 ### 3. Enumerate the deterministic inventory
 
-When available, query `~/.hermes/state.db` for sessions joined to messages inside the target window. Collect only compact metadata first: session ID, title, source, parent ID, message/tool counts, and first/last in-window timestamps.
+When available, query `~/.hermes/state.db` for sessions joined to **active messages** inside the target window. Collect only compact metadata first: session ID, title, source, parent ID, message/tool counts, and first/last in-window timestamps. Filtering on message timestamps—not only `sessions.started_at`—captures long-running sessions that crossed midnight; filtering on `messages.active = 1` excludes rewound branches.
 
-See `references/sqlite-lineage-probe.md` for the query pattern.
+See `references/sqlite-lineage-probe.md` for the query pattern and the compaction-heavy continuation recovery procedure.
 
 ### 4. Collapse sessions into lineages
 
 Follow `parent_session_id` to the root. Compaction continuations are one workstream, not separate accomplishments. Exclude `subagent` and `bg_*` children when their result is already represented by the parent.
+
+Do not infer a lineage outcome from the root session’s last assistant message alone. In long compressed runs, the root often ends at an interim checkpoint while a later continuation contains the actual blocker, approval, merge, cleanup, or closeout. For every retained root and child, inspect the first substantive user request and last non-empty assistant message, order the lineage chronologically, and use the deepest/latest continuation as the provisional outcome. A current source-system recheck still outranks transcript summaries.
 
 When the user specifies a lineage **from root through an exact endpoint**, reconstruct the endpoint’s ancestor chain back to the root and use that chain as the narrative boundary. Treat subagents branching from that chain as supporting evidence only; exclude later continuations or sibling branches beyond the named endpoint unless explicitly requested. This prevents same-topic work performed later that day from leaking into the requested historical state.
 

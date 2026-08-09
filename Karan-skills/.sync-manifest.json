@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 77,
+  "skill_count": 88,
   "skills": [
     {
       "name": "adversarial-product-prd-tournament",
@@ -24,14 +24,14 @@
     {
       "name": "agent-execution-resilience",
       "path": "devops/agent-execution-resilience",
-      "files": 6,
-      "sha256": "35cfd67b2c9814cbede3fd401d9acb07d82d02e8e007afabcbc6545a3be7d4f5"
+      "files": 21,
+      "sha256": "dc0e2362e3635ec85af5ce446b1ad7c3754e31580c90744c5b9d366f4b555323"
     },
     {
       "name": "agent-workflow-contract-proofing",
       "path": "software-development/agent-workflow-contract-proofing",
-      "files": 3,
-      "sha256": "52632e14c02b830ac15308c6c314a83329206308ce7cda7ffdebfbac42fb94e5"
+      "files": 7,
+      "sha256": "aa3895d04abc217a6df42f2928168e6b5c2cd00a576751f114f8af5ce8b47149"
     },
     {
       "name": "agent-workflow-orchestration",
@@ -40,28 +40,40 @@
       "sha256": "ff7dd5c8f028481c58975ce6221f04971fb22320ce6e5ecb11f4c47409019cd9"
     },
     {
-      "name": "apple-macos-automation",
-      "path": "apple/apple-macos-automation",
+      "name": "agentic-pr-review-loop-recovery",
+      "path": "software-development/agentic-pr-review-loop-recovery",
+      "files": 20,
+      "sha256": "7379136042a65d0f24e815e008b5ecb3d56ea5561fd19c539a19248596b544fe"
+    },
+    {
+      "name": "architecture-scope-audits",
+      "path": "software-development/architecture-scope-audits",
       "files": 7,
-      "sha256": "68e20fea1ae5c7925043f4d181b85c7718fa4d2c7b129de7b20fce5b2d02ebe9"
+      "sha256": "13ca3fbd225410903f5e3c0153513fd187e8479cd18e35ab01f9b3d135dd3505"
     },
     {
       "name": "artifact-output-governance",
       "path": "productivity/artifact-output-governance",
-      "files": 6,
-      "sha256": "25ceb3ec880ec6b21cc84de55039498132e5f91d68d23a4fe28f7027ffd8e2da"
+      "files": 7,
+      "sha256": "a1d5b6fd31fc507484dea283e069ff5c5541446e2f2e4c6087046421808957ae"
     },
     {
       "name": "autonomous-coding-agents",
       "path": "autonomous-ai-agents/autonomous-coding-agents",
       "files": 9,
-      "sha256": "cf96a86f2f94a435716fa4f7b8b1e07e6f934cd3e1237dc1252fccc07cbcb873"
+      "sha256": "105adbc5f13a64c162913eaafd720b9226214c4c552aade5bfc84680d2162d79"
     },
     {
       "name": "autonomous-pr-prover",
       "path": "software-development/autonomous-pr-prover",
       "files": 16,
-      "sha256": "757facaa4416d6e05612319d9e94d9f2a7afd444bfeed370be417d6f0e687d26"
+      "sha256": "3ed7a8c15775851bc22c1d91c12184d3c6569fbc76d4feed786eab6559500594"
+    },
+    {
+      "name": "baoyu-visual-storytelling",
+      "path": "creative/baoyu-visual-storytelling",
+      "files": 115,
+      "sha256": "3f829dbc1aecc2190caf2cc3d7febf0bc62a9e3d6affc4733485e9458bb37f83"
     },
     {
       "name": "brand-website-from-inspiration",
@@ -82,12 +94,6 @@
       "sha256": "91abff63f5ea69e700f29ca839c1d50d3284ff40863b4d2b4b8243559e7eeb06"
     },
     {
-      "name": "closeout-dream-report-prototype",
-      "path": "productivity/closeout-dream-report-prototype",
-      "files": 5,
-      "sha256": "dd52d92067006f8a416c5d2158826bd81003bbf5e0830f626ba6be63d7527124"
-    },
-    {
       "name": "code-review",
       "path": "software-development/code-review",
       "files": 5,
@@ -98,6 +104,12 @@
       "path": "software-development/context7-cli",
       "files": 1,
       "sha256": "dacfd39421ab6e79873eb42ae2e6414171b61892fa8895ed91a1fd49d17255ff"
+    },
+    {
+      "name": "cpanel-wordpress-domain-triage",
+      "path": "devops/cpanel-wordpress-domain-triage",
+      "files": 3,
+      "sha256": "f88226bfd91f8ee7a59455bcfe1009352985668a151792ee85de20ce2e219784"
     },
     {
       "name": "creative-html-visual-artifacts",
@@ -114,20 +126,20 @@
     {
       "name": "cross-tracker-development-execution",
       "path": "devops/cross-tracker-development-execution",
-      "files": 5,
-      "sha256": "c6c61f7002c980e9798d4b8b678624a4e193050f413315e32534e4b093f163e9"
+      "files": 12,
+      "sha256": "ed0dd4d031a10bcb7d9d239b402b4d9e6f9afc572932d2198d1aaa881d70cdda"
     },
     {
       "name": "daily-log",
       "path": "productivity/daily-log",
       "files": 9,
-      "sha256": "42686ca9f654d17efc75cfb6e92a6ee5d921039ca6087354f271d2e1362a2cff"
+      "sha256": "25d0000df4e694b5a0656d71d2cfd4f1bf0f207b0c3326d1ef1ad330715d8767"
     },
     {
       "name": "deterministic-validator-review",
       "path": "software-development/deterministic-validator-review",
-      "files": 3,
-      "sha256": "3adb4f253c5d2972693146fbbd230c26b2c2cb0595e238e9c89ea9ecdfd00997"
+      "files": 20,
+      "sha256": "377fea12d53019f8c755125dd726c2fc867a80441041ccbf83ea0597ea72d8ea"
     },
     {
       "name": "email-action-workflow",
@@ -154,12 +166,6 @@
       "sha256": "431dec4fc3118809e74396a00e29df61ad395bd7f77f290268ccb3827a0637e2"
     },
     {
-      "name": "firecrawl-crawl",
-      "path": "firecrawl-crawl",
-      "files": 1,
-      "sha256": "8ca47eed996e9111b6e25619ebae30516620f43f60bb44528fcc7002d7c9ea98"
-    },
-    {
       "name": "firecrawl-interact",
       "path": "firecrawl-interact",
       "files": 1,
@@ -184,6 +190,18 @@
       "sha256": "caf56e07ff6cb0e8bf3852165c0dba6cc94e286ad42db9a769bfa0352f42b618"
     },
     {
+      "name": "gateway-troubleshooting",
+      "path": "devops/gateway-troubleshooting",
+      "files": 5,
+      "sha256": "9c4daaf32f8e9806f7d47db746be2ae03e39b246e4630dcbf207440e0a38f160"
+    },
+    {
+      "name": "generated-artifact-proofing",
+      "path": "software-development/generated-artifact-proofing",
+      "files": 8,
+      "sha256": "95dc93fd301721c81138937da866967d33448cc773e66a1821659e2e54dfb249"
+    },
+    {
       "name": "github-issue-specs",
       "path": "github/github-issue-specs",
       "files": 4,
@@ -196,6 +214,12 @@
       "sha256": "b61cb9fa97c6b9f237ca61101fe5ce2dd2009307ca5068d09dadd7db67984f6e"
     },
     {
+      "name": "github-pr-evidence-integrity",
+      "path": "github/github-pr-evidence-integrity",
+      "files": 2,
+      "sha256": "ccd0938267507719932153341239749f35b78f84900f4680fdd845b1162471a5"
+    },
+    {
       "name": "godmode",
       "path": "red-teaming/godmode",
       "files": 9,
@@ -206,6 +230,12 @@
       "path": "devops/godmode-harness-creation",
       "files": 6,
       "sha256": "ebe8e785c8b2a9080e94ee1ea14fd09b7c334f81d65536c10cbfc74faf85cfd2"
+    },
+    {
+      "name": "google-analytics-ga4",
+      "path": "productivity/google-analytics-ga4",
+      "files": 4,
+      "sha256": "9b74fb51a55a54eb3f28f0aacab45bdb817b5e8aa315f14bd5f0478903d7c138"
     },
     {
       "name": "google-business-profile-api-access",
@@ -265,7 +295,7 @@
       "name": "linear",
       "path": "productivity/linear",
       "files": 2,
-      "sha256": "316678ab8884470b1098b69b34ab3028d878e0e77ad53364e8bebd5214a283bd"
+      "sha256": "a826870426c3fc8af12577144c78106b2fb229050a6fe0c64893152294c838e4"
     },
     {
       "name": "linear-issue-specs",
@@ -288,8 +318,8 @@
     {
       "name": "local-seo-visibility-ops",
       "path": "productivity/local-seo-visibility-ops",
-      "files": 23,
-      "sha256": "fb47fe772f1852c2a0308cf3faa4695f9bc928643a8238ecb8772930dbdd4952"
+      "files": 24,
+      "sha256": "e8306571c746a17bad3760757135e7bfa07bc56c1e48585aaf49bf18adc2d0d0"
     },
     {
       "name": "local-web-preview",
@@ -319,7 +349,7 @@
       "name": "multi-agent-dev-workflow",
       "path": "multi-agent-dev-workflow",
       "files": 59,
-      "sha256": "0fe6d459b08e8dd5e53c55739358bf96777b77d3d57e115831d4255590679980"
+      "sha256": "de743eca098eedd8b8c175c9a6d9f40973e2a8c92845e9964b25a3b9afc49008"
     },
     {
       "name": "native-mcp",
@@ -330,8 +360,8 @@
     {
       "name": "negative-space-verification",
       "path": "software-development/negative-space-verification",
-      "files": 3,
-      "sha256": "e3e5512a2b40714a3b281f0db124d2ec777242968616ef5a79eb5bae3423dfd2"
+      "files": 4,
+      "sha256": "a38dcbb59bc3693aa65c0cff8944cb1077c98e6d9a0efb644bc45de07a34f729"
     },
     {
       "name": "notebooklm-to-github-issues",
@@ -366,8 +396,8 @@
     {
       "name": "preflight-qualification-gates",
       "path": "devops/preflight-qualification-gates",
-      "files": 2,
-      "sha256": "0f12bc7b8e594b05e39de7e50d2871e5d0fe7553106e1aa552b5023c8282de15"
+      "files": 3,
+      "sha256": "9e30a081636a69e7efd4087e96ab60615203f5cace6bbf7cae5c5b3ffd8d1ae5"
     },
     {
       "name": "productivity-integrations",
@@ -388,6 +418,12 @@
       "sha256": "519a2b0cdc303f6df8b5a64bb2bccbae6530e054bf1777dcca894d0c5671fbf6"
     },
     {
+      "name": "pull-request-review-preflight",
+      "path": "software-development/pull-request-review-preflight",
+      "files": 3,
+      "sha256": "fd7cbafa1e0ee5a9fd65431f5c5e297ea5e332082b0918d431a13390197892cd"
+    },
+    {
       "name": "research-intelligence-workflows",
       "path": "research/research-intelligence-workflows",
       "files": 64,
@@ -406,6 +442,18 @@
       "sha256": "80b8765b547b6902c0359be796052df659084ba124486fec2f172f540c6b68b9"
     },
     {
+      "name": "review-artifact-relay-and-state-barriers",
+      "path": "software-development/review-artifact-relay-and-state-barriers",
+      "files": 21,
+      "sha256": "6f279b777e65ef2e21d2d8e16f4a02259b96ad5f0e9f3f0466233346c1a65dc4"
+    },
+    {
+      "name": "risk-proportional-pr-orchestration",
+      "path": "software-development/risk-proportional-pr-orchestration",
+      "files": 6,
+      "sha256": "40b50203fc41b4a587c2d2ceaf8b246b887d1cb2101e453d288c05321fbe3d77"
+    },
+    {
       "name": "sanity-studio-deploy",
       "path": "devops/sanity-studio-deploy",
       "files": 4,
@@ -414,14 +462,20 @@
     {
       "name": "scheduled-monitoring-workflows",
       "path": "devops/scheduled-monitoring-workflows",
-      "files": 2,
-      "sha256": "9ba488cf3f3f917c727caa6b95a51baec9b0af7f0a8c90ff3f65294be3b2b223"
+      "files": 4,
+      "sha256": "108795ceb7d0e81ec4338525f28454a2d4228b43cc5aa945c5a2db42ca9282ef"
+    },
+    {
+      "name": "scoped-child-agent-execution",
+      "path": "devops/scoped-child-agent-execution",
+      "files": 3,
+      "sha256": "d1b6c299b305e80f3da75c4e96efdab25bb54899ce6904c51a5a1e4e626b6174"
     },
     {
       "name": "session-history-synthesis",
       "path": "note-taking/session-history-synthesis",
       "files": 4,
-      "sha256": "2f50a3d0755cebda5ba33b3465bd4e058448a29e05116ef774f2b0a2b7669c3a"
+      "sha256": "e23568043a46cb0d8f44ac6bff4f3335ce867bc0092281b864d23cc8915d4404"
     },
     {
       "name": "software-development-lifecycle",
@@ -434,6 +488,18 @@
       "path": "software-development/subagent-driven-development",
       "files": 3,
       "sha256": "94f298aea3533b9102f904f066aadca199d39bed49ef3e3459a83498e4fa3e0b"
+    },
+    {
+      "name": "tracker-artifact-closeout",
+      "path": "productivity/tracker-artifact-closeout",
+      "files": 4,
+      "sha256": "09a2d1fd20656565acfef1b42334b4a3ba7d5c9c734ba0d1ddfd69935d071791"
+    },
+    {
+      "name": "verified-merge-closeout",
+      "path": "software-development/verified-merge-closeout",
+      "files": 6,
+      "sha256": "e76a5cec8391f7b393bc249db2aadb192c815235d5686461ca4938791f073758"
     },
     {
       "name": "web-application-qa",

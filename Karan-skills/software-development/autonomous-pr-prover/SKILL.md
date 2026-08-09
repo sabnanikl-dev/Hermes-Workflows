@@ -50,6 +50,8 @@ Unresolved **human** PR comments are blocking even when checks are green and rev
 
 Two fix cycles, maximum; a partial builder fix gets one corrective rerun inside the open cycle, not a new one. Stop and ask Karan when two cycles have not cleared blockers, reviewers disagree on a judgment call, auth or environment blocks verification, the head/repo/branch is not what the run is bound to, or the PR carries unrelated changes.
 
+**Bounded exception-wrapper pitfall:** a schema-v2 frozen blocker file created directly from reviewer findings may contain the full `blockers` ledger while `next_instructions` is an empty array. A guard must validate the approved IDs from `blockers`; it may derive narrow remediation records from those frozen blocker summaries/origins when instructions are absent. Do not falsely consume a cycle by requiring pre-generated instructions. Test both populated and empty-instruction fixtures before launch. If a substantive approved builder pass lands and the exact-head re-review finds a new blocker, the exception is spent: stop rather than silently widening the approval.
+
 ## Conditional references
 
 - Static-site / SEO copy, sitemap, canonical, or schema blockers → `references/static-site-current-head-review-loop.md`, `references/static-copy-pr-current-head-closeout.md`, `references/static-contract-review-edge-cases.md`; crawlable FAQ/GEO accordions → `references/static-faq-accordion-geo-pr-loop.md`.

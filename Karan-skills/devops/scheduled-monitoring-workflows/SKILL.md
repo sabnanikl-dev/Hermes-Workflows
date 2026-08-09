@@ -53,6 +53,10 @@ live discovery or polling
 
 For script-only jobs, stdout is the delivery contract: non-empty output should already be the exact message; empty output should mean silence. For model-assisted jobs, constrain model output and independently enforce the important invariants in code.
 
+For approved high-risk operations with finite monitoring windows—DNS cutovers, deployment promotions, migration switches, or certificate changes—use the executor/watchdog split and external-verification pattern in `references/time-bounded-live-operation-watchdogs.md`.
+
+For website DNS flips that must preserve mail and need independent HTTPS vantage points, also use `references/dns-cutover-external-verification.md`. It defines authoritative/public resolver quorums, old-TTL propagation handling, fresh completed Globalping evidence, deployed-feature-state checks, local-network limitations, and deadline/final-recommendation behavior.
+
 ## Deal and Availability Watchers
 
 Do not confuse a nominal range with an actionable recommendation. Separate:
@@ -105,6 +109,7 @@ Fixture-test before triggering a live job that could message the user.
 - A previously successful cron run does not validate a newly edited script.
 - Editing a script may require re-verifying its executable mode.
 - Manual live runs can create duplicate or false notifications; fixtures are the safer first proof.
+- If a human advances an approved live-operation window and the mutation is performed manually, remove the still-future one-shot executor before acting, then reschedule only the read-only watchdog from the actual mutation time through the TTL horizon.
 - A broad “other established sources allowed” exception defeats an explicit allowlist.
 - Search snippets, crossed-out prices, installment amounts, recommendation cards, and stale metadata are not active offers.
 - Marketplace hosts require seller-level verification even when the hostname itself is approved.

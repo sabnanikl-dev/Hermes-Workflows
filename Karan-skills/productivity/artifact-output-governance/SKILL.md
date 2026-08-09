@@ -102,6 +102,20 @@ Default routing guidance:
 
 Do not turn the placement question into ceremony when an established canonical mapping already answers it; use the mapping and disclose it. Do not create durable knowledge merely to check a box—`Durable knowledge: none` is a valid closeout result when supported.
 
+### 1.1 Design contracts awaiting owner approval
+
+When a tracker asks for an **owner-approved design** but no owner decision is recorded, do not silently promote a proposed architecture into an accepted implementation contract:
+
+1. Create the repository-owned design artifact at the established contract/API-doc path, with an explicit `Proposed — owner approval required` status at the top.
+2. Name the precise conflict being resolved, the intended next implementer/reviewer, provenance, assumptions, and every no-live-change boundary. Do not turn a design artifact into authorization for deploys, account mutations, consent changes, public copy, or other external effects.
+3. Make the decision executable enough to review: state the source of truth, data lifecycle, normalization/encoding behavior, safe fallback, and failure behavior. Prefer a build-derived or reviewed source artifact over runtime lists that can silently go stale.
+4. Add sanitized fixtures for representative success cases and adversarial failures, then wire a narrow offline validator into the repository's canonical test chain. The validator may protect the proposed contract now, but must state that it is **not proof of a future runtime implementation** until the implementation exercises the same cases.
+5. Include a narrow follow-up seam table: files to change, generator/build order, regression tests, and exact verification commands. Keep unrelated operational/activation scope explicitly out.
+6. Update existing project indexes and governing specs so a fresh implementer can find the proposed contract without mistaking it for a shipped feature.
+7. Seek owner approval through the tracker/PR before representing the design as accepted. If approval is not yet present, report the artifact as a reviewable proposal and leave the implementation/live gate closed.
+
+This pattern is especially important for privacy, attribution, authorization, and generated-output classification: a permissive character regex or a stale handwritten allowlist is not a safe source of truth merely because its test fixture is green.
+
 ### 2. Produce in the appropriate medium
 
 Use the medium that best supports the user and task. Portable/editable formats are preferred when useful, but output shape follows purpose—not process convenience.
@@ -115,6 +129,16 @@ Use the medium that best supports the user and task. Portable/editable formats a
 - Scripts/CLIs: execute with safe fixtures, test failure paths, verify exit codes and resulting state.
 - Datasets/reports: validate schema, counts, deduplication, provenance, and known edge cases.
 - External writes: capture object ID and directly read back exact content/state/version.
+
+### 3.1 Make interactive HTML review state portable
+
+When an HTML report uses checkboxes, approvals, or comments that the user must return from a phone or another browser, browser-local persistence is not a deliverable. `localStorage` can improve same-browser continuity, but it does not travel with the HTML file.
+
+Require the report to export a new reviewed HTML artifact with stable item IDs and the selected state embedded into the file itself. Make the checkbox polarity explicit—prefer **Approve edit** with checked = accepted and unchecked = rejected/rewrite—so a returned file is an executable decision ledger rather than an ambiguous progress record. Restore embedded state before any local-storage fallback, preserve the original report, and verify the full select → export → fresh-context reopen → independent parse lifecycle in a real browser.
+
+Treat the returned exported file as the authoritative review state. Freeze checked items, route unchecked items through bounded revision, and verify totals before mutating the governed artifact.
+
+See `references/portable-interactive-html-review-state.md` for the export contract, mobile handoff, and end-to-end test sequence.
 
 ### 4. Run independent acceptance
 

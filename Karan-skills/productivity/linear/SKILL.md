@@ -51,6 +51,15 @@ python3 "$SCRIPT" get-document 38359beef67c      # fetch a doc by slugId from th
 python3 "$SCRIPT" raw 'query { viewer { name } }'
 ```
 
+`add-comment` accepts the comment body as a positional argument; it does not support `--body-file`. For a prepared Markdown file, load it into one quoted argument:
+
+```bash
+BODY="$(< /tmp/linear-comment.md)"
+python3 "$SCRIPT" add-comment ENG-42 "$BODY"
+```
+
+Capture the returned comment ID and verify it directly as described below.
+
 All subcommands: `whoami`, `list-teams`, `list-projects`, `list-states`, `list-issues`, `get-issue`, `search-issues`, `create-issue`, `update-issue`, `update-status`, `add-comment`, `list-documents`, `get-document`, `search-documents`, `raw`. Run with `--help` for flags.
 
 Use the script when: you want a quick answer without crafting GraphQL. Use curl when: you need a query the script doesn't wrap, or you want to compose filters inline.
@@ -392,9 +401,11 @@ For production-readiness split-outs or follow-up issues created from an active p
 
 For project-status/dashboard work, verify Linear-owned completion directly from Linear before marking work completed in the wiki. Read the issue with `scripts/linear_api.py get-issue ISSUE-ID` and confirm the state name/type (for example `Done` / `completed`), rather than relying on daily-log/session claims alone.
 
-For issue-body closeout where acceptance/verification checkboxes are the contract, update the full `description` in one mutation: first fetch the issue body, replace only the exact checkbox lines that the evidence now satisfies, append dated completion notes, and set `stateId` only if the contract is fully satisfied. For repo-backed documentation/artifact issues, commit the satisfying repo changes before moving the issue to Done; do not leave a Done issue backed only by uncommitted local files. Then verify with a follow-up `issue(id:)` query that (a) the intended checkboxes are checked, (b) the state name/type is correct, (c) the closeout comment is visible by direct `comment(id:)` lookup, and (d) any required git commit/remote evidence exists. Avoid checkbox edits from review-initialization steps unless the issue workflow explicitly calls for closeout.
+For issue-body closeout where acceptance/verification checkboxes are the contract, update the full `description` in one mutation: first fetch the issue body, replace only the exact checkbox lines that the evidence now satisfies, append dated completion notes, and set `stateId` only if the contract is fully satisfied. For repo-backed documentation/artifact issues, commit the satisfying repo changes before moving the issue to Done; do not leave a Done issue backed only by uncommitted local files. Then verify with a follow-up `issue(id:)` query that (a) the intended checkboxes are checked, (b) the state name/type is correct, (c) the closeout comment is visible by direct `comment(id:)` lookup, and (d) any required git commit/remote evidence exists. Linear may normalize issue-description Markdown on write—for example, `-` bullets can read back as `*`, bare URLs can become explicit Markdown links, and the trailing newline can disappear—so do not require byte-for-byte description equality. Verify the unique checkbox transition, checkpoint heading, evidence URLs, and semantic tail instead. Direct comment readback can still be compared exactly when the API preserves that body. Avoid checkbox edits from review-initialization steps unless the issue workflow explicitly calls for closeout.
 
 When post-processing helper JSON locally, prefer writing to a temporary file and reading that file from Python instead of piping helper output directly into `python3 -c`; some execution environments flag `producer | python` as a high-risk “pipe to interpreter” pattern even when the producer is a trusted local helper.
+
+The helper's `raw` command prints the GraphQL `data` object directly. For example, `raw 'query { comment(...) { ... } }'` returns `{"comment": {...}}`, not `{"data": {"comment": {...}}}`. Parse requested root fields from the top level and do not repeat a successful mutation because a readback parser assumed the outer GraphQL envelope was preserved.
 
 For re-verification after an artifact changes, keep the scope exact: scan only the updated artifact(s), re-confirm unchanged artifacts by SHA if needed, and say clearly which evidence is static/package verification versus live/end-to-end proof. This avoids overclaiming when a downstream issue owns credentialed dry-runs or production-resource checks.
 

@@ -25,6 +25,8 @@ Use this umbrella when Hermes should coordinate another coding agent process ins
 ### Claude Code
 Useful for strong coding/refactoring execution when the Claude Code CLI is installed and authenticated. Give it a self-contained prompt, exact repo path, acceptance criteria, and required verification commands.
 
+For non-interactive scoped builders on Claude Code 2.1.x, smoke one permitted Bash pattern before the real run. Operator/project customizations can override `--allowedTools` under `--permission-mode dontAsk` and make Bash appear blanket-denied even when patterns were supplied. If the smoke is denied, rerun with `--safe-mode` plus explicit `--allowedTools`, strict/empty MCP, and the task prompt's repository instructions. `--safe-mode` disables customizations but preserves built-in tools, auth, model selection, and explicit permissions. Verify the worktree stayed untouched before re-dispatching; do not broaden to `--dangerously-skip-permissions` merely to bypass a policy mismatch.
+
 ### Codex
 Useful for OpenAI Codex CLI work, especially repository modifications and review. Check auth/provider state first; run in a worktree or explicit branch; verify its output yourself before reporting success.
 

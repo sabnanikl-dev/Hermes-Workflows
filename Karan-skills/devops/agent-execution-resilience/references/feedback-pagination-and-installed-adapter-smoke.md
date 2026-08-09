@@ -42,6 +42,29 @@ When the adapter/relay lifecycle changes, run a real credential-free smoke befor
 
 A stub validates argv/artifact plumbing only. The real smoke validates the shipped adapter, installed CLI/auth path, repository access, tests, and artifact contract together.
 
+### Prevent recursive self-smoke
+
+If the child reviewer reads repository guidance that also says to run the real adapter smoke, the adapter can recurse into itself:
+
+```text
+adapter → reviewer → repository guidance → adapter → reviewer → …
+```
+
+Make the boundary explicit in the child prompt: **this invocation is the required adapter smoke; do not invoke the adapter, reviewer CLI, or Codex recursively.** Prefer a repository-supported prompt extension. If the adapter exposes only a reviewer-executable override, a temporary `/tmp` wrapper may append only this no-recursion sentence and then delegate unchanged to the real installed reviewer binary. Disclose that wrapper in the evidence.
+
+Watch the process tree for a second adapter/reviewer chain. If recursion begins, terminate the tracked process tree, verify no descendants remain using a worktree/artifact-specific process search, discard any partial artifact, and rerun with the explicit boundary. Useful test output from the outer process does not prove that recursion is absent.
+
+### Feedback mutation probes
+
+When the changed path classifies human feedback or run-owned artifacts, add two focused former-red probes before accepting the smoke:
+
+- a later human post that contains both unresolved prose and a valid acknowledgement of an older comment; clearing the old comment must not suppress the new prose;
+- a previously verified conversation artifact whose body is later edited while its immutable GitHub ID and publisher remain unchanged; ID retention alone must not silently exempt the mutated body unless the product contract explicitly proves mutation-safe ownership.
+
+These probes target false `merge-ready` outcomes that ordinary happy-path suites can miss.
+
+A live smoke artifact with blockers is a valid transport/readback artifact but a failed acceptance gate. Relay it, have the formal A/B/Integration sequence independently reproduce or refute the findings, and respect the current cycle budget. Do not turn green unit tests or GitHub `MERGEABLE/CLEAN` into a pass, and do not launch a new builder when the authorized repair budget is exhausted.
+
 ## Same-cycle corrective recovery
 
 If this pre-triad smoke proves the builder only partially closed an already-frozen blocker class, publish the smoke artifact and use the one allowed corrective builder rerun inside the current cycle. Point to the durable artifact and prohibit scope expansion. Then rerun full gates, the real smoke, and the formal triad.

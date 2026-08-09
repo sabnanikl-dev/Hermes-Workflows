@@ -29,6 +29,8 @@ Load this skill when a contract says things like:
 
 It also applies when live discovery finds that a supposedly pre-mutation action already occurred and the task is to decide whether the mission may continue.
 
+Load it as well when an implementation issue requires owner-, client-, legal-, or compliance-approved source material before a builder may add public copy or behavior. In that case, the source packet is the trust root: approval of a policy or approval to work the issue does not substitute for approval of the exact source.
+
 ## Core Invariants
 
 1. **Artifact chronology and qualification chronology are different facts.** Old launcher bytes do not prove that identity, runtime, auth, isolation, automation, and broker evidence were recorded in time.
@@ -174,4 +176,5 @@ Do not post to GitHub when the issue itself excludes GitHub mutation. Store the 
 
 ## Reference
 
-See `references/retroactive-qualification-escalation.md` for a compact worked pattern covering evidence chronology, hash-addressed terminal bundles, bounded reviewer retry, and tracker closeout.
+- See `references/retroactive-qualification-escalation.md` for a compact worked pattern covering evidence chronology, hash-addressed terminal bundles, bounded reviewer retry, and tracker closeout.
+- See `references/owner-approved-source-before-builder.md` for separating policy, exact public-copy approval, builder launch, and live activation authority when a source packet is a precondition.

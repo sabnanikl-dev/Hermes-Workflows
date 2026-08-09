@@ -80,6 +80,36 @@ For every small or muted text role:
 
 Do not waive low contrast because screenshots are geometrically clean.
 
+## Exact-head lifecycle and unknown-live-head probes
+
+When a workflow persists review/classification evidence across builder execution, distinguish:
+
+- observed live PR head;
+- bound/work head;
+- classification head;
+- recorded pre-interruption head;
+- unknown live head when no current remote read exists.
+
+Exercise every supported terminal window:
+
+| Window | Required result |
+|---|---|
+| Same-head stop after a live read | classification may render as current for that exact head |
+| Terminal freshness observes B after classifying A | report B; mark A historical or clear it |
+| Push reaches B but comment/readback fails | report observed B; mark pre-push A evidence historical or clear it |
+| Restart with an in-flight attempt before any remote read | live head is unknown; never promote recorded A to verified-current merely because `head == classification_head` |
+| Successful rebind to B | invalidate A classification |
+
+For the restart probe, construct valid persisted state on A with a complete classification and an in-flight attempt marker, while a remote double is on B. If the documented safety policy intentionally stops before GitHub reads, assert zero PR/comment/commit reads and then inspect **both JSON and Markdown**:
+
+- the stop must be fail-closed/needs-human;
+- A may remain available as recorded evidence;
+- A must be explicitly unverified/historical, current/live head must be unknown, or the classification must be cleared;
+- no machine field documented as current head may silently fall back to recorded A;
+- nearby failure prose does not repair misleading structured fields.
+
+A fallback such as `observed_head or recorded_head` is unsafe whenever the destination field or heading means current PR head. Green tests and mechanical `MERGEABLE/CLEAN` status do not override a reproduced false-current evidence path.
+
 ## Final-cycle closeout
 
 If blockers remain after the configured cycle cap:

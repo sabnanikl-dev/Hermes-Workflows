@@ -195,7 +195,7 @@ Examples:
 
 - Search Console + GBP monthly report.
 - GBP completeness drift snapshots.
-- Production indexability checks: robots, sitemap, 200 routes, canonicals, noindex, OG image MIME, sitemap membership.
+- Production indexability checks: robots, sitemap, 200 routes, canonicals, noindex, OG image MIME, sitemap membership. For provider-hosted migrations, separate immutable deployment identity, generated deployment URL, and mutable domain-assigned alias. Bind deployment ID → commit and alias → deployment ID, run the production matrix against the domain-assigned alias, and rerun immediately before DNS. Do not disable project-wide Preview noindex behavior to make a generated URL pass. See `references/domain-migration-deployment-alias-proof.md`.
 - Review monitoring and draft replies.
 - Content repurposing drafts: GBP LocalPost, Instagram caption, carousel outline, FAQ candidates, title/meta options.
 - Directory tracker validation.
@@ -273,6 +273,7 @@ See `references/ad-hoc-verification-for-visibility-docs.md` for the reusable che
 
 ## References
 
+- `references/domain-migration-deployment-alias-proof.md` — provider-hosted migration proof: bind immutable deployment/commit/alias identity, preserve Preview noindex, prepare apex/`www` separately from DNS, enforce the intended canonical redirect direction, verify cPanel mail continuity, and use deterministic cutover/rollback gates.
 - `references/project-local-google-credential-wiring.md` — local-only GBP + Search Console credential wiring for visibility repos: ignored symlinks/env files, git ignore/tracking verification, live smoke tests, and commit-only-safe-guardrails discipline.
 - `references/notebooklm-seo-attacker-audit-to-github-issues.md` — source-grounded SEO attacker audit pattern: query specific Google Search/SEO NotebookLMs, inspect repo SEO surfaces, rank gaps by impact/effort, run a Codex Reviewer gate, open verified GitHub issues, and commit an `SEO-AUDIT-STATE.md` artifact when requested.
 - `references/visibility-linear-github-issue-sync.md` — when visibility work is tracked in Linear but website/code implementation belongs in GitHub: mirror only repo-owned work, backlink both systems, avoid duplicate GitHub issues, and verify comments/issues after mutation.

@@ -1,7 +1,7 @@
 ---
 name: negative-space-verification
 description: "Adversarial verification for safety-sensitive validators, projections, workflow summaries, generated artifacts, and final remediation cycles: test omitted stages, unknown attribution, contradictory states, hostile-but-plausible inputs, and objective accessibility properties that happy-path suites miss."
-version: 1.1.0
+version: 1.1.1
 author: Hermes Agent
 metadata:
   hermes:
@@ -71,6 +71,14 @@ For each safety-bearing field or relationship, include:
 
 Keep probes small and deterministic. Prefer direct execution of committed producer/consumer code over handwritten stand-ins.
 
+#### Prove test sensitivity with temporary mutations
+
+For a claimed false-success fix, do not stop at a green suite. In a temporary copy outside the repository, restore the former defect with the smallest possible mutation and require the focused regression tests to fail. Independently mutate adjacent load-bearing guarantees—such as persisted evidence comparison, authoritative remote bindings, or state validation—and identify the exact tests that reject each mutation. Positive controls must still pass on the real head.
+
+When posts mix control syntax with human prose, probe malformed sibling control lines as well as prose above and below a valid line. Remove only lines that were actually validated as successful bookkeeping; prefix matching can otherwise erase an invalid control-like line carrying a live stop merely because another line in the same post was valid.
+
+See `references/test-sensitivity-and-bookkeeping-lines.md` for the mutation workflow, adversarial line matrix, and restart/state-parity checks.
+
 ### 3. Verify privacy as two independent layers
 
 Owner-safe/public-safe handling requires:
@@ -112,6 +120,10 @@ Example for a pre-mutation guard stop:
 - rendered copy cannot claim “stopped before mutation” alongside positive mutations.
 
 An allowlisted status string is not enough.
+
+#### Separate recorded evidence from verified current evidence
+
+For exact-head workflows, model `observed live head`, `bound/work head`, `classification head`, and `recorded head` separately. A restart that intentionally stops before any remote read has an **unknown live head** even when a complete ledger is persisted on head A. Do not let `observed_head or recorded_head` populate a field or heading that means current PR head: retain A only as explicitly recorded/unverified/historical evidence, leave live head unknown, or clear the classification. Probe same-head, observed-drift, post-push/readback, zero-read restart, and successful-rebind windows in both JSON and human rendering. See `references/final-cycle-boundary-matrix.md`.
 
 ### 7. Measure visual properties
 
@@ -167,3 +179,4 @@ Passing tests and clean visuals should remain in the report, but must not overri
 
 - `references/executable-control-plane-boundaries.md` — first-principles split between versioned enforcement and skill guidance; state machine, hardened builder, scope-reset, source/install, and real-PR pilot requirements.
 - `references/final-cycle-boundary-matrix.md` — reusable probe checklist and closeout sequence for final-cycle safety/reporting reviews.
+- `references/test-sensitivity-and-bookkeeping-lines.md` — mutation testing for false-success fixes, malformed control-line probes, and restart/state/docs parity checks.
