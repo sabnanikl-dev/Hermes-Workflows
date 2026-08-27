@@ -123,7 +123,7 @@ Use the medium that best supports the user and task. Portable/editable formats a
 ### 3. Verify in the artifact's real form
 
 - Documents/PDFs: open/render, inspect layout and key text, confirm metadata/version.
-- Images/diagrams: visually inspect, confirm dimensions/format, legibility, and intended placement.
+- Images/diagrams: visually inspect, confirm dimensions/format, legibility, and intended placement. When the user asks for visual-QA or screenshot proof, deliver inspectable evidence files rather than only a prose verdict. Bind the evidence to the exact artifact version or revision, show the native/full surface plus the smallest material render sizes, and include provenance such as revision and checksum on a labeled proof sheet when useful. Inspect the proof sheet itself for clipping, overlap, unreadable labels, or misleading scaling; repair evidence-presentation defects before delivery even when the underlying product asset is sound. Attach useful raw captures alongside the proof sheet so the owner can make the final taste/design decision directly.
 - Spreadsheets: open workbook, inspect formulas/types/sheets, validate representative calculations and exports.
 - Presentations: render slides, inspect overflow/order/visual hierarchy, verify citations.
 - Scripts/CLIs: execute with safe fixtures, test failure paths, verify exit codes and resulting state.
@@ -226,6 +226,7 @@ Linear owns the contract and closeout evidence, not the artifact itself when ano
 - See `references/ai-os-output-contract.md` for the condensed AI OS source themes, artifact verification matrix, promotion rules, and issue-insertion checklist.
 - See `references/sovereign-rig-portable-control-plane.md` when designing AIOS/filesystem portability, replaceable model adapters, canonical-system registries, worktree-safe migration, and exercised new-computer recovery.
 - See `references/immutable-evidence-corrections.md` when correcting a semantic overstatement in a content-addressed bundle: preserve history, publish a new canonical manifest, explicitly supersede old hashes, rerun independent review, and verify tracker corrections by direct ID.
+- See `references/evidence-bundle-acceptance-preflight.md` before freezing and reviewing raw-provider/normalized-data bundles; it covers contract matrices, row-level context, explicit evidence-ID bindings, callback-token redaction, one-time hash freeze, scoped staging, and verified tracker closeout.
 
 ## Common pitfalls
 
@@ -236,6 +237,7 @@ Linear owns the contract and closeout evidence, not the artifact itself when ano
 - Accepting an output because its creator self-reported success.
 - Verifying only file existence rather than rendering/executing/reading back.
 - Editing an immutable/hash-addressed artifact in place or reusing a review bound to superseded bytes.
+- Editing an exact-hash review candidate after dispatch—even for provenance, formatting, source rendering, or closeout wording—and then treating the in-flight verdict as authoritative. Freeze last; if bytes change, supersede the old packet and re-dispatch against the new hash.
 - Correcting a claim without explicitly marking the old manifest/review as non-canonical for future decisions.
 - Creating duplicate indexes or knowledge stores.
 - Promoting transient task state into durable memory.

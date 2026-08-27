@@ -19,11 +19,11 @@ Do **not** describe this as direct Drive-to-website publishing. The website must
 There are two distinct timing layers:
 
 1. **Drive → Sanity backend**: n8n reconciles the approved Drive folder on its configured schedule. In the verified JMD local workflow, the schedule was every 6 hours. Explain as “picked up on the next scheduled sync,” not “instant.” If exact timing matters, inspect the current workflow schedule/export or n8n DB/API before stating hours.
-2. **Sanity → public static website**: the current static site uses a generated `site/assets/js/on-the-floor.data.js` public feed built from Sanity. A Sanity change does not automatically change the public website unless the feed is rebuilt and deployed, or a future dynamic/revalidation path is added.
+2. **Sanity → public website**: the live site fetches `/api/on-the-floor` when the showroom section loads. The server queries published Sanity data and returns a public-safe projection; routine photo publish/archive changes do **not** require a Vercel rebuild or deployment. The endpoint currently uses `s-maxage=60, stale-while-revalidate=300`, so fresh Sanity content is normally visible after the edge cache refreshes (about a minute), while an edge may temporarily serve stale content for up to five minutes during background revalidation. The generated `site/assets/js/on-the-floor.data.js` feed remains an offline/error/no-JS fallback only.
 
 Client-safe wording:
 
-> Photos are picked up by the backend on the next scheduled sync. Once the website feed is refreshed and published, they appear on the site.
+> Photos are picked up by the backend on the next scheduled sync. After that, the website normally reflects the updated showroom within a few minutes—no manual website rebuild is needed.
 
 ## New image behavior
 
@@ -35,6 +35,18 @@ On each successful reconciliation:
 - Existing files are **touched**, not duplicated: sync/source metadata is refreshed, but image assets/status/published/archive fields are not unnecessarily rewritten.
 
 Repeated runs should be idempotent: the same Drive file should not create duplicate public records.
+
+### Diagnostic pitfall: present in Drive but absent from the website
+
+Do not assume a direct-root image was skipped just because it is outside a nested collection folder. The workflow is intended to merge direct-root and one-level nested images into one complete source set before normalization.
+
+Check the execution and Sanity ledger in this order:
+
+1. Confirm the root listing saw the direct file and the Merge output contained the direct+nested union.
+2. Confirm whether the file was imported and later archived. A Sanity record with `status: "archived"` and `archivedReason: "older_than_live_limit"` is an import/retention outcome, not an ingestion miss; the public endpoint intentionally excludes it.
+3. Remember that live-window ranking uses Drive `createdTime` / Sanity `sourceDriveCreatedTime`, not the file's current folder placement or Drive `modifiedTime`. Moving or replacing an older Drive file can leave its original creation time old enough to fall outside `LIVE_LIMIT` on the next reconciliation.
+4. Compare the active n8n Code node with the current reviewed repo artifact. If the runtime lacks the `older_than_live_limit` restore path, a previously archived source-present record can remain stuck even after policy expansion or source changes.
+5. A filename is not the idempotency key. Copying/re-uploading creates a new Drive ID and can appear as a separate record, so do not use duplication as the durable fix without explicitly accepting that behavior.
 
 ## How long photos stay live
 
@@ -51,7 +63,7 @@ Before giving current numeric values, inspect the current env/workflow config be
 
 If a photo is moved out of or removed from the approved Drive folder, the next successful reconciliation archives the matching Sanity doc with `archivedReason = removed_from_drive_folder`. Archive means hidden from the public feed, **not deleted**.
 
-For the current static feed, public disappearance still requires the website feed to be refreshed/deployed after Sanity changes.
+Because the live site reads the dynamic `/api/on-the-floor` projection, public disappearance normally follows the endpoint cache window; no feed rebuild/deploy is required. The static generated feed is only a fallback if the endpoint is unavailable or JavaScript cannot use it.
 
 ## Safety language
 

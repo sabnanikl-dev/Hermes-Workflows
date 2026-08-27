@@ -55,6 +55,8 @@ Key gaps (verified against discovery doc):
 
 For the complete manual DataFilter evidence pattern and the staged production-disabled → separately approved activation → web-record cutover workflow, including split analytics-only vs DNS rollback, see `references/manual-data-filter-and-cutover-gates.md`.
 
+For post-deploy proof that keeps deployment binding, public byte identity, consent-negative behavior, positive network collection, bounded events, GA4-side readback, and attribution authority distinct, see `references/post-deploy-consent-network-proof.md`. A stored grant or mounted private provider is an intermediate state—not evidence that GA4 collected. For the validated production-execution techniques—privacy-safe request reduction, bounded remote-browser scenarios, mixed beacon interpretation, revocation/new-document separation, Realtime schema limits, empty campaign-registry disposition, and durable report+JSON packet creation—also load `references/live-proof-packet-techniques.md`.
+
 ## OAuth loopback mint pattern (any Google scope)
 
 Reusable for minting a new least-privilege token from an existing installed-app client secret. Working recipe + diagnosis: `references/google-oauth-loopback-mint.md`.
@@ -100,7 +102,9 @@ Turn approved measurement into an executable option-by-option inventory. In part
 
 A reviewed public privacy disclosure and consent-control link are independent activation gates. Do not revive retired/stale legal pages just to attach analytics. Record the approved policy in the tracker, provide a verified implementation handoff, promote only durable business rules to the client wiki, and leave production activation/cutover evidence as downstream work.
 
-See `references/consent-policy-decision-gate.md` for the full decision, payload, disclosure, and cross-system-recording pattern.
+See `references/consent-policy-decision-gate.md` for the official Basic-vs-Advanced architecture, exact script/GTM ordering, grant/revoke boundaries, iframe documentation finding, payload rules, disclosure gates, and cross-system-recording pattern.
+
+When evaluating supported alternatives to a directly loaded browser `gtag.js`, including server-side GTM, Google tag gateway/first-party serving, Measurement Protocol, and provider iframes, use `references/consent-gated-ga4-collection-architectures.md`. It separates three questions that must not be conflated: whether the browser tag remains, whether automatic web collection survives, and whether the design provides a real browser-script authority boundary. Reject a cross-origin provider iframe as a **default** on proportionality and lack of documented Google baseline—not as technically impossible. If browser-enforced isolation remains a hard requirement, retain it as a viable custom architecture requiring separate compatibility, storage, cookie, payload-relay, DNS/hosting, and browser-matrix proof.
 
 ## Approval boundary
 

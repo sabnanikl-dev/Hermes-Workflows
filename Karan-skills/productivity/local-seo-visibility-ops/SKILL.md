@@ -133,6 +133,8 @@ When dashboard/API access exists, collect a read-only baseline before recommendi
 
 See `references/gbp-readonly-api-baseline.md` for a compact implementation checklist and field map.
 
+When GBP Performance data will influence a page roadmap, profile priority, or visibility-decline diagnosis, use `references/gbp-performance-demand-research.md`. It covers six-month keyword-window stitching, exact-versus-threshold preservation, branded separation, matched-date and year-over-year daily-metric aggregation, partial-month handling, Business Profile Search/Maps semantics, threshold compression, divergence-led live-SERP tests, interaction-count discipline, external HTTPS triage, approval-gated profile-URL cleanup, roadmap decisions, and artifact verification.
+
 ### Phase 3 — Primary conversion page before page sprawl
 
 Launch one strong local service page first, then iterate from data.
@@ -262,6 +264,20 @@ When wiring Google/GBP/GSC credentials into a local visibility workspace, treat 
 
 See `references/ad-hoc-verification-for-visibility-docs.md` for the reusable checklist.
 
+## Multi-issue decline diagnosis and paid external evidence
+
+When a visibility decline spans an owned-profile audit, an external competitor/local-result benchmark, and approval-gated profile changes, do not run all three as parallel peers or let them form a circular dependency. Use the staged contract in `references/internal-baseline-external-benchmark-mutation-sequencing.md`:
+
+1. freeze the internal first-party baseline and initial hypothesis ledger;
+2. freeze the query/geography/competitor panel;
+3. run a bounded, approval-capped external evidence packet while remaining internal analysis continues;
+4. synthesize external results by evidence ID;
+5. route complete mutation-candidate rows into the separately approved execution lane.
+
+Keep the external-data contract provider-independent: select by input fit, observed reliability, price, and recency; preserve immutable raw responses separately from normalized tables; report actual settled cost; and never average incompatible ranks or treat competitor behavior as proof of business truth.
+
+For paid execution, canary every provider request class before fan-out and inspect task-level status/cost rather than trusting HTTP success or catalog batching claims. Count recovery calls against the same ceiling, preserve uncharged contract failures as provenance, and delete temporary async callbacks after exact result capture. See `references/bounded-paid-local-visibility-panels.md` for the validated freeze → canary → execute → normalize → exact-hash review workflow and DataForSEO/TREG field notes.
+
 ## Pitfalls
 
 - Do not confuse content volume with authority. Early reviews, proof, and directory/profile completeness often matter more.
@@ -273,6 +289,8 @@ See `references/ad-hoc-verification-for-visibility-docs.md` for the reusable che
 
 ## References
 
+- `references/internal-baseline-external-benchmark-mutation-sequencing.md` — staged local-visibility decline workflow: first-party Phase A baseline, provider-independent paid benchmark with cost/evidence controls, final synthesis, and approval-ledger mutation handoff.
+- `references/bounded-paid-local-visibility-panels.md` — fixed-budget Maps/Search/review execution: frozen packets, live canaries, task-level status/cost validation, async callback recovery, deterministic normalization, exact-hash acceptance, and causal-claim boundaries.
 - `references/domain-migration-deployment-alias-proof.md` — provider-hosted migration proof: bind immutable deployment/commit/alias identity, preserve Preview noindex, prepare apex/`www` separately from DNS, enforce the intended canonical redirect direction, verify cPanel mail continuity, and use deterministic cutover/rollback gates.
 - `references/project-local-google-credential-wiring.md` — local-only GBP + Search Console credential wiring for visibility repos: ignored symlinks/env files, git ignore/tracking verification, live smoke tests, and commit-only-safe-guardrails discipline.
 - `references/notebooklm-seo-attacker-audit-to-github-issues.md` — source-grounded SEO attacker audit pattern: query specific Google Search/SEO NotebookLMs, inspect repo SEO surfaces, rank gaps by impact/effort, run a Codex Reviewer gate, open verified GitHub issues, and commit an `SEO-AUDIT-STATE.md` artifact when requested.

@@ -78,6 +78,27 @@ The validator output must label itself `structural_smoke_only` (or equivalent) a
 
 ## 5. Freeze an exact-hash review packet
 
+### Freeze last, then dispatch
+
+An exact-hash review packet is the **last** artifact-producing step before independent review. Before computing the review hash, finish all changes that can alter the candidate bytes:
+
+1. semantic repairs and author self-check;
+2. citation/source-block rendering and evidence verification;
+3. review-history, supersession, provenance, lifecycle, and authority wording;
+4. deterministic structural checks and final readback.
+
+Then compute the hash and dispatch the reviewer. After dispatch, treat the candidate as immutable. Do not make a “provenance-only,” formatting, source-render, or closeout edit to the candidate while review is in flight; exact-hash acceptance covers bytes, not intent.
+
+If the candidate changes after dispatch:
+
+- record the old packet/review as superseded or non-authoritative;
+- do not reuse a PASS against the old hash;
+- rerun source/structural verification on the new bytes;
+- compute the new exact hash;
+- dispatch a fresh hash-bound reviewer that must compute and confirm the hash before judging content.
+
+Continuity logs, wiki summaries, and tracker notes may be updated separately while review runs only when they do not mutate the reviewed candidate and clearly retain its proposed/unaccepted status.
+
 The independent reviewer receives:
 
 - exact candidate path, SHA-256, bytes, and lines;

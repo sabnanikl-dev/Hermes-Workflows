@@ -46,6 +46,7 @@ Do not use an old continuation, repair-cycle, or generic workflow approval as me
    Never infer broad scratch-worktree deletion from branch deletion alone.
 9. **Preserve tracker chronology.** If the tracker already records a verified “merge-ready but unmerged” checkpoint, do not rewrite it after merge. Append a later dated merge checkpoint with the merge commit, timestamp, ancestry, branch/worktree cleanup, and new boundary. Historical evidence remains true for the time it described.
 10. **Prerequisite completion is not successor adoption.** When a merged repair unblocks another issue only conditionally, update the dependent issue to say that the merge prerequisite is satisfied while preserving its current state and explicit adoption/rerun gate. Never infer downstream execution authority from the prerequisite merge approval.
+11. **Ordered multi-PR approval stays conditional at each head.** When Karan authorizes a reviewer to approve an ordered PR chain (for example, merge a baseline repair first and merge the dependent feature only after refresh), treat the instruction as authority for the stated sequence—not as permission to skip the dependency barrier. Merge and prove the prerequisite, update the dependent branch from the new base, rerun full exact-head deterministic gates and environment-specific smoke evidence, obtain the required fresh reviewer verdict on the new head, and only then merge/delete the dependent branch.
 
 ## Procedure
 
@@ -92,6 +93,14 @@ Execute the approved merge, then require all of the following:
 - closing-reference behavior matches the contract (`Refs #N` should not silently close umbrella issue `#N`).
 
 If these disagree, report an ambiguous or failed closeout—never “merged” from CLI exit alone.
+
+When tracker closeout depends on live behavior produced by an automatic post-merge deployment, add a runtime barrier before closing the tracker. Deployment success and public reachability prove publication, not feature behavior. For consent-gated analytics or similar integrations, require the feature's positive control as well as its negative controls: a stored choice, mounted provider, iframe, queue, or DOM marker does not prove external delivery.
+
+1. verify the exact merge commit's deployment/status is successful;
+2. probe the live source surface without following redirects first, recording status and exact `Location` for root, a nested path with query parameters, and any ordering-sensitive legacy path;
+3. prove path/query preservation and rule precedence from those first-hop headers;
+4. keep target reachability as a separate claim—an environment that cannot follow the canonical target does not erase valid first-hop redirect proof, but it also must not be reported as a fresh target-health pass;
+5. update durable knowledge only after the live behavior is observed, then check the final tracker gate and read back the completed state/comment.
 
 If branch/worktree cleanup is explicitly authorized, perform it only after the merge and base proof. Freeze the exact cleanup set first: branch-only deletion does not silently expand to detached reviewer/evidence worktrees.
 

@@ -109,4 +109,6 @@ Use tiered rollback instead of treating every failure as a DNS failure:
 7. Change DNS only with explicit approval.
 8. From a clean network/CI, verify HTTP→HTTPS, apex/www consolidation, live redirects, canonicals, indexability, and any preserved email path.
 9. Submit the canonical sitemap and re-inspect priority URLs in Search Console.
-10. Retire or redirect the temporary project alias.
+10. Re-check every provider/project alias that was used for production-stage proof. A canonical tag alone does not retire an HTTP-200 duplicate surface: require a permanent redirect to the canonical domain, an intentional provider `noindex` control with a documented reason, or a separately owned residual-risk decision.
+11. Before tracker closure, re-read the live issue body and comments separately. Evidence may have advanced in comments while acceptance boxes stayed stale; reconcile only proven criteria, and add an explicit unchecked residual gate or verified successor for any material risk discovered during closeout rather than marking Done from the original checklist alone.
+12. Retire or redirect the temporary project alias only under explicit mutation authority, then verify the external 3xx target and preserved path/query behavior before reporting closure.

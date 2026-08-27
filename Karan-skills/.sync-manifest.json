@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 88,
+  "skill_count": 86,
   "skills": [
     {
       "name": "adversarial-product-prd-tournament",
@@ -18,14 +18,14 @@
     {
       "name": "adversarial-technical-artifact-review",
       "path": "software-development/adversarial-technical-artifact-review",
-      "files": 7,
-      "sha256": "27e81c1aa15f4cdf31bbe7462a51efd516fe96fd9c725f17e220c14956096fea"
+      "files": 9,
+      "sha256": "6200661e404ebf84eb6fe984b2c7708359d9ba86511b3a8f47d5fe8ba7497af2"
     },
     {
       "name": "agent-execution-resilience",
       "path": "devops/agent-execution-resilience",
-      "files": 21,
-      "sha256": "dc0e2362e3635ec85af5ce446b1ad7c3754e31580c90744c5b9d366f4b555323"
+      "files": 22,
+      "sha256": "347f11f05b2ae95af26e7840022352251b6820f8867be9393d30283157d4656b"
     },
     {
       "name": "agent-workflow-contract-proofing",
@@ -38,6 +38,12 @@
       "path": "devops/agent-workflow-orchestration",
       "files": 22,
       "sha256": "ff7dd5c8f028481c58975ce6221f04971fb22320ce6e5ecb11f4c47409019cd9"
+    },
+    {
+      "name": "agentic-pr-lifecycle",
+      "path": "software-development/agentic-pr-lifecycle",
+      "files": 1,
+      "sha256": "8a74a4b6d4152b3467166aa50b88b14d3909dd01c3545b3d248968fb3a907fd1"
     },
     {
       "name": "agentic-pr-review-loop-recovery",
@@ -54,8 +60,8 @@
     {
       "name": "artifact-output-governance",
       "path": "productivity/artifact-output-governance",
-      "files": 7,
-      "sha256": "a1d5b6fd31fc507484dea283e069ff5c5541446e2f2e4c6087046421808957ae"
+      "files": 8,
+      "sha256": "32e8ea8fe21aeaf025f0300e0e2d5aa06f7ded4778f07ca7db2db7211893196d"
     },
     {
       "name": "autonomous-coding-agents",
@@ -138,8 +144,8 @@
     {
       "name": "deterministic-validator-review",
       "path": "software-development/deterministic-validator-review",
-      "files": 20,
-      "sha256": "377fea12d53019f8c755125dd726c2fc867a80441041ccbf83ea0597ea72d8ea"
+      "files": 21,
+      "sha256": "04789525a04dd469a3e326660bed5762ff22bd5f513b145a1432bdfb1381005d"
     },
     {
       "name": "email-action-workflow",
@@ -166,6 +172,12 @@
       "sha256": "431dec4fc3118809e74396a00e29df61ad395bd7f77f290268ccb3827a0637e2"
     },
     {
+      "name": "firecrawl-agent",
+      "path": "firecrawl-agent",
+      "files": 1,
+      "sha256": "3f4f17b7917c1337c5237ec3443d7151d73e93d16ed4bd7e041bbaaab3598689"
+    },
+    {
       "name": "firecrawl-interact",
       "path": "firecrawl-interact",
       "files": 1,
@@ -184,12 +196,6 @@
       "sha256": "137e42ec992894541b22884d41d000bdf6f695e160695256a36b854c624bfa3d"
     },
     {
-      "name": "frontier-gowild-watcher",
-      "path": "travel/frontier-gowild-watcher",
-      "files": 8,
-      "sha256": "caf56e07ff6cb0e8bf3852165c0dba6cc94e286ad42db9a769bfa0352f42b618"
-    },
-    {
       "name": "gateway-troubleshooting",
       "path": "devops/gateway-troubleshooting",
       "files": 5,
@@ -198,8 +204,8 @@
     {
       "name": "generated-artifact-proofing",
       "path": "software-development/generated-artifact-proofing",
-      "files": 8,
-      "sha256": "95dc93fd301721c81138937da866967d33448cc773e66a1821659e2e54dfb249"
+      "files": 10,
+      "sha256": "ea5c544417bf6a89a48eb3e5a7da88b6fbe6809abe6cae9d5c18753f156b52bb"
     },
     {
       "name": "github-issue-specs",
@@ -220,12 +226,6 @@
       "sha256": "ccd0938267507719932153341239749f35b78f84900f4680fdd845b1162471a5"
     },
     {
-      "name": "godmode",
-      "path": "red-teaming/godmode",
-      "files": 9,
-      "sha256": "aefc4e16fea9df5707de6c839a962843f3603d8a586f5d99db13d15fd6d71e7b"
-    },
-    {
       "name": "godmode-harness-creation",
       "path": "devops/godmode-harness-creation",
       "files": 6,
@@ -234,20 +234,20 @@
     {
       "name": "google-analytics-ga4",
       "path": "productivity/google-analytics-ga4",
-      "files": 4,
-      "sha256": "9b74fb51a55a54eb3f28f0aacab45bdb817b5e8aa315f14bd5f0478903d7c138"
+      "files": 7,
+      "sha256": "d63b14a9e3e54445930a1c3e2a588206ff570e14a86bb0e65025e16bd5601389"
     },
     {
       "name": "google-business-profile-api-access",
       "path": "productivity/google-business-profile-api-access",
       "files": 3,
-      "sha256": "9e3282a583d1afdee97955535bddffa6b07a16224484be13eee90ad8663134ce"
+      "sha256": "02d2e3f193475acc76ea54be825f0cb6345debf79380995e84c028792a657111"
     },
     {
       "name": "google-search-console",
       "path": "productivity/google-search-console",
       "files": 4,
-      "sha256": "f79c9be613d87115e85fc15a336328bf3965c620a6b70f0704ae6d812ceeb63e"
+      "sha256": "d9f0d144d6b7d8818daf9ebd741eeb4d911cc00ffdbecb1f35cf6fa42722faa0"
     },
     {
       "name": "hermes-brain-wiki",
@@ -271,13 +271,13 @@
       "name": "integration-audit-review",
       "path": "software-development/integration-audit-review",
       "files": 2,
-      "sha256": "ecd8ea24cd9de008e8292e1e3684cabebad95a78bf1fae15b49e35496d3c7478"
+      "sha256": "a103c92aa8a169db61ebe7a563a27ab75b4dac772062d40b35573974911e8916"
     },
     {
       "name": "jmd-menswear",
       "path": "branding/jmd-menswear",
       "files": 20,
-      "sha256": "8c68490a055bce58b8d7ee973a6ee54acbc28d0f6270e43f210f4ffc841debf3"
+      "sha256": "941fbb8068f19b90c688e777725f91f9714a08c25ebcdb0754bafeb7f5996179"
     },
     {
       "name": "knowledge-memory-workflows",
@@ -286,16 +286,10 @@
       "sha256": "9a35fc06d6668ad518bf5cd3d8625e34a48525317073c9c90ef205ea35a02295"
     },
     {
-      "name": "kroger-grocery",
-      "path": "productivity/kroger-grocery",
-      "files": 3,
-      "sha256": "15e25085d62f9f0680a70c6594788e12f14075fef8d643ba06ee6f3b1733e763"
-    },
-    {
       "name": "linear",
       "path": "productivity/linear",
       "files": 2,
-      "sha256": "a826870426c3fc8af12577144c78106b2fb229050a6fe0c64893152294c838e4"
+      "sha256": "5731c167ad543060a07d369a4d399716e3b09a68a747a6447d537d9758f32f36"
     },
     {
       "name": "linear-issue-specs",
@@ -318,8 +312,8 @@
     {
       "name": "local-seo-visibility-ops",
       "path": "productivity/local-seo-visibility-ops",
-      "files": 24,
-      "sha256": "e8306571c746a17bad3760757135e7bfa07bc56c1e48585aaf49bf18adc2d0d0"
+      "files": 27,
+      "sha256": "43f01db7b3f12028052bd1dd36779aed92599fd35c1baa1c24cfdb67f0786a5f"
     },
     {
       "name": "local-web-preview",
@@ -349,7 +343,7 @@
       "name": "multi-agent-dev-workflow",
       "path": "multi-agent-dev-workflow",
       "files": 59,
-      "sha256": "de743eca098eedd8b8c175c9a6d9f40973e2a8c92845e9964b25a3b9afc49008"
+      "sha256": "d83b39f42f5b056d792ca9fed5faaf07700f258ec383ad3f388f723ff9b4c886"
     },
     {
       "name": "native-mcp",
@@ -382,12 +376,6 @@
       "sha256": "40f12b38b3457b4207bcac11282edd7c173500aa6ee3b91cb709e6c0c2a56a6f"
     },
     {
-      "name": "openrouter-image-analysis",
-      "path": "media/openrouter-image-analysis",
-      "files": 1,
-      "sha256": "6e47a70b4363ebeef254bf5ed8ab7efd2c67c303d306c5bf6f53da1dbd923a9d"
-    },
-    {
       "name": "ops-execution-harness",
       "path": "productivity/ops-execution-harness",
       "files": 4,
@@ -403,7 +391,7 @@
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
       "files": 82,
-      "sha256": "b63b0cfd20b511bbc677eab865b8b74fe39f9bf336f93aca0d2f9a17b3018bac"
+      "sha256": "09b2c4fb5ab2eae984cacfdc05c8e2c7437147832227638e1b8d02f7805f6d27"
     },
     {
       "name": "profile-isolated-work-execution",
@@ -412,16 +400,10 @@
       "sha256": "65c51e57b9919ebb7f32eebaa0e86ef298de1855097c1bae292703a6cb023040"
     },
     {
-      "name": "project-kickoff",
-      "path": "devops/project-kickoff",
-      "files": 6,
-      "sha256": "519a2b0cdc303f6df8b5a64bb2bccbae6530e054bf1777dcca894d0c5671fbf6"
-    },
-    {
       "name": "pull-request-review-preflight",
       "path": "software-development/pull-request-review-preflight",
-      "files": 3,
-      "sha256": "fd7cbafa1e0ee5a9fd65431f5c5e297ea5e332082b0918d431a13390197892cd"
+      "files": 4,
+      "sha256": "cdae8b86a3624f7507221f2e0fc0e9909ac8dc292d82aa45bff184340b0e8b00"
     },
     {
       "name": "research-intelligence-workflows",
@@ -434,12 +416,6 @@
       "path": "research/research-workflow",
       "files": 18,
       "sha256": "1995f606410bede1a52d7e52d087e7fdb0d7078285a0f9eac3a31f418d4e9094"
-    },
-    {
-      "name": "resume-tailoring",
-      "path": "productivity/resume-tailoring",
-      "files": 8,
-      "sha256": "80b8765b547b6902c0359be796052df659084ba124486fec2f172f540c6b68b9"
     },
     {
       "name": "review-artifact-relay-and-state-barriers",
@@ -462,8 +438,8 @@
     {
       "name": "scheduled-monitoring-workflows",
       "path": "devops/scheduled-monitoring-workflows",
-      "files": 4,
-      "sha256": "108795ceb7d0e81ec4338525f28454a2d4228b43cc5aa945c5a2db42ca9282ef"
+      "files": 6,
+      "sha256": "11016896cfe658c6fdd0d3874f20c683d359d970a0bb8bd1e84bb1a1e8241bf5"
     },
     {
       "name": "scoped-child-agent-execution",
@@ -484,6 +460,12 @@
       "sha256": "a9935ef31b790acaafc729e1c37584e03a732d1c264b409a78735432d694b115"
     },
     {
+      "name": "software-vendor-trust-assessment",
+      "path": "research/software-vendor-trust-assessment",
+      "files": 3,
+      "sha256": "d10f8b4025540ee26c1804667df55f7d646916bbc2ad872a61906be51d56d0f5"
+    },
+    {
       "name": "subagent-driven-development",
       "path": "software-development/subagent-driven-development",
       "files": 3,
@@ -492,14 +474,20 @@
     {
       "name": "tracker-artifact-closeout",
       "path": "productivity/tracker-artifact-closeout",
-      "files": 4,
-      "sha256": "09a2d1fd20656565acfef1b42334b4a3ba7d5c9c734ba0d1ddfd69935d071791"
+      "files": 8,
+      "sha256": "3ee8445b25401588dfb75edb39a641f1563ef9abc20ad1235b0259b1d8087757"
+    },
+    {
+      "name": "treg",
+      "path": "mcp/treg",
+      "files": 1,
+      "sha256": "8a901c796cc9df18e638e75dcbc5f20dc312492ac9caeb16ccd2482bf54320b2"
     },
     {
       "name": "verified-merge-closeout",
       "path": "software-development/verified-merge-closeout",
       "files": 6,
-      "sha256": "e76a5cec8391f7b393bc249db2aadb192c815235d5686461ca4938791f073758"
+      "sha256": "429495dc0ae431b308dd7fd8bc786808f648d1177f50f9e09c7a65243b850502"
     },
     {
       "name": "web-application-qa",
@@ -512,6 +500,12 @@
       "path": "obsidian-wiki-maintenance/wiki-health-check",
       "files": 1,
       "sha256": "e05071c1edb80801ce2a099ac0048272bcabbbe046b724a733820896c49266a1"
+    },
+    {
+      "name": "workflow-artifact-reconciliation",
+      "path": "devops/workflow-artifact-reconciliation",
+      "files": 2,
+      "sha256": "5a6d046bfbd329edef2af59c48609b89ef84fe7bc5a0823390df648fe362ed0e"
     },
     {
       "name": "workflow-pattern-adaptation",
@@ -530,12 +524,6 @@
       "path": "software-development/writing-plans",
       "files": 1,
       "sha256": "10f90617ee2ab1a78f157a48b9006d15a82761e2316bf6b360857c14a748a0d5"
-    },
-    {
-      "name": "xitter",
-      "path": "social-media/xitter",
-      "files": 2,
-      "sha256": "b2eaffd242853edc404f0fcbba47b0c9bd2c35db39a4866a07371ae806d232fa"
     }
   ]
 }

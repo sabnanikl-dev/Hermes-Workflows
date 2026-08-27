@@ -20,6 +20,7 @@ Do not start technical review until all of these are true:
 - local HEAD, remote branch head, PR `headRefOid`, and final PR commit are identical;
 - live issue-closing relationships match the lifecycle contract;
 - canonical verification was run at that exact head;
+- committed evidence provenance survives the repository's intended merge strategy and feature-branch deletion, rather than resolving only because the PR ref still exists;
 - the review packet is credential-free, complete, digest-verifiable, and read-only;
 - reviewer worktrees are detached, clean, and bound to the packet head;
 - reviewer write needs are deliberately classified as read-only, `/tmp` evidence-only, or bounded disposable-worktree writes.
@@ -30,7 +31,8 @@ Do not start technical review until all of these are true:
 2. **Query live GitHub state.** Read the PR body, commits, `headRefOid`, final commit, closing references, base/head names, draft state, mergeability/checks, reviews, comments, inline comments, and review threads.
 3. **Prove exact-head equality.** Require local = remote = PR head = final PR commit. Stop on any mismatch.
 4. **Prove issue behavior from structured state.** Inspect `closingIssuesReferences`; do not infer lifecycle behavior only from title/body keyword scans. If any required acceptance criterion can only be proven after merge or deployment (for example, production MIME behavior, crawler refresh, or validation on real external surfaces), a PR that uses `Closes #N` is lifecycle-blocked while that evidence remains open. Prefer `Refs #N`, keep the issue open through deployment, and close it only after recording the live evidence. If this is repaired by editing only the PR body, preserve exact-head implementation reviews: re-read the live body and `closingIssuesReferences`, confirm the code head is unchanged, and perform a metadata-focused recheck rather than restarting technical review.
-5. **Run canonical repository verification.** Capture real command output at the exact head. A green suite does not override metadata or contract blockers.
+5. **Run canonical repository verification.** Capture real command output at the exact head. A green suite does not override metadata or contract blockers. Run tracked-output evidence producers in a disposable exact-head worktree or preserve a clean snapshot; classify any generated diffs before restoring them.
+5a. **Prove evidence survives integration.** When committed archives or binders name Git commits, trees, or source revisions, test the repository's intended merge strategy and branch-deletion outcome. A binder that passes only because the feature ref keeps a branch-only commit reachable is not merge-ready. Require a fresh post-integration form to stay green, or obtain Karan's explicit approval for a commit-preserving strategy. See `references/squash-safe-evidence-provenance.md`.
 6. **Prepare isolated review worktrees.** Use clean disposable detached worktrees at the exact head. Reviewer processes receive no builder session history or mutation authority.
 7. **Freeze the adapter-native credential-free packet.** Include the issue/PR contract, exact-head identity, all review surfaces, checks, changed paths, canonical verification output, and UI evidence manifest when applicable. If the repository owns a packet builder, binding string, schema validator, or lane sequence field, use that implementation directly; a structurally rich lookalike packet is not interchangeable with the adapter's protocol.
 8. **Verify packet integrity and launch compatibility.** Hash payloads without self-referential checksum entries, record the manifest digest outside the packet, make the packet read-only, and exercise the exact reviewer adapter's cheap preflight/binding checks before spending a model run.
@@ -47,6 +49,8 @@ Stop review launch when:
 - the packet is a hand-built approximation that does not satisfy the repository adapter's canonical binding/schema/sequence checks;
 - the checksum manifest cannot verify its payloads;
 - the reviewer needs unsafe sandbox expansion or credentials merely to run tests;
+- committed evidence depends on a branch-only Git object that the intended squash/rebase/delete lifecycle will discard;
+- a canonical evidence producer rewrites tracked files and the operator has not classified those diffs as semantic changes versus generated timestamp, external-placeholder, or encoding churn;
 - a disposable worktree is dirty before review;
 - the PR changed after packet generation.
 
@@ -63,6 +67,7 @@ Classify environment-only test failures separately from product failures. A revi
 
 - `references/metadata-linkage-packet-and-sandbox-pitfalls.md` — hidden issue-closing linkage recovery, checksum-manifest construction, and read-only reviewer temp-file policy.
 - `references/adapter-native-packets-and-live-transport-smoke.md` — canonical repository packet protocols, cheap adapter preflight, exact shipped-adapter smoke, and per-lane ordered packet refresh.
+- `references/squash-safe-evidence-provenance.md` — prevent branch-only evidence bindings from breaking after squash/delete, prove post-integration durability, and handle tracked-output producer churn safely.
 
 ## Verification certificate
 

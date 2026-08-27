@@ -216,6 +216,18 @@ print(service.sites().list().execute())
 
 A working property can initially return zero Search Analytics rows and populate later. Treat this as **data unavailable at capture time**, never proof of zero traffic.
 
+### Customer-demand / page-roadmap pulls
+
+When a page roadmap needs actual customer queries rather than only a migration total:
+
+1. Pull both `dimensions: ["query"]` and paired `dimensions: ["query", "page"]` over the same explicitly labeled window. Add `page` and `date` responses when destination normalization and the actually populated cohort matter.
+2. The local `scripts/gsc-api.py` helper may expose only one dimension at a time. For paired data, reuse its refresh/tokeninfo/API helpers in a temporary read-only script and POST the multi-dimension request directly; use `rowLimit: 25000` plus `startRow` pagination until a short page is returned.
+3. Use the `date` response to state the observed first/last populated dates. A 480-day request can legitimately expose only a recent cohort; report both requested and observed windows.
+4. Separate branded queries before ranking page demand. Document the classification rule and preserve full query rows for auditability.
+5. For domain properties, normalize HTTP/HTTPS (and the intended canonical host) before destination ranking, while preserving raw source URLs in machine-readable evidence.
+6. Never add or expect parity across query, query×page, page, and date totals. Each response is independently aggregated and may be privacy-thresholded.
+7. Treat legacy-site queries as retention evidence, not demand proof for net-new positioning pages that lacked equivalent historical destinations.
+
 When a pre-cutover recheck begins returning rows:
 
 1. Re-run the same property with the same reporting lag and dimensions used in the original capture (at minimum `page`, `query`, and `date`; add `device`/`country` when the baseline calls for them).

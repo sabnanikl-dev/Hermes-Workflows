@@ -59,9 +59,26 @@ Record:
 
 Treat workflow JSON, automation code, schema docs, fixtures, generator, samples, README/SOP, and PR claims as one contract family.
 
+#### Bind negative-source claims to captured evidence
+
+A report may say that no change, incident, definition update, or historical event was found only when the searched source corpus is reconstructable. Require an immutable locator or captured artifact for each source-specific negative claim such as “the captured changelog documents no change.” A metric-definition page is not interchangeable with a changelog, and cautious qualifiers such as “not ruled out” do not cure invented provenance. If no captured search artifact exists, narrow the statement to what the available evidence directly supports—for example, differentiated series behavior may argue against a whole-pipeline loss while leaving a component-specific reporting change untested.
+
+For fresh-session reconstruction, verify both directions:
+
+- every cited evidence artifact exists and hashes to the claimed identity;
+- every source-specific factual clause can be traced to one of those artifacts rather than merely sounding compatible with the conclusion.
+
+#### Protect exact candidate bytes during review
+
+Hash the candidate before running any generator, validator, or helper. Determine whether each command is a read-only binder or a producer that rewrites timestamps, generated reports, evidence sidecars, or status readbacks. Run producers only in a disposable copy/designated evidence worktree unless regeneration is explicitly in scope. After every command that could write, re-hash the candidate and inspect worktree changes before continuing.
+
+If a review command causes incidental churn in the canonical checkout, restore only review-induced paths without touching pre-existing user changes, reconstruct the exact candidate bytes when necessary, and require the original digest before issuing the verdict. A validator exit `0` is not enough if the command changed the artifact under review. See `references/negative-claim-provenance-and-review-byte-preservation.md` for the claim matrix and recovery sequence.
+
 ### 2. Run a producer-shaped probe
 
 Extract or reconstruct representative payloads in the producer’s actual shape. Feed them directly to the consumer and verify that required identity, counts, reasons, failures, guards, and timestamps survive.
+
+A required field being nonempty is not proof that its provenance survived. For every safety- or decision-bearing normalized field, independently derive the expected value from the raw request/response and compare semantic equality row by row. Pay special attention to fields that legitimately vary across a panel—geography, requested/used location, coordinates, query, device, method, and timestamp—because a hardcoded plausible default can make every schema assertion pass while falsifying most observations. Include a cross-row variation probe: when raw rows contain multiple distinct values, normalized rows must preserve the corresponding distinctions rather than collapse them to one repeated label. Treat semantic provenance mismatches as blockers when the governing contract requires accurate per-observation evidence.
 
 Do not stop at the post-routing collectors. Enumerate and execute every real failure-producing stage: discovery/listing, normalization, planning, import/create, update/restore, archive, and guard/abort. Reconcile aggregate failure counts against detailed rows or an explicitly rendered non-file failure class. A flat producer feeding a nested-only consumer is a blocker even when nested fixture tests pass; so is a producer that counts planning failures but omits them from `runtimeFailures` or the equivalent detail surface.
 
@@ -155,6 +172,8 @@ For reusable checklists and probe recipes:
 - `references/exact-head-copy-review-reports.md` — exact-revision public-copy diff extraction, contiguous edit-run/card multiset accounting, surface-aware text-fidelity checks, qualifier decision hotspots, interaction/privacy probes, read-only in-memory print proof, and returned owner-decision packet ingestion with approved-item no-drift handling.
 - `references/portable-interactive-review-state.md` — explicit decision semantics, local-state migration, self-contained HTML export via embedded IDs and synchronized checkbox attributes, mobile share/download fallback, and isolated-storage reopen verification.
 - `references/evidence-inheritance-across-harmless-head-changes.md` — preserve expensive artifacts across checker/docs-only head changes by proving the complete controlling inputs are byte-identical, retaining original-head provenance, and freezing a fresh current-head packet.
+- `references/external-evidence-packet-exact-byte-audit.md` — independently re-hash manifests, reconstruct raw/frozen provider semantics, prove cross-provider identity and geography, reconcile spend/incidents, assess dead callback locators at the actual privacy boundary, and reproduce artifacts after relocation.
+- `references/negative-claim-provenance-and-review-byte-preservation.md` — require reconstructable source corpora for “no change found” claims, distinguish binders from mutating producers, and recover exact candidate bytes after incidental review churn without erasing pre-existing work.
 
 ## Pitfalls
 
@@ -169,6 +188,8 @@ For reusable checklists and probe recipes:
 - Running the old branch test command after a semantic conflict instead of the complete current-main suite.
 - Reusing screenshots/PDFs after a head change without proving every controlling product/runtime/style/fixture/producer input is byte-identical, rerunning the binder, and retaining the original evidence-head provenance.
 - Treating a high validator/check count as proof that the adversarial model is complete.
+- Claiming that a captured changelog, incident history, or deployment ledger showed no relevant change when only a current definition/status page is preserved; source-type mismatch is invented provenance even when the conclusion is hedged.
+- Running tracked browser/evidence producers in the canonical review checkout without immediately diffing or restoring their timestamp-, ordering-, JSON-, or screenshot churn. Producers belong in a disposable/designated evidence worktree; binders belong in read-only exact-head gates. If behavior-controlling bytes changed, intentionally regenerate and commit/rebind the artifacts. If they did not, restore producer churn before reviewer launch and do not call the output byte-reproducible merely because the binder passes.
 - Testing only post-routing failures while normalization/planning failures contribute to aggregate counts but disappear from detailed rows.
 - Making archive totals reconcile by decrementing the first nonzero reason when the failed item’s reason is absent or invalid.
 - Scanning only whitespace-delimited or unquoted secret forms while quoted JSON, escaped values, composite IDs, or parenthesized phone PII survive.

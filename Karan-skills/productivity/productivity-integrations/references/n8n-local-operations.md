@@ -20,9 +20,33 @@ Use these notes when the user asks to run or access a local n8n server from Herm
 3. Verify readiness independently:
    ```bash
    lsof -nP -iTCP:5678 -sTCP:LISTEN || true
-   curl -sS -I http://127.0.0.1:5678/ | sed -n '1,12p'
+   curl -sS -I http://127.0.0.1:5678/
    ```
    Report the local URL only after an HTTP `200 OK` or equivalent reachable response.
+
+## Updating and running a published workflow on n8n 2.26.x
+
+For a live workflow update, export and back up the current workflow/database before mutation. Preserve the live export's credentials, settings, schedule, IDs, and activation state; apply only the reviewed graph transform rather than importing a sanitized credential-free repository artifact directly.
+
+Important n8n 2.26.x behavior:
+
+- `import:workflow` **deactivates** an imported workflow, even when the JSON says `active: true`.
+- Restore activation with `publish:workflow --id=<workflow-id>` after import, then restart n8n. The deprecated `update:workflow --active=true` should not be the default.
+- Independently export the workflow after import/publish and verify active state, node count, credential-reference shape, schedule, absence of pin data, and the reviewed graph change.
+- Stop the running n8n server before CLI execution. Otherwise the CLI's internal task broker can fail because port `5679` is already occupied.
+- `n8n execute --id=<workflow-id>` requires an `Execute Workflow Trigger`; a schedule-only workflow fails with `Missing node to start execution`.
+
+Safe controlled-run pattern for a schedule-only production workflow:
+
+1. Stop the tracked n8n server.
+2. Export the exact published workflow as the restore artifact.
+3. Prepare a temporary runnable copy by adding only one `Execute Workflow Trigger` wired to the normal first processing node; set the temporary copy inactive.
+4. Import the temporary copy and run `n8n execute --id=<workflow-id>` with the approved production environment and a non-default broker port if needed.
+5. Use a trap/finally path to re-import the exact restore artifact and run `publish:workflow --id=<workflow-id>` even when execution fails.
+6. Export/read back the restored workflow and prove the temporary trigger is absent, the reviewed graph is present, credentials/schedule are unchanged, and the workflow is active.
+7. Restart n8n, verify `/healthz` and the `Activated workflow ...` log line, then verify the saved execution and downstream data independently.
+
+Never leave a temporary trigger, test folder ID, pin data, inactive schedule, or unverified import behind after the controlled run.
 
 ## Password / account handling
 

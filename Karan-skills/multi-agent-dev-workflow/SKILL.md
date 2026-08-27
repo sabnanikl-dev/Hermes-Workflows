@@ -1,7 +1,7 @@
 ---
 name: multi-agent-dev-workflow
 description: "Multi-agent GitHub development workflow — Claude builder, gpt-5.6-sol medium Reviewer A/B plus Hermes Integration Auditor, exact-head fix loops, and human merge approval."
-version: 2.2.12
+version: 2.3.0
 author: Hermes Agent
 ---
 
@@ -17,8 +17,10 @@ This is the class-level skill for repo-centric multi-agent development: Hermes o
 Keep generic code-review checklists in `code-review`; use this skill for orchestration across agents and PR workflows.
 
 Mode split:
-- Use this umbrella skill for **issue-to-PR / end-to-end build orchestration**: scoping an issue, starting a builder, opening a PR, and supervising the whole workflow.
-- Use `autonomous-pr-prover` for the narrower **existing-PR review/fix/re-review loop**: a PR already exists and the goal is to run independent reviewers, send unresolved blockers back to Claude Code, and verify merge-readiness without re-scoping the issue.
+- Use this umbrella skill for **issue-to-PR build orchestration**: scoping an issue, starting a builder, and producing a coherent verified PR.
+- Once a PR exists, transition to `risk-proportional-pr-orchestration`; its selected tier governs deterministic gates, reviewer depth, bounded repair, and exact-head merge-readiness proof.
+- Use `autonomous-pr-prover` only when Karan, the repository contract, or the selected Full Prover tier explicitly requires its durable artifact/readback lifecycle.
+- For the complete phase router, load `agentic-pr-lifecycle`.
 
 Support reference:
 - `references/hermes-originated-blockers-pr-bus.md` — when default Hermes independently finds a blocker that the builder or three reviewer lanes missed: post it as a signed PR-bus blocker, keep the Claude fix prompt pointer-first, refresh current-head evidence, and rerun Reviewer A, Reviewer B, and the Integration Auditor without broadening the PR into older unrelated cleanup.
@@ -74,7 +76,7 @@ Support reference:
 - `references/coverage-proof-closure-and-artifact-transport.md` — use for ontology/coverage-contract PRs and credential-free reviewer relays: require each `covered` cell to close over canonical evidence plus exact competency retrieval, distinguish test-owned from public runtime queryability, derive nested JSON case counts correctly, and extract reviewer artifacts only from exact delimiter lines before verified transport.
 - `references/bounded-exception-cycle-and-envelope-closeout.md` — use after the normal fix budget is exhausted: record a finite human-approved exception ledger; run a producer/consumer closure matrix before spending the exception; audit downstream comparison, sorting, diagnostics, and serialization whenever accepted input types broaden; stage exceptional review as **A → relay → B → relay → review-state supplement → Integration Auditor** when the Auditor certifies reviewer state; treat any reproducible P0/P1 as blocking despite split votes; handle provider no-verdicts, scratch metadata, machine-derived counts, and exact-head merge-readiness certification.
 
-**Current-workflow override for legacy references:** several support references predate the Integration Auditor and hardened credential relay. Preserve their specialized test/recovery mechanics, but (a) any code/docs/fixtures/generated/CI head change requires Reviewer A, Reviewer B, **and** the Hermes Integration Auditor to produce fresh current-head outcomes unless Karan explicitly authorizes a reduced path, and (b) any legacy instruction to inject `GH_TOKEN` into Codex/Hermes reviewer children or require direct reviewer posting is superseded. Reviewer children receive no GitHub token; default Hermes performs the disclosed relay after exact-head verification.
+**Current-workflow override for legacy references:** several support references predate risk-proportional review routing and hardened credential relay. Preserve their specialized test/recovery mechanics, but (a) once a PR exists, `risk-proportional-pr-orchestration` selects the governing review tier; fresh A/B plus Integration Auditor outcomes are required only when that tier or Karan explicitly requires them, and (b) any legacy instruction to inject `GH_TOKEN` into Codex/Hermes reviewer children or require direct reviewer posting is superseded. Reviewer children receive no GitHub token; default Hermes performs the disclosed relay after exact-head verification.
 
 ## When to Use
 
@@ -82,7 +84,7 @@ Karan says "work on issue #42". Default Hermes orchestrates Claude Code as build
 
 This skill is best for **Hermes-orchestrated repo-centric GitHub workflows** where default Hermes directly runs Claude Code plus the hardened `codex-reviewer` A/B and `reviewer` Integration Auditor launchers from isolated worktrees.
 
-If the PR is already open and Karan wants only review → fix → re-review until merge-ready, load `autonomous-pr-prover` instead of carrying the full issue-to-PR flow.
+If the PR is already open, load `risk-proportional-pr-orchestration` instead of carrying the full issue-to-PR build flow. Escalate from that router to `autonomous-pr-prover` only when Full Prover is explicitly selected.
 
 ### Hermes workflow vs GodMode workflow
 
@@ -118,10 +120,10 @@ For dashboard-first v1, each lane should be visible and directly addressable in 
 3. All work tracked via GitHub Issues (the task board), with Linear as parent/client tracker when applicable
 4. Human gives go/no-go. Hermes may prepare/verify merge state, but Karan retains final merge authority unless he explicitly approves Hermes to merge.
 5. **Self-review first** — the executing agent must review its own diff before opening the PR for cross-review.
-6. **Automatic exact-head proof loop after PR open** — Hermes binds the run to the live PR’s `headRefOid`, runs repository-native gates (and configured visual/browser gates), then runs Reviewer A → Reviewer B → the isolated Hermes Integration Auditor on that same head. Hermes verifies the artifacts, classifies only concrete contract/correctness/safety blockers, and freezes the valid blocker ledger. Claude Code receives fresh context in an isolated worktree and may repair **only** that ledger within the approved cycle budget. After any push, Hermes verifies the local commit, remote branch, PR head, commit list, builder identity, and signed fix comment through GitHub; all earlier gates and verdicts are stale, so the entire proof loop repeats on the new exact head. When no blockers remain, Hermes reconciles every review, comment, and inline thread. Ambiguous or unreconciled feedback is `needs-Karan`; only a final live-state/artifact/identity/clean-worktree verification can produce `merge-ready` advice. Default Hermes does not substitute its own implementation for the builder lane except under an explicitly approved emergency workaround.
-7. **Independent Integration Auditor** — default Hermes must not substitute its own in-context review for the isolated `reviewer` profile. The auditor uses `integration-audit-review`, receives no GitHub credential, performs no external mutation, and returns a prepared signed artifact body to default Hermes for exact-head verification, disclosed transport-only relay, and adjudication. Default Hermes remains the final integrator; the auditor is not Reviewer C merge authority.
-8. **Visual QA before human review** — for frontend/UI work, launch the Integration Auditor with task-scoped `browser` and `vision` toolsets. It must screenshot/inspect the affected rendered surface at the exact PR head before default Hermes reports to Karan. Screenshot proof must show the changed page/section/component, not GitHub status. For GodMode/Electron UI changes, a Vite renderer preview is acceptable for visual/layout/disabled-state sanity, but it does **not** replace `npm run smoke` when preload/main/IPC/PTTY wiring is touched; see `references/electron-renderer-preview-visual-qa.md`.
-9. **One cycle = review + fix**. Max 2 cycles total (initial build + 2 review/fix rounds). Escalate to Karan if not resolved.
+6. **Phase transition after PR open** — Hermes verifies the builder push, resolves the live PR and exact `headRefOid`, then hands review control to `risk-proportional-pr-orchestration`. That skill selects the smallest honest tier, runs repository-native and relevant visual/browser gates, chooses the necessary reviewer lanes, adjudicates findings, freezes one blocker ledger, and governs bounded exact-head repair/re-proof.
+7. **Independent evaluation where the tier requires it** — generation and evaluation remain separate. Standard review normally uses independent A/B lanes; High adds a dependent Integration Auditor when composition risk justifies it; Routine may use one focused reviewer; Full Prover is exceptional. Default Hermes must not substitute its own in-context opinion for a reviewer lane required by the selected tier.
+8. **Visual QA when behavior is visual** — frontend/UI changes require fresh exact-head desktop/mobile evidence when the acceptance criteria make rendered behavior material. For GodMode/Electron UI changes, a Vite renderer preview is acceptable for visual/layout/disabled-state sanity, but it does **not** replace `npm run smoke` when preload/main/IPC/PTTY wiring is touched; see `references/electron-renderer-preview-visual-qa.md`.
+9. **Finite repair budget** — use the repair cap chosen by `risk-proportional-pr-orchestration`; escalate to Karan instead of silently widening scope or creating checker/framework churn.
 10. **Harness over prompt bloat** — the opened project harness, issue, PR, and comments are source of truth. Default Hermes should use short role commands and improve repo docs/harness when repeated context is needed.
 
 ## The Single Command Flow
@@ -135,11 +137,11 @@ If the contract is incomplete or conflicts with repository rules, stop for Karan
 ↓
 Trusted Claude Code builder reads the contract → implements → self-reviews → tests → commits → opens/updates a PR
 ↓
-pr-prover: Hermes inspects the live PR and binds the run to its exact `headRefOid`
+Review phase: load `risk-proportional-pr-orchestration`; select and record the smallest honest tier
 ↓
-Repository-native gates (+ configured browser/visual gates)
+Repository-native gates (+ material browser/visual gates)
 ↓
-Reviewer A → Reviewer B → Integration Auditor, all pinned to that exact head
+Run only the independent reviewer and integration lanes required by that tier, pinned to the exact head
 ↓
 Hermes verifies artifacts, classifies findings, and freezes the valid blocker ledger
 ↓
@@ -340,9 +342,9 @@ Fresh session every time. No `--continue`. Context is loaded from files, not fro
 
 **Permission boundary:** For non-interactive builders, use `--permission-mode dontAsk` plus a task-scoped `--allowedTools` list so unlisted actions fail closed without prompting. The Node/static-site command above is the default; add only exact repo-native command families required by documented verification (for example `Bash(pnpm *)` or `Bash(pytest *)`). Never use Claude’s blanket `--dangerously-skip-permissions` flag merely to avoid prompts: it grants unnecessary authority and can trigger Hermes’ own security approval layer.
 
-## Review Sessions (Reviewer A + Reviewer B + Hermes Integration Auditor)
+## Review Sessions (Tier-Selected Reviewer Lanes)
 
-When the user invokes `multi-agent-dev-workflow`, run all three reviewer lanes before reporting merge-readiness unless Karan explicitly authorizes a reduced path.
+Once the PR is open, load `risk-proportional-pr-orchestration`. Use the detailed lane mechanics below only for reviewer lanes required by its selected tier. Do not launch all three merely because this build skill was used.
 
 ### Reviewer runtime and packet gate
 
@@ -354,7 +356,7 @@ Every reviewer process MUST use `gpt-5.6-sol` with `medium` reasoning. Do not re
 | Codex Reviewer B | Architecture, maintainability, docs/spec drift, harness compliance, scope | `gpt-5.6-sol`, medium | Signed PR conversation-comment body |
 | Hermes Integration Auditor | AC/claim coverage, code/schema/spec/docs/CI parity, review-state reconciliation, generated artifacts, cross-engine assumptions, PR metadata, exact-head visual evidence | hardened `reviewer` wrapper, `gpt-5.6-sol`, medium | Signed PR conversation-comment body |
 
-Default Hermes first prepares an immutable, credential-free review packet containing the repository/PR identity, packet timestamp, exact `headRefOid`, issue/PR contract, reviews/comments/threads/checks, baseline output, and visual-evidence manifest when applicable. All three lanes inspect that packet and the same disposable exact-head worktree. Reviewer children receive no GitHub token and perform no external write.
+Default Hermes first prepares an immutable, credential-free review packet containing the repository/PR identity, packet timestamp, exact `headRefOid`, issue/PR contract, reviews/comments/threads/checks, baseline output, and visual-evidence manifest when applicable. Every lane required by the selected tier inspects that packet and a disposable exact-head worktree. Reviewer children receive no GitHub token and perform no external write.
 
 An authorized multi-agent/reviewer loop already covers refreshing its dedicated disposable detached review worktree to the current exact head and launching the read-only reviewer lanes. Do not ask Karan for a separate approval to run Reviewer A/B/the Integration Auditor or to perform that disposable worktree refresh. Avoid inline shell heredocs in prep commands because terminal smart approval may misclassify them as a fresh script-execution risk; prefer existing scripts, `python -c`, or `write_file` followed by a separate bounded invocation. Preserve explicit approval gates for merges, deploys, destructive changes outside the disposable worktree, authority expansion, and external mutations not covered by the authorized workflow.
 
@@ -402,7 +404,7 @@ After each child exits, default Hermes:
 4. submits Reviewer A's formal state and Reviewer B/Auditor's signed conversation comments under the verified reviewer identity;
 5. marks the posts as transport-only relays, reads each artifact back, and verifies its role signature/head.
 
-When all lanes share `karanagent1`, Reviewer A owns formal `CHANGES_REQUESTED` / `APPROVED` state; Reviewer B and the Integration Auditor use separately signed conversation comments. After a new head, all three produce and default Hermes relays fresh current-head outcomes; stale artifacts do not count.
+When required lanes share `karanagent1`, Reviewer A owns formal `CHANGES_REQUESTED` / `APPROVED` state; Reviewer B and the Integration Auditor use separately signed conversation comments. After a new head, every lane required by the selected tier produces and default Hermes relays a fresh current-head outcome; stale artifacts do not count.
 
 - Reviewer prompts, packets, and child environments contain no `GH_TOKEN`, Linear key, messaging token, deployment credential, or unrelated parent-shell secret.
 - Use `codex-reviewer` and `reviewer`; direct `codex exec --dangerously-bypass-approvals-and-sandbox` and direct `hermes -p reviewer` are not accepted workflow launch paths.
@@ -439,15 +441,15 @@ env -u GH_TOKEN claude --model 'claude-opus-5' --print \
 
 ### 5.4 Loop Termination
 
-- **One cycle = review + fix.** Max 2 cycles total (initial build + 2 review rounds = up to 3 review passes).
-- **Three-lane merge-ready gate.** The current `headRefOid` needs zero-blocker artifacts from Reviewer A, Reviewer B, and the Hermes Integration Auditor, each produced on `gpt-5.6-sol` with medium reasoning. Default Hermes must verify artifact identity, model/reasoning signature, live checks/threads, and material findings before recommending merge.
-- **Head changes invalidate review.** Code, docs, fixtures, generated artifacts, schema, or CI changes normally require all three lanes to re-review the new exact head. A PR-body-only correction on an unchanged code head may use a metadata-focused auditor pass plus the reviewer lane whose finding concerned the metadata.
-- If issues persist after 2 fix attempts, escalate to Karan: "This issue is hitting complexity we didn't anticipate. Needs your input."
-- **Cycle-limit exceptions are explicit and scope-bound.** A general completion instruction such as “get this merge-ready” does **not** by itself authorize exceeding the two-cycle cap. At the cap, show Karan the remaining blocker class and ask for an explicit exceptional-cycle decision. If Karan authorizes one, record whether the grant covers only enumerated reproductions or one class-wide closure attempt, plus allowed surfaces and maximum additional cycle count. Do not treat that approval as permanent permission to keep looping. Before the builder starts, run the closure matrix in `references/bounded-exception-cycle-and-envelope-closeout.md` across every duplicated/compiled field the runtime consumes; fixing only the named examples invites serial bypass discovery. If the fix broadens an accepted input domain (for example, strings → arbitrary JSON scalars), census every downstream consumer—including comparison, sorting, failure formatting, and JSON/human rendering—and exercise both success and diagnostic paths with heterogeneous controls before review. After the fix, independently verify the named probes, then run Reviewer A alone as the adversarial convergence gate. Launch Reviewer B and the Integration Auditor only after A returns zero blockers, unless they are needed to adjudicate A's finding. **This A-first sequencing is mandatory for exceptional and surgical cycles even when parallel launch would be faster; a generic “approved” does not waive it. Do not announce or launch the final triad until A has actually exited with a zero-blocker exact-head artifact.** A reproducible P0/P1 from one lane blocks merge even when the other lanes pass. A blocker beyond the ledger's class/surfaces/attempt count requires a new explicit decision. Never merge merely because an exception was granted.
+- **One cycle = review + fix.** Use the repair budget selected by `risk-proportional-pr-orchestration`; Routine/Standard normally get one repair cycle, High may get two, and further work requires an explicit bounded exception.
+- **Tier-selected merge-ready gate.** The current `headRefOid` needs zero validated blockers and fresh outcomes from every gate and reviewer lane required by the selected tier. Default Hermes must verify artifact identity, exact-head binding, live checks/threads, and material findings before recommending merge.
+- **Head changes invalidate review.** Code, docs, fixtures, generated artifacts, schema, or CI changes require every reviewer lane mandated by the selected tier to re-review the new exact head. A PR-body-only correction on an unchanged code head may use a metadata-focused recheck limited to the lane whose finding concerned the metadata.
+- When the selected repair budget is exhausted, escalate to Karan with the remaining blocker class and a bounded recommendation.
+- **Cycle-limit exceptions are explicit and scope-bound.** A general completion instruction such as “get this merge-ready” does **not** by itself authorize exceeding the selected tier’s repair cap. At that cap, show Karan the remaining blocker class and ask for an explicit exceptional-cycle decision. If Karan authorizes one, record whether the grant covers only enumerated reproductions or one class-wide closure attempt, plus allowed surfaces and maximum additional cycle count. Do not treat that approval as permanent permission to keep looping. Before the builder starts, run the closure matrix in `references/bounded-exception-cycle-and-envelope-closeout.md` across every duplicated/compiled field the runtime consumes; fixing only the named examples invites serial bypass discovery. If the fix broadens an accepted input domain (for example, strings → arbitrary JSON scalars), census every downstream consumer—including comparison, sorting, failure formatting, and JSON/human rendering—and exercise both success and diagnostic paths with heterogeneous controls before review. After the fix, independently verify the named probes, then run Reviewer A alone as the adversarial convergence gate. Launch Reviewer B and the Integration Auditor only after A returns zero blockers, unless they are needed to adjudicate A's finding. **This A-first sequencing is mandatory for exceptional and surgical cycles even when parallel launch would be faster; a generic “approved” does not waive it. Do not announce or launch the final triad until A has actually exited with a zero-blocker exact-head artifact.** A reproducible P0/P1 from one lane blocks merge even when the other lanes pass. A blocker beyond the ledger's class/surfaces/attempt count requires a new explicit decision. Never merge merely because an exception was granted.
 - **Do one closure census before spending an exception cycle.** For policy/authority migrations, follow `references/policy-migration-contract-sweep.md` and classify every current semantic/naming hit—including headings, schema keys, owner fields, JSON notes, generator passthroughs, validator messages, generated headers, and historical labels—before launching the exceptional builder or reviewers. Read long source packets from top to bottom: a correct policy section later in the file does not neutralize an earlier present-tense instruction. Do not burn one exception cycle per grep hit. Before the final handoff, complete the reference's exact-head merge-readiness certificate rather than inferring readiness from reviewer output.
 - **Before each re-review after a state transition, run a stale-state sweep.** Search the whole branch for the superseded status token, failure reason, capture method, and future-tense handoff wording. Include specs, source packets, build plans, and friction logs. Preserve explicitly labeled history, but synchronize every present-tense result/handoff statement. For browser-evidence work, follow `references/browser-qa-evidence-producer-validator-parity.md`.
 - **When the PR changes an authority or gate policy, expand the sweep beyond prose.** Inspect machine-readable instruction fields, candidate/allowlist consumption contracts, generator constants and metadata passthroughs, validator assertions, negative fixtures, runtime/file headers, HTML comments, generated artifacts, and PR metadata. Fix generator sources before generated output, add regression guards for instruction-bearing fields, and distinguish explicitly superseded history from current contracts. See `references/policy-migration-contract-sweep.md`.
-- **Include PR metadata in the stale-state sweep.** Re-read the live PR description after every fix cycle and compare its counts, ledger phases, commands/timestamps, artifact measurements, and verification claims to the exact current head. If the two normal code-fix cycles are exhausted and the sole remaining blocker is stale PR metadata, Hermes may make the narrow PR-hygiene correction on the unchanged head, read it back, and rerun only the affected reviewer lane; this is not permission for a third code cycle. See `references/evidence-ledger-recovery-and-pr-report-reconciliation.md`.
+- **Include PR metadata in the stale-state sweep.** Re-read the live PR description after every fix cycle and compare its counts, ledger phases, commands/timestamps, artifact measurements, and verification claims to the exact current head. If the selected code-fix budget is exhausted and the sole remaining blocker is stale PR metadata, Hermes may make the narrow PR-hygiene correction on the unchanged head, read it back, and rerun only the affected reviewer lane; this is not permission for an additional code cycle. See `references/evidence-ledger-recovery-and-pr-report-reconciliation.md`.
 - Hermes can short-circuit. If Hermes disagrees with a Codex finding (false positive), Hermes notes it in the summary and doesn't force a fix loop.
 
 ### 5.5 Hermes Subagent Delegation (read-only tasks)
@@ -480,9 +482,9 @@ Required pattern:
 2. Default Hermes reads those GitHub surfaces back before starting the fix cycle.
 3. The builder/fix prompt contains only the PR number, branch, issue number, and instruction to read the latest PR reviews/comments/threads and fix unresolved blocking findings only.
 4. Builder comments back on the PR with exactly which live PR blockers were fixed and the verification run.
-5. Default Hermes verifies the new commit, reruns all three reviewer lanes, and reads GitHub surfaces again.
+5. Default Hermes verifies the new commit, reruns every reviewer lane required by the selected tier, and reads GitHub surfaces again.
 
-Hermes may normalize blocker text for synthesis/audit and may include a compact fallback blocker capsule **only** if the builder cannot access GitHub directly or the relay cannot be completed. Label that as fallback data, point back to the PR as authoritative, and report the run as degraded/fallback rather than a clean PR-bus loop. If a reviewer finds a real blocker, preserve the exact actionable blocker, relay it before the fix cycle when possible, require a signed fix comment, verify the follow-up push, and rerun all three reviewer lanes on the new current head before saying merge-ready.
+Hermes may normalize blocker text for synthesis/audit and may include a compact fallback blocker capsule **only** if the builder cannot access GitHub directly or the relay cannot be completed. Label that as fallback data, point back to the PR as authoritative, and report the run as degraded/fallback rather than a clean PR-bus loop. If a reviewer finds a real blocker, preserve the exact actionable blocker, relay it before the fix cycle when possible, require a signed fix comment, verify the follow-up push, and rerun every reviewer lane required by the selected tier on the new current head before saying merge-ready.
 
 ### Separate reviewer GitHub identity and transport
 The dedicated reviewer identity remains separate from the builder/operator identity, but its credential is held by default Hermes only. Reviewer model processes receive no GitHub token.
@@ -496,7 +498,7 @@ For repo-local templates used by Hermes to dogfood the loop, prefer an explicit 
 
 ## PR Comment Signatures
 
-Every agent action on a PR must be signed. Claude normally acts as the builder/operator identity. All three reviewer lanes prepare separately signed artifacts; default Hermes transports those bodies under the separately verified reviewer identity after the child exits. Signatures and the transport disclosure preserve role provenance even when several lanes share one GitHub account.
+Every agent action on a PR must be signed. Claude normally acts as the builder/operator identity. Every reviewer lane used by the selected tier prepares a separately signed artifact; default Hermes transports those bodies under the separately verified reviewer identity after each child exits. Signatures and the transport disclosure preserve role provenance even when several lanes share one GitHub account.
 
 ### Signature Format
 
@@ -559,7 +561,7 @@ gh pr comment <N> --repo <owner>/<repo> --body-file /tmp/claude-fix-output.md
 - Material reviewer findings and live GitHub evidence are genuine and current
 - Conflicting findings are adjudicated as blocker, follow-up, false positive, or needs Karan
 - Builder fixes, remote pushes, current-head re-reviews, PR hygiene, merge state, issue closure, and branch cleanup are verified
-- Final go/no-go synthesis accurately represents all three reviewer lanes
+- Final go/no-go synthesis accurately represents every reviewer lane required by the selected tier
 
 ### What Karan checks (taste + vision)
 - Does it feel right?

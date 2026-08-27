@@ -65,6 +65,12 @@ Keep DNS-target classification separate from HTTP connection addressing. Named D
 
 Globalping may cap the captured response body. Choose a marker expected early in the document, and fail closed if the marker cannot be observed rather than treating response size as content proof.
 
+### Bounded tick and redacted evidence pattern
+
+Create the apex, redirect-host, and separately gated asset measurements back-to-back before polling them, then wait until every measurement is `finished`. This keeps one watchdog tick temporally bounded without serial creation/poll skew. Save the full API responses only to local temporary evidence files; derive the notification from a separate safe summary containing measurement ID, completed-probe count, status, server, TLS authorization, subject hostname, redirect location, and marker verdict. Never copy certificate blobs or DNS verification payloads into the alert.
+
+For SPF, DKIM, and ownership-verification TXT records, distinguish **historical preservation** from **current resolver agreement**. Byte-for-byte preservation requires comparison with a trusted pre-cutover snapshot (normalized values or hashes). Agreement between current authoritative and public resolvers proves only that the current value is present and consistently served. If the trusted baseline recorded presence but not the payload, report: “present and resolver-consistent; the prior execution evidence records it unchanged” rather than claiming a fresh byte-for-byte match.
+
 ## Local-network limitations
 
 When a previously documented local resolver, ISP, security layer, or transparent proxy makes the operator's machine an unreliable vantage point, do not use local curl/browser TLS as a rollback trigger. This exception must be narrow and evidence-backed: authoritative DNS plus fresh completed external probes decide public health. Do not generalize it into “local checks never matter.”

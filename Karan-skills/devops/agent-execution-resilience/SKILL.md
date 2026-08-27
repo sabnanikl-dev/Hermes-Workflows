@@ -32,6 +32,7 @@ Load this skill when:
 - a hardened launcher exits at usage/path/preflight boundaries before the agent starts;
 - live PR-preview acceptance evidence is blocked by Vercel deployment protection or a shell/environment boundary;
 - a preview, deployment, browser, or API gate attaches a credential to requests against an operator-supplied origin;
+- a builder cannot reach production but one reduced read-only observation can distinguish materially different repairs;
 - Linear/GitHub needs an auditable handoff rather than a vague progress note.
 
 ## Core invariants
@@ -74,6 +75,7 @@ Do not clean anything while another process may still be writing. Confirm proces
 - **Authentication/session mismatch:** verify the exact CLI's auth status and run a no-tool smoke. Preserve host OAuth/keychain state; remove explicit remote credentials and scrub descendants instead of blanking the entire environment.
 - **Reviewer timeout:** invalidate the lane result. Inspect artifacts/transcript only as leads, independently reproduce findings, and require a fresh reviewer after fixes.
 - **Sandbox unavailable:** if the approved mission requires a sandbox, fail closed and never continue unsandboxed merely because the task is in flight. If the mission explicitly trusts the scoped agent and does not require hostile-tenant isolation, do not manufacture a sandbox gate; use the trusted launch/readback path instead.
+- **Production observation unavailable to the builder:** if one reduced read-only observation can distinguish competing security/privacy repairs, keep the builder worktree clean, gather that observation through a trusted remote probe, bind it to a measurement handle, and resume the same lane. See `references/remote-production-diagnostics-handoff.md`.
 - **Unknown/partial side effect:** inspect the target system before retrying to prevent duplicate comments, pushes, or updates.
 
 ### 2.5 Distinguish launcher failure from a spent work cycle
@@ -290,3 +292,4 @@ This skill owns interruption recovery and proof continuity. `autonomous-pr-prove
 - `references/review-only-post-exception-triad.md` — preserve exhausted prover state for a truly review-only post-exception triad, reconcile new publisher comments by exact-post pin, and bind browser evidence to an immutable runtime commit.
 - `references/bounded-human-approved-exception-wrappers.md` — freeze one additional blocker-scoped builder authorization, handle empty instruction ledgers, prove the attempt guard, distinguish prelaunch errors from spent repairs, and stop after the final triad.
 - `references/post-edit-verification-denial-takeover.md` — preserve a bounded uncommitted candidate after tool-policy denial, independently verify it, commit only exact tested paths, and split successful transport from failed post-push verification.
+- `references/remote-production-diagnostics-handoff.md` — recover a cleanly stopped builder when a multi-region reduced read-only production observation can distinguish materially different security/privacy repairs, then resume the same lane without authority creep.

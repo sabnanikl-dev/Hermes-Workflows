@@ -136,8 +136,10 @@ curl -s -X POST https://api.linear.app/graphql \
 curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ issueSearch(query: \"bug login\", first: 10) { nodes { identifier title state { name } assignee { name } url } } }"}' | python3 -m json.tool
+  -d '{"query": "{ searchIssues(term: \"bug login\", first: 10) { nodes { identifier title state { name } assignee { name } url } } }"}' | python3 -m json.tool
 ```
+
+> **Schema note:** Linear deprecated `issueSearch(query: ...)`; use `searchIssues(term: ...)`. The bundled `linear_api.py search-issues` helper already uses the current field.
 
 ### Filter issues by state type
 ```bash

@@ -254,7 +254,7 @@ The 2026 reference overview highlights recurring posts through LocalPosts and re
 After API acceptance, start with **read-only visibility operations** before any profile mutation:
 
 1. Discover accounts/locations and verify the intended business profile.
-2. Audit profile completeness: categories, website URL, phone, service areas, hours, description, services, attributes, photos/media, and verification/status fields.
+2. Audit profile completeness: categories, website URL, phone, service areas, hours, description, services, attributes, photos/media, and verification/status fields. **Attribute pitfall:** Business Information `accounts.locations.list` does not expose current attributes through its location read mask. Fetch them separately with read-only `GET https://mybusinessbusinessinformation.googleapis.com/v1/locations/{locationId}/attributes`; do not interpret an absent `attributes` key in the location response as zero attributes.
 3. Pull performance metrics and search keyword impressions on a weekly/monthly cadence.
 4. Monitor review count, average rating, unanswered reviews, and recurring review themes.
 5. Draft LocalPosts, media upload plans, and review replies, but keep them approval-gated.

@@ -174,9 +174,11 @@ Required ending:
 Reviewed by: Hermes Integration Auditor profile
 Model: gpt-5.6-sol | Reasoning: medium
 PR: #<N> | Head: <full-sha>
+
+DONE: REVIEWER=INTEGRATION_AUDITOR STATUS=pass|fail|needs-human BLOCKING=<count> HEAD=<full-sha> ARTIFACT=relay-required
 ```
 
-Return the exact prepared body and mark `ARTIFACT=relay-required`. Default Hermes verifies that the live `headRefOid` still matches, resolves the reviewer credential outside the child process, performs a disclosed transport-only relay under the verified reviewer identity, and reads the artifact back. The reviewer must never discover or receive that token.
+The `DONE:` marker must appear exactly once inside the prepared artifact body as well as at the end of the reviewer's final output. This is required by `publish_integration_artifact.py` so the sidecar can validate status, blocker count, role, and exact head before publication. Return the exact prepared body and mark `ARTIFACT=relay-required`. Default Hermes verifies that the live `headRefOid` still matches, resolves the reviewer credential outside the child process, performs a disclosed transport-only relay under the verified reviewer identity, and reads the artifact back. The reviewer must never discover or receive that token.
 
 ## Output Contract
 

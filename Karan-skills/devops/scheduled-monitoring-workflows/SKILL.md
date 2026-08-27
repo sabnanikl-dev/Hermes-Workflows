@@ -53,6 +53,10 @@ live discovery or polling
 
 For script-only jobs, stdout is the delivery contract: non-empty output should already be the exact message; empty output should mean silence. For model-assisted jobs, constrain model output and independently enforce the important invariants in code.
 
+For local automations that depend on a long-running server, use the availability-ensure pattern in `references/local-service-availability-crons.md`: health/listener checks, read-only active-state and latest-execution verification, fail-closed port handling, and Hermes-tracked background startup without manually taking over the dependent workflow.
+
+When an approved reconciliation must run immediately, use `references/controlled-automation-reconciliation.md`: invoke the automation through its native runtime, restore the exact scheduled graph afterward, and verify target convergence independently without manually reproducing the automation's content work.
+
 For approved high-risk operations with finite monitoring windows—DNS cutovers, deployment promotions, migration switches, or certificate changes—use the executor/watchdog split and external-verification pattern in `references/time-bounded-live-operation-watchdogs.md`.
 
 For website DNS flips that must preserve mail and need independent HTTPS vantage points, also use `references/dns-cutover-external-verification.md`. It defines authoritative/public resolver quorums, old-TTL propagation handling, fresh completed Globalping evidence, deployed-feature-state checks, local-network limitations, and deadline/final-recommendation behavior.
