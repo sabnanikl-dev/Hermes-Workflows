@@ -108,6 +108,17 @@ Workflow when project status comes up:
 3. Keep `wiki/shared/projects/Project Status.md` as a high-level snapshot only if useful, not a full project tracker.
 4. Never move Karan OS/personal vault content into Hermes Brain; reference its canonical external path only when the boundary itself matters.
 
+### Pre-Write Routing Gate
+Before every durable create or substantial update:
+1. Route active execution state to Linear/GitHub/repository trackers.
+2. Route actual deliverables, working assets, code, and evidence to project directories or repositories.
+3. Route content primarily helping Karan think, decide, reflect, or manage personal life to Karan OS.
+4. Route durable business/operating context agents need to perform to Hermes Brain.
+5. Route repeatable executable procedures to the owning skill.
+6. If placement is genuinely ambiguous, do not file silently; recommend a canonical destination, alternatives, and discoverability effects, then ask Karan.
+
+Classify by primary consumer and canonical responsibility, not topic alone. Karan OS is Karan-owned and Hermes-assisted: write there only after an explicit capture, drafting, or maintenance request. If both vaults need part of the same concept, preserve one canonical source and create a bounded projection containing only its consumer/purpose, minimum approved statement, exclusions, and freshness trigger. Never mirror or bidirectionally synchronize the vaults by default. See `wiki/shared/infrastructure/Vault Ownership and Projection Standard.md`.
+
 ### Ingestion (New Source Document)
 1. Save source to `raw/` subfolder (immutable)
 2. Read and analyze for key entities/facts
@@ -157,6 +168,20 @@ $GOB properties format=json
 | Needs human curation | No | Yes |
 | Has a natural page name | No | Yes |
 
+## Skill Evolution (Wiki → Skills)
+
+Material behavior-changing skill edits follow the vault’s `wiki/shared/infrastructure/Skill Evolution Operating Standard.md` and are indexed in `wiki/shared/infrastructure/Skill Evolution Ledger.md`.
+
+1. Preserve the source/trace before interpreting it.
+2. Compile recurring experience into a lesson page with root cause, successful procedure, limits, and counterexamples.
+3. Search for the existing skill that owns the behavior; avoid near-duplicate skills.
+4. Propose one atomic patch and record its target, motivation, expected behavior, validation plan, and outcome in the ledger.
+5. Validate proportionally, then accept or roll back. Preserve rejected/inconclusive outcomes.
+6. Add `references/provenance.md` only for new or substantially evolved skills when local history will help future maintenance; do not mass-retrofit all skills.
+7. Keep execution context narrow: workers normally receive approved skills and task context, while wiki maintainers/proposers receive broader knowledge access.
+
+Never use skill evolution to broaden profile allowlists, credentials, tools, external mutation authority, or client-facing permissions without Karan/default-Hermes approval.
+
 ## NotebookLM as Research Substrate
 
 Karan's preferred architecture is: **NotebookLM is a leveraged research tool; Obsidian Hermes Brain remains the durable memory layer.** Do not create a generic "Hermes Research Brain" NotebookLM notebook by default. Instead:
@@ -189,6 +214,9 @@ Existing project directories that map into the wiki:
 
 ## Pitfalls
 
+- **Do not patch skills directly from raw traces by default.** Compile evidence into a durable lesson first, then make one attributed and validated skill change. High-severity security/authority incidents may use a single-event threshold but still require provenance and validation.
+- **Do not give workers the full wiki to improve training traces.** Broad knowledge can hide deficiencies in the executable skill and produce less diagnostic evidence.
+- **Rejected skill edits are durable knowledge.** Roll back the skill, not the lesson or ledger outcome.
 - **`.env` files are protected from `patch` tool writes** - you must use `terminal` to append/modify, or ask the user to edit manually. The `.env` credential file cannot be written to directly by the patch tool and is security-scanned.
 - **NEVER** read the entire wiki into context. Always start with index.md.
 - **NEVER** modify files in `raw/` - they are immutable sources.

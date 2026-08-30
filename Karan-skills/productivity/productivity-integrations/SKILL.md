@@ -39,6 +39,8 @@ For local n8n requests, start the server as a tracked background process, verify
 ### Google Workspace and email
 Respect contact-confirmation rules. For email actions, read the source thread/message before drafting or sending.
 
+For a Google Sheets link, prefer the authenticated `gws sheets` API before generic web extraction or browser access. A Google sign-in page from an unauthenticated web request is not proof that the sheet is inaccessible. Read spreadsheet metadata plus the relevant value ranges, then summarize or act from the returned workbook data; claim an access limitation only after the authenticated Workspace call fails too.
+
 ### Google Search Console API checks
 When asked whether Google Search Console API access works, verify the dedicated Search Console OAuth token and call the live API rather than relying on broad Google Workspace auth. `gws auth status` can prove the Google Workspace identity, but its OAuth grant may omit `webmasters.readonly` and the CLI may not expose Search Console resources. Use `references/google-search-console-api-checks.md` for the token paths, direct `webmasters/v3/sites` probe, Search Analytics smoke test, and common error interpretation.
 

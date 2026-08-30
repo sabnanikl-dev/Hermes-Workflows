@@ -31,13 +31,16 @@ logs/                        # daily logs: YYYY/MM/YYYY-MM-DD.md (max 3000 chars
 - Root should stay boring: `SCHEMA.md`, `index.md`, `log.md`, `raw/`, `wiki/`, `logs/`, and explicitly approved Obsidian support files only. Root-level markdown stubs are usually accidental and should be moved/deleted after confirmation.
 
 ## Page Creation Rules
-1. Use YAML frontmatter: title, domain, type, status, created, updated
-2. Use `[[wikilinks]]` for internal vault notes; use Markdown links only for external URLs
-3. Use Obsidian callouts for important warnings/decisions: `> [!warning] Title`
-4. Information-dense, no filler prose
-5. Read target page first before updating
-6. Update index.md after adding/removing pages
-7. Keep index.md under 3000 characters
+0. Pass the pre-write routing gate: active execution → Linear/GitHub/repo tracker; actual deliverable/evidence → project/repo; Karan's thinking/reflection/personal administration → Karan OS; durable agent-facing business context → Hermes Brain; executable procedure → skill. If ambiguous, recommend placement and ask rather than filing silently.
+1. Classify by primary consumer and canonical responsibility, not topic. Karan OS is Karan-owned and Hermes-assisted; write there only after an explicit capture, drafting, or maintenance request.
+2. If both vaults need part of a concept, keep one canonical source and create only a bounded projection with consumer/purpose, minimum approved statement, exclusions, and freshness trigger. Do not mirror or bidirectionally synchronize by default.
+3. Use YAML frontmatter: title, domain, type, status, created, updated
+4. Use `[[wikilinks]]` for internal vault notes. For cross-vault files, use plain paths or normal Markdown links and label the canonical source; vault-local wikilinks are not reliable across vaults.
+5. Use Obsidian callouts for important warnings/decisions: `> [!warning] Title`
+6. Information-dense, no filler prose
+7. Read target page first before updating
+8. Update index.md after adding/removing pages
+9. Keep index.md under 3000 characters
 
 ## Obsidian-Native File Types
 
@@ -116,6 +119,8 @@ For each page, extract `[[wikilinks]]` (handle `[[target|display]]` syntax). Bui
 **3g. Large-page triage** — flag pages over ~200 lines as candidates for review, but do not split living strategy documents solely because they are large. Karan explicitly wants `wiki/consultancy/business-plan.md` to remain a large living Papi AI strategy document. Apply size triage mainly to stale research dumps, transcripts, or pages that are hard to navigate.
 
 **3f. Index sync** — verify all wiki/ pages in index.md. Daily logs use markdown link format, not wikilinks.
+
+**3h. Cross-vault boundary drift (advisory only)** — flag personal identity, health, relationship, journal, or life-planning material in Hermes Brain; active task lists or stale status claims in either vault; concepts presented as canonical in both vaults; Karan OS material that has become approved reusable agent/business knowledge; unnecessary private reasoning in Hermes Brain; cross-vault copies with no canonical source; stale projections; retired paths; and cross-vault wikilinks that cannot resolve reliably. Produce a manifest and require Karan approval before any cross-vault move, deletion, split, or rewrite.
 
 ### Step 4: Execute fixes (in order)
 

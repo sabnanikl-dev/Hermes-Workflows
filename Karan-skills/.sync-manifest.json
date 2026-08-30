@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 86,
+  "skill_count": 88,
   "skills": [
     {
       "name": "adversarial-product-prd-tournament",
@@ -60,8 +60,8 @@
     {
       "name": "artifact-output-governance",
       "path": "productivity/artifact-output-governance",
-      "files": 8,
-      "sha256": "32e8ea8fe21aeaf025f0300e0e2d5aa06f7ded4778f07ca7db2db7211893196d"
+      "files": 9,
+      "sha256": "8479e94328a82d4bf094201bb7f273ea49a6251cc84177254ec0ae1b4e5d21b3"
     },
     {
       "name": "autonomous-coding-agents",
@@ -145,7 +145,7 @@
       "name": "deterministic-validator-review",
       "path": "software-development/deterministic-validator-review",
       "files": 21,
-      "sha256": "04789525a04dd469a3e326660bed5762ff22bd5f513b145a1432bdfb1381005d"
+      "sha256": "ca6464c552768c0125ddf7d1686f4bc156f0b2aa5b97c0c3b5a79155fd5a96cf"
     },
     {
       "name": "email-action-workflow",
@@ -252,8 +252,8 @@
     {
       "name": "hermes-brain-wiki",
       "path": "note-taking/hermes-brain-wiki",
-      "files": 1,
-      "sha256": "cad1d7775e17882fd3bcd8593057bcd62e029c114088010836736df8fe17be73"
+      "files": 2,
+      "sha256": "37fd478ee9b4f87a7a6c942aa853b06c774d19660524c1cc278fb2ce7b7e4196"
     },
     {
       "name": "ideation",
@@ -277,13 +277,13 @@
       "name": "jmd-menswear",
       "path": "branding/jmd-menswear",
       "files": 20,
-      "sha256": "941fbb8068f19b90c688e777725f91f9714a08c25ebcdb0754bafeb7f5996179"
+      "sha256": "c5747fa2b7e6f26294b4f4451cf680ae84d8053ba59a1dbb9728c40b034a7a18"
     },
     {
       "name": "knowledge-memory-workflows",
       "path": "note-taking/knowledge-memory-workflows",
-      "files": 8,
-      "sha256": "9a35fc06d6668ad518bf5cd3d8625e34a48525317073c9c90ef205ea35a02295"
+      "files": 9,
+      "sha256": "5def69846f340c3d6e9af6b68e2bc39839db6f96b9de6c08d0b42941fbc31936"
     },
     {
       "name": "linear",
@@ -320,6 +320,12 @@
       "path": "devops/local-web-preview",
       "files": 6,
       "sha256": "3ec0b4878db33d6e0c979df18a69fb7cb841064b4b273ab7523445a21c0e3c3b"
+    },
+    {
+      "name": "mcporter",
+      "path": "mcp/mcporter",
+      "files": 2,
+      "sha256": "409bade0c279f4bcb4b8d4deb2f563dde322a5e6dfc96513ebf1713e7160139f"
     },
     {
       "name": "media-content-workflows",
@@ -373,7 +379,13 @@
       "name": "obsidian-wiki-maintenance",
       "path": "obsidian-wiki-maintenance",
       "files": 3,
-      "sha256": "40f12b38b3457b4207bcac11282edd7c173500aa6ee3b91cb709e6c0c2a56a6f"
+      "sha256": "15f433ecf7753729505879ec01b26c0493237a69915be8c7457a07d340d43129"
+    },
+    {
+      "name": "openrouter-image-analysis",
+      "path": "media/openrouter-image-analysis",
+      "files": 1,
+      "sha256": "6e47a70b4363ebeef254bf5ed8ab7efd2c67c303d306c5bf6f53da1dbd923a9d"
     },
     {
       "name": "ops-execution-harness",
@@ -391,7 +403,7 @@
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
       "files": 82,
-      "sha256": "09b2c4fb5ab2eae984cacfdc05c8e2c7437147832227638e1b8d02f7805f6d27"
+      "sha256": "a1e0d19969996aac380bc2161052900615a6f3c54112bfde5e23af7f7b8b4993"
     },
     {
       "name": "profile-isolated-work-execution",
@@ -438,8 +450,8 @@
     {
       "name": "scheduled-monitoring-workflows",
       "path": "devops/scheduled-monitoring-workflows",
-      "files": 6,
-      "sha256": "11016896cfe658c6fdd0d3874f20c683d359d970a0bb8bd1e84bb1a1e8241bf5"
+      "files": 7,
+      "sha256": "166507c160173fc3346f4a7ff7ac33b0c896ac3d076babe3f672848e37e6a714"
     },
     {
       "name": "scoped-child-agent-execution",
@@ -487,7 +499,7 @@
       "name": "verified-merge-closeout",
       "path": "software-development/verified-merge-closeout",
       "files": 6,
-      "sha256": "429495dc0ae431b308dd7fd8bc786808f648d1177f50f9e09c7a65243b850502"
+      "sha256": "6b82fb4a50afec7754ac5dc934fad9dc941a9047d1132468f316747edcad6544"
     },
     {
       "name": "web-application-qa",
@@ -499,7 +511,7 @@
       "name": "wiki-health-check",
       "path": "obsidian-wiki-maintenance/wiki-health-check",
       "files": 1,
-      "sha256": "e05071c1edb80801ce2a099ac0048272bcabbbe046b724a733820896c49266a1"
+      "sha256": "a71559a27b717a95b96516810c4232312308017ce5b3da87103eb7c95c925810"
     },
     {
       "name": "workflow-artifact-reconciliation",

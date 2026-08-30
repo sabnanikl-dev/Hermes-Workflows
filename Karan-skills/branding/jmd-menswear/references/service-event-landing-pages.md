@@ -21,12 +21,10 @@ Use this when implementing or grooming JMD website work that adds dedicated craw
 ## Copy / safety boundaries
 
 - Preserve the JMD showroom-first boundary: call, get directions, visit the showroom, try it on in person.
-- Public rental copy remains **tuxedo rentals only** unless separately approved.
-- Approved rental ensemble wording: tuxedo, shirt, vest, and bowtie.
-- Approved price wording when needed: `$209.99 and up`.
+- JMD offers **both suit rentals and tuxedo rentals**. Never state or imply that suit rentals are unavailable.
+- The approved ensemble wording (tuxedo, shirt, vest, and bowtie) and `$209.99 and up` starting price are specifically supported for **tuxedo rentals**; do not automatically apply those package details or price to suit rentals without separate confirmation.
 - Wedding groups prefer appointments and typically need a **minimum of 3–4 weeks**.
 - Single rentals such as prom are welcome as walk-ins.
-- Avoid suit-rental claims unless separately approved.
 - Avoid Product/Merchant listing schema, ecommerce/cart/checkout language, live availability, size runs, stock counts, fake urgency, fake awards/reviews, stock imagery, and AI imagery.
 
 ## Verification pattern

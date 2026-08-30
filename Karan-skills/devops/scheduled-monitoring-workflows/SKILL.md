@@ -107,10 +107,23 @@ Fixture-test before triggering a live job that could message the user.
    - future next-run time.
 8. Summarize what changed, what was rejected/accepted in tests, and what remains.
 
+## Scheduler Result and Delivery Verification
+
+A scheduler-level `ok` proves that the run completed; it does not prove that useful work occurred. For ingestion, reconciliation, or artifact-producing jobs, inspect the exact run output plus the workflow's durable state/ledger and read back the claimed destinations. Understand the source lifecycle before using inbox contents as a failure signal: immutable standalone sources may intentionally remain visible after successful processing.
+
+For the full four-layer proof, immutable-inbox interpretation, per-source-hash bounded projection pattern, and quiet delivery matrix, use `references/artifact-producing-cron-verification.md`.
+
+When the user wants notifications only for material changes, update both halves of the contract:
+
+1. set delivery to the explicitly requested chat/channel;
+2. require the job to emit a concise changed-layer/destination summary only when it created or updated something, and otherwise return the scheduler's silent sentinel.
+
+After editing, re-read the stored delivery target and prompt/no-op behavior. Changing only delivery causes noisy no-op alerts; changing only the prompt leaves useful results local or undelivered.
+
 ## Scheduler Pitfalls
 
 - Duration syntax can represent a one-shot rather than a recurring interval; verify the displayed schedule and next run.
-- A previously successful cron run does not validate a newly edited script.
+- A previously successful cron run does not validate a newly edited script or prove that an artifact-producing run changed its target.
 - Editing a script may require re-verifying its executable mode.
 - Manual live runs can create duplicate or false notifications; fixtures are the safer first proof.
 - If a human advances an approved live-operation window and the mutation is performed manually, remove the still-future one-shot executor before acting, then reschedule only the read-only watchdog from the actual mutation time through the TTL horizon.

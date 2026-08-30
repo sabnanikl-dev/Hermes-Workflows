@@ -30,14 +30,18 @@ Run weekly or on Karan's request. Always use a Python script — manual inspecti
 - Exception: index.md, daily logs, and raw/ files legitimately have few links
 
 ### Step 6: Stale claim detection
-Cross-reference key facts against memory/Hindsight:
-- Email addresses (routing changes, new/retired addresses)
-- URLs (are referenced sites still reachable?)
-- Project statuses (compare `shared/projects/*.md` frontmatter vs `wiki/shared/projects/Project Status.md` dashboard)
-- Contact info and dates
+Cross-reference each claim against its canonical source:
+- Email addresses and durable preference corrections: memory/Hindsight plus authoritative account or source data when available
+- URLs: verify the referenced site or exact local path
+- Active task, issue, PR, deployment, and project status: Linear, GitHub, repositories, and live endpoints—not Hermes Brain or Karan OS
+- Durable business/client summaries: compare against authoritative source material before updating Hermes Brain
+- Contact information and dates: verify against the latest authoritative record
 
 ### Step 7: Concept gap scan
-Look for terms referenced across multiple pages but with no dedicated page (e.g., "client pipeline", "Hindsight setup details")
+Look for terms referenced across multiple pages but with no dedicated page (e.g., "client pipeline", "Hindsight setup details"). Do not create a page merely to satisfy graph metrics; require a real reuse case and canonical owner.
+
+### Step 8: Boundary drift scan
+Flag personal identity/life-planning content in Hermes Brain, active tracker state in either vault, cross-vault copies with no canonical source, retired paths, stale bounded projections, and Karan OS notes that have become approved reusable agent/business knowledge. Report advisory findings first; require Karan approval before cross-vault moves, deletion, splits, or broad rewrites.
 
 ## Report Format
 Categorized output:
@@ -50,14 +54,14 @@ Categorized output:
 
 Order matters. Fix in this sequence to avoid cascading broken links:
 
-1. **Stale data first** — wrong emails, outdated statuses, incorrect facts. These cause real harm if someone acts on them. Always cross-check Hindsight (`hindsight_recall`) before changing, since Hindsight captures the *latest* state from conversations.
-2. **Delete empty stubs** — remove 0-byte pages before fixing links (so you don't accidentally "fix" a link to point at an empty page).
-3. **Update project pages** — sync statuses, mark completed tasks, add meeting dates. Compare `shared/projects/*.md` against the Project Status dashboard AND Hindsight for ground truth.
-4. **Fix the Project Status dashboard** — this is the central nervous system. Fix broken wikilinks here by pointing to actual wiki pages (not skill names or deleted stubs). Use `—` for items with no wiki page rather than leaving broken links.
-5. **Add cross-links** — fix orphaned pages by adding Related sections. Priority: user pages, business pages, lesson pages. Each should link to 3-5 related pages.
-6. **Update index.md** — add any pages missing from the catalog. Include daily log links.
-7. **Update frontmatter dates** — batch-update `updated:` fields on all touched pages. Use `execute_code` with a loop for efficiency.
-8. **Log the action** — add a row to `log.md`.
+1. **Stale data first** — wrong emails, outdated statuses, incorrect facts. Use memory/Hindsight for durable corrections, but verify active task/deployment/account state from the owning live system before changing a claim.
+2. **Delete empty stubs** — remove 0-byte pages before fixing links, after confirming they are not intentional placeholders and obtaining approval when deletion is not already in scope.
+3. **Update durable summaries** — sync only reusable business/client/project facts from Linear, GitHub, repositories, live endpoints, or source documents. Do not recreate active trackers in Hermes Brain.
+4. **Fix the Project Status snapshot if retained** — keep it high-level and explicitly noncanonical for execution. Link to owning systems; do not copy backlogs, acceptance criteria, or PR-by-PR history.
+5. **Add cross-links** — fix meaningful orphans through Related sections. Do not over-link daily logs/raw files or invent pages solely to improve graph metrics.
+6. **Update index.md** — add catalog-worthy wiki pages while keeping the index compact and under budget. Use folder pointers for daily logs and dense collections rather than listing every file.
+7. **Update frontmatter dates** — update `updated:` fields on touched pages only.
+8. **Log the action** — add a concise row to `log.md` and update/create the active daily log when durable wiki state changed.
 
 ### Pitfalls During Fixes
 - **Dashboard wikilinks to skill names**: The Project Status dashboard frequently links `[[skill-name]]` instead of `[[Wiki Page Name]]`. Skills are NOT wiki pages. Replace with actual wiki page links or `—`.
@@ -68,8 +72,9 @@ Order matters. Fix in this sequence to avoid cascading broken links:
 - **Always re-run the full scan after fixes** to verify the numbers actually improved.
 
 ## Key Lessons
-- The Project Status dashboard and individual project pages often drift out of sync — always compare them
-- User pages (Amanda, Karan) go stale fastest — email routing, contact info, role descriptions change in conversation but wiki doesn't auto-update
-- Skills get wikilinked by mistake when authors don't distinguish wiki pages from tool names
-- Hindsight is the source of truth for "what actually happened" — wiki pages only know what was written at creation time
-- Empty root-level stubs accumulate when pages are created speculatively but never filled — delete aggressively
+- Linear, GitHub, repositories, client systems, and live endpoints own active state; Hermes Brain may keep only durable summaries and a high-level noncanonical snapshot
+- Karan OS is Karan-owned personal context; cross-vault audits are advisory until Karan approves a migration manifest
+- User pages (Amanda, Karan) go stale fastest — email routing, contact information, role descriptions, and runtime metadata need authoritative verification
+- Skills get wikilinked by mistake when authors do not distinguish wiki pages from tool names
+- Hindsight is useful for durable corrections and conversational context, but it is not the source of truth for current tracker, deployment, account, or endpoint state
+- Empty root-level stubs accumulate when pages are created speculatively; verify purpose and approval scope before deleting

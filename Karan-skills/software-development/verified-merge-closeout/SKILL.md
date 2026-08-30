@@ -132,6 +132,16 @@ Only after GitHub proof:
 9. capture immutable comment IDs and verify each directly;
 10. re-fetch and verify final child state name/type, semantic description content, dependent state/boundary, authorized parent-row transition, and unchanged parent state.
 
+When the PR does not directly link a Linear issue but the user asks to “update Linear if necessary,” do not assume either “no update” or broad tracker mirroring. Inspect the live rollout hierarchy and find the **narrowest issue whose contract explicitly names the repository, PR, GitHub issue, or merge prerequisite**. If that issue is an unstarted pilot/dependent milestone and a separate predecessor still blocks it:
+
+- append one prerequisite-satisfied evidence comment to that narrow issue only;
+- include PR URL, exact reviewed head, merge commit/method/time, linked GitHub issue disposition, and requested branch/worktree cleanup proof;
+- preserve its workflow state, description checkboxes, blocking relations, approval digest, and downstream execution gate;
+- do not also comment on the parent/umbrella unless its body or state was explicitly authorized to change;
+- verify the comment by immutable ID and re-read the dependent issue plus the blocking predecessor relation.
+
+This is milestone reconciliation, not mirroring GitHub coding status into Linear. It records that a named historical prerequisite became true without implying pilot adoption, queue approval, successor selection, or execution authority.
+
 Linear may normalize Markdown bullets, naked URLs, and trailing newlines. Compare unique checkpoint headings, checkbox transitions, SHAs, and evidence links rather than byte equality. Direct comment bodies can still be compared exactly when preserved by the API.
 
 ### 6. Final report

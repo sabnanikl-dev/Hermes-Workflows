@@ -16,8 +16,10 @@ Deleting the remote branch is also not the end of cleanup: a stale `refs/remotes
    - Remote default ref equals the merge SHA.
    - For merge commits, parents include the pre-merge base and exact reviewed head.
 
-2. **Sync a clean default-branch worktree**
-   - Require a clean worktree.
+2. **Select and sync the canonical clean default-branch worktree**
+   - A machine may contain multiple independent clones of the same remote in addition to linked worktrees. Prefer the checkout named by the live tracker/repository mapping or current task contract; otherwise prove the intended canonical checkout from remote identity and active worktree ownership.
+   - Do not fast-forward, prune, or “tidy” unrelated stale clones merely because they share the remote. Record them as intentionally untouched if their state matters to the final report.
+   - Require the selected default-branch worktree to be clean.
    - `git fetch origin <default> --prune`
    - `git pull --ff-only origin <default>`
    - Verify local default and `origin/<default>` equal the merge SHA.
@@ -25,17 +27,18 @@ Deleting the remote branch is also not the end of cleanup: a stale `refs/remotes
 3. **Inventory removal scope**
    - Feature worktree checked out on the merged branch.
    - Disposable detached reviewer worktrees created solely for this PR/head sequence, including older-head reviewer worktrees retained across fix cycles.
-   - Exclude shared, dirty, ambiguous, or differently owned worktrees.
+   - Exclude shared, dirty, ambiguous, differently owned worktrees, and detached reviewer/evidence worktrees when the user asked only to delete the branch.
    - Require `git status --porcelain` empty for each selected path.
    - For multi-cycle closeouts, freeze the selected absolute paths in a `/tmp` manifest before removal and read it back. Record the expected count so a partial cleanup cannot look complete.
 
-4. **Remove worktrees, then the local branch**
-   - `git worktree remove <clean-task-path>` for each selected path.
-   - `git branch -d <feature-branch>` from the synced default worktree.
-   - Never substitute `-D`; a refusal is a stop requiring investigation.
+4. **Remove the branch-holding worktree, then delete the local branch safely**
+   - Remove the clean worktree that has the feature branch checked out with `git worktree remove <clean-task-path>`.
+   - After a normal merge whose synchronized default branch contains the reviewed head, use `git branch -d <feature-branch>` as an ancestry guard.
+   - After a squash merge, ordinary `-d` correctly refuses because the reviewed head is not an ancestor of the squash commit. Use `git branch -D` only after all squash-specific gates pass: REST merge proof, prior-base sole-parent proof, merge-tree equality with the exact reviewed head, clean branch-holding worktree removal, and verified remote branch deletion.
+   - Any refusal or mismatch outside that exact squash case is a stop requiring investigation.
 
 5. **Delete and prune the remote branch**
-   - Delete through the intended authenticated GitHub/git path.
+   - Delete through the intended authenticated GitHub/git path. For a squash closeout, verify this deletion before the narrowly gated local `-D` step above.
    - `git fetch --prune origin`.
 
 6. **Verify independent absence surfaces**
