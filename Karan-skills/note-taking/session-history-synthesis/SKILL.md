@@ -25,6 +25,7 @@ The goal is an evidence-backed workstream narrative, not a dump of every session
 - A long task spans compaction-generated child sessions.
 - The final summary must distinguish completed, pending, blocked, and merely discussed work.
 - A status/log artifact has a strict character budget.
+- A profile migration, consolidation, or selective-seeding decision needs evidence of which profiles are actually used. For that case, distinguish direct human-facing activity from cron/subagent activity and deduplicate continuations by root lineage; see `references/multi-profile-usage-audit.md`.
 
 Do not use this skill for a single small session whose final answer already contains everything required.
 

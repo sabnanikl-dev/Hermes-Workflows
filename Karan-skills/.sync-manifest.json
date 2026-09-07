@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 88,
+  "skill_count": 89,
   "skills": [
     {
       "name": "adversarial-product-prd-tournament",
@@ -18,8 +18,8 @@
     {
       "name": "adversarial-technical-artifact-review",
       "path": "software-development/adversarial-technical-artifact-review",
-      "files": 9,
-      "sha256": "6200661e404ebf84eb6fe984b2c7708359d9ba86511b3a8f47d5fe8ba7497af2"
+      "files": 11,
+      "sha256": "051a2a45631d546b8a6e91491bd2ef44ebcd408ef91cee22f18b7a33a60b1112"
     },
     {
       "name": "agent-execution-resilience",
@@ -50,6 +50,12 @@
       "path": "software-development/agentic-pr-review-loop-recovery",
       "files": 20,
       "sha256": "7379136042a65d0f24e815e008b5ecb3d56ea5561fd19c539a19248596b544fe"
+    },
+    {
+      "name": "amanda-job-lead-search",
+      "path": "productivity/amanda-job-lead-search",
+      "files": 1,
+      "sha256": "d1c66c7e2886509787257ff38618794a7f2874ee70aa9bb40bca5ba3e2a69922"
     },
     {
       "name": "architecture-scope-audits",
@@ -120,8 +126,8 @@
     {
       "name": "creative-html-visual-artifacts",
       "path": "creative/creative-html-visual-artifacts",
-      "files": 93,
-      "sha256": "850762f868da104e0324f5ebed4288dcac083b04a2a337451cce8446b6867240"
+      "files": 94,
+      "sha256": "aa9d687544d1ba169942158a80a9fbbc80793cd059942ff7c10f28f77994c846"
     },
     {
       "name": "cross-system-mission-control",
@@ -234,8 +240,8 @@
     {
       "name": "google-analytics-ga4",
       "path": "productivity/google-analytics-ga4",
-      "files": 7,
-      "sha256": "d63b14a9e3e54445930a1c3e2a588206ff570e14a86bb0e65025e16bd5601389"
+      "files": 8,
+      "sha256": "45abc5e8c990c952aec36c0cb89ecf6c03cdab10617eee33ef1a7f2225b9966e"
     },
     {
       "name": "google-business-profile-api-access",
@@ -248,6 +254,12 @@
       "path": "productivity/google-search-console",
       "files": 4,
       "sha256": "d9f0d144d6b7d8818daf9ebd741eeb4d911cc00ffdbecb1f35cf6fa42722faa0"
+    },
+    {
+      "name": "hardware-compatibility-and-procurement",
+      "path": "research/hardware-compatibility-and-procurement",
+      "files": 7,
+      "sha256": "9c2d8a2cbfe7e87de4c0a99e35f56b340bb1ed9f8b7dccaab6b8e3503db4808d"
     },
     {
       "name": "hermes-brain-wiki",
@@ -403,7 +415,7 @@
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
       "files": 82,
-      "sha256": "a1e0d19969996aac380bc2161052900615a6f3c54112bfde5e23af7f7b8b4993"
+      "sha256": "5b643b0d3f51e7eaa883f56e535e5fe17deb132e82e29e27f5704217ffca4552"
     },
     {
       "name": "profile-isolated-work-execution",
@@ -427,7 +439,7 @@
       "name": "research-workflow",
       "path": "research/research-workflow",
       "files": 18,
-      "sha256": "1995f606410bede1a52d7e52d087e7fdb0d7078285a0f9eac3a31f418d4e9094"
+      "sha256": "b548f27c78a94143385913dc01a957f237c7d7c67746458c35b7359cd85b6c80"
     },
     {
       "name": "review-artifact-relay-and-state-barriers",
@@ -440,12 +452,6 @@
       "path": "software-development/risk-proportional-pr-orchestration",
       "files": 6,
       "sha256": "40b50203fc41b4a587c2d2ceaf8b246b887d1cb2101e453d288c05321fbe3d77"
-    },
-    {
-      "name": "sanity-studio-deploy",
-      "path": "devops/sanity-studio-deploy",
-      "files": 4,
-      "sha256": "ae7e5f9bcf2f2a2836cfbf20f6eae9d36a55e9e87dc55bf22663721883445084"
     },
     {
       "name": "scheduled-monitoring-workflows",
@@ -462,8 +468,8 @@
     {
       "name": "session-history-synthesis",
       "path": "note-taking/session-history-synthesis",
-      "files": 4,
-      "sha256": "e23568043a46cb0d8f44ac6bff4f3335ce867bc0092281b864d23cc8915d4404"
+      "files": 5,
+      "sha256": "f2b32ac04c2fef7f7fa83d32bf2e66167c3561dff59f7947c8c9fac175a960b9"
     },
     {
       "name": "software-development-lifecycle",
@@ -529,7 +535,7 @@
       "name": "writing-humanization-and-voice-editing",
       "path": "creative/writing-humanization-and-voice-editing",
       "files": 3,
-      "sha256": "895b7c5b665ee574be39082049bbe681740f8229b375f27ff7ee48254527efad"
+      "sha256": "00c6475d93a7a17cb62f8739fc60fd5647b074c494f1bb5d308d59e4c2d7b01d"
     },
     {
       "name": "writing-plans",

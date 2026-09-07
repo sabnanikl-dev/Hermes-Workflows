@@ -14,6 +14,16 @@ metadata:
 
 # Sub-Agent Research & Report Workflow
 
+## Current tool contract (supersedes archived examples below)
+
+- Use `delegate_task(tasks=[{"goal": "...", "context": "..."}, ...])`; the current tool does not accept the archived `role` or per-task `toolsets` fields. Follow the live tool's concurrency limit rather than the historical three-child note.
+- Delegate bounded research lanes with exact output paths, source/authority constraints, and a completion budget. Require incremental source ledgers and findings files so a timeout leaves useful evidence. Recover a timed-out synthesis from captured artifacts in a fresh bounded child; do not restart broad research or fabricate its missing result.
+- Delegation is asynchronous: continue independent work, do not wait/poll for completion. Child summaries are self-reports; read their actual files and independently check decision-bearing sources before integration.
+- Use `read_file`/`search_files` for artifact discovery and verification; archived MCP filesystem examples are not required. Use current `browser_exec` or a locally owned browser renderer for visual QA.
+- One canonical report owns the final proposed contracts. Label researcher alternatives as alternatives; reconcile factor definitions, policy gates and numerical fixtures when synthesis selects a narrower design.
+- For diagram-rich HTML/PDF, inspect text containment within each node, not only the SVG viewport. Use instant scrolling (or wait for smooth scrolling to settle) before section screenshots. Check printed paragraphs, table cells and code/list blocks across page boundaries after excluding only the known generated footer margin.
+
+
 When the user asks for a "deep dive" into a topic and wants a polished deliverable, use this pattern.
 
 ## When to Use

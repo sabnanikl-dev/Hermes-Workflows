@@ -91,6 +91,16 @@ After:
 
 > AI coding assistants are useful for boilerplate and repetitive refactors. They are also very good at sounding right while being wrong, so the productivity gain depends on whether someone is still reviewing the work.
 
+## Meeting briefs and stakeholder documents
+
+Write the document for the person using it in the room. Keep QA verdicts, source hashes, review-process narration, artifact contracts, and claims that a document is “meeting-ready” in a separate internal note. Do not make the reader sit through commentary about the quality or purpose of the writing. Preserve necessary scope/approval limits in one concise statement rather than repeating disclaimers on each page.
+
+When Karan requests Stop Slop, read https://github.com/hardikpandya/stop-slop and its SKILL.md plus references/phrases.md, structures.md, and examples.md. Apply the requested editorial guidance for that task without installing third-party skills or expanding permissions. Preserve factual uncertainty and necessary qualifiers while cutting rhetorical padding. Inspect audience fit, not just grammar or PDF layout: “Can Karan read or share this without explaining why the agent is talking about itself?”
+
+Generate HTML and PDF from the same edited source when practical. Archive prior copies and keep stale acceptance reports clearly separated from the edited version. Layout checks cannot substitute for a final prose read.
+
+When asked for a Stop Slop score, report each of its five dimensions (directness, rhythm, trust, authenticity, density) and calculate the total with a tool. Label the score an editorial judgment, not an automated measurement. Do not inflate it to reach a requested threshold or strip necessary factual/authority qualifiers for points. Keep scorecards outside the stakeholder document and bind any independent score to the exact edited source; preserve approved visual layouts during the prose pass.
+
 ## Output shape
 
 For short rewrites, return the final text directly. For larger or sensitive rewrites, use:

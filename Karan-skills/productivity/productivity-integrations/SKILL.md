@@ -39,6 +39,10 @@ For local n8n requests, start the server as a tracked background process, verify
 ### Google Workspace and email
 Respect contact-confirmation rules. For email actions, read the source thread/message before drafting or sending.
 
+Treat `gws auth login` as a repair/setup command, not a prerequisite for normal Workspace operations. First run `gws auth status`; when it reports `has_refresh_token: true`, `token_valid: true`, the intended user, and all required scopes, call the Calendar/Drive/Sheets API directly. The encrypted refresh token renews short-lived access tokens automatically, so starting another login flow only forces needless account selection and consent (`prompt=select_account+consent`). Reauthorize only when the refresh token is absent/revoked/expired or a genuinely new scope is required.
+
+When adding scopes with `gws auth login --scopes`, pass complete OAuth scope URLs (for example, `https://www.googleapis.com/auth/calendar`), not shorthand names such as `calendar`, `drive`, or `sheets`; shorthand values are forwarded literally and Google rejects them with `Error 400: invalid_scope`. Preserve every existing required scope URL when reauthorizing, then verify the authenticated account and scopes with `gws auth status`. If reauthorization recurs about every seven days, check the Google Auth Platform publishing status: external OAuth apps left in **Testing** receive short-lived refresh tokens for these Workspace scopes. Move the app to **In production** when appropriate, then authorize once again and verify the saved refresh token.
+
 For a Google Sheets link, prefer the authenticated `gws sheets` API before generic web extraction or browser access. A Google sign-in page from an unauthenticated web request is not proof that the sheet is inaccessible. Read spreadsheet metadata plus the relevant value ranges, then summarize or act from the returned workbook data; claim an access limitation only after the authenticated Workspace call fails too.
 
 ### Google Search Console API checks

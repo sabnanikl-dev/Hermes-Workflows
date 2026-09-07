@@ -1,6 +1,6 @@
 ---
 name: google-analytics-ga4
-description: "Use when provisioning or verifying GA4 accounts and roles."
+description: "Use when provisioning, verifying, or monitoring GA4 and paired Search Console measurement."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -22,6 +22,8 @@ Load this when working on Google Analytics 4 for JMD, Femme Events, or future vi
 - Obtain or hand off a public Measurement ID (`G-…`) for repo/tag configuration.
 - Check or create GA4↔Search Console product links.
 - Debug Google OAuth loopback/consent flows for any Google API scope.
+- Run periodic read-only GA4 + Search Console checkpoints after a deployment or migration.
+- Verify whether an attribution repair has produced ordinary live source/campaign rows without overstating sparse data.
 
 ## Local context (JMD verified 2026-07-28)
 
@@ -30,7 +32,7 @@ Load this when working on Google Analytics 4 for JMD, Femme Events, or future vi
 - JMD GA4 account: `accounts/400880619` ("JMD Menswear"); property: `properties/545258538` ("JMD-Website", GA4, America/New_York, USD, SHOPPING); web stream: `properties/545258538/dataStreams/15244370633` (display name "JMD Menswear Website — Production"), Measurement ID `G-48R8Q35VGE`, defaultUri `https://jmdmenswear.com` (apex; patched from www on 2026-07-28), retention FOURTEEN_MONTHS (patched from TWO_MONTHS on 2026-07-28).
 - karanagent20's GA4 role is Viewer/Analyst, not the Editor the JMD-51 contract requires — proven by `accessBindings` 403 at property AND account level while other reads/writes succeed. Role upgrade + GA4↔GSC link are the two remaining human UI steps.
 - GSC write token at `~/.hermes/google_search_console_write_token.json` can check GSC `permissionLevel` for the domain property.
-- GCP project 999367204420 ("hermes-492218") has the GA4 Admin API enabled but NOT the Data API (`SERVICE_DISABLED`) — enable it in Cloud Console only if API-based reporting is ever needed.
+- GCP project 999367204420 ("hermes-492218") had the GA4 Data API disabled on 2026-07-28, but authenticated read-only Data API reports succeeded on 2026-08-28 and 2026-09-04. Treat the old `SERVICE_DISABLED` result as historical; smoke-test live reporting before declaring a current blocker.
 
 ## Admin API essentials
 
@@ -56,6 +58,8 @@ Key gaps (verified against discovery doc):
 For the complete manual DataFilter evidence pattern and the staged production-disabled → separately approved activation → web-record cutover workflow, including split analytics-only vs DNS rollback, see `references/manual-data-filter-and-cutover-gates.md`.
 
 For post-deploy proof that keeps deployment binding, public byte identity, consent-negative behavior, positive network collection, bounded events, GA4-side readback, and attribution authority distinct, see `references/post-deploy-consent-network-proof.md`. A stored grant or mounted private provider is an intermediate state—not evidence that GA4 collected. For the validated production-execution techniques—privacy-safe request reduction, bounded remote-browser scenarios, mixed beacon interpretation, revocation/new-document separation, Realtime schema limits, empty campaign-registry disposition, and durable report+JSON packet creation—also load `references/live-proof-packet-techniques.md`.
+
+For recurring migration checkpoints that pair GA4 Data API windows with Search Console performance/indexing evidence, including clean-worktree isolation, independent freshness boundaries, attribution guardrails, and the Search Analytics aggregation-type compatibility pitfall, use `references/ga4-gsc-periodic-checkpoints.md`.
 
 ## OAuth loopback mint pattern (any Google scope)
 

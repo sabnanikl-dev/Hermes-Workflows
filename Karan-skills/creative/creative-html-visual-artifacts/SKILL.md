@@ -35,13 +35,18 @@ For research/report artifacts synthesized from repo dives, NotebookLM, or subage
 1. Build a real standalone `.html` file with navigable sections, executive summary, evidence/caveats, and concrete next actions — not just prose dumped into HTML.
 For research/report artifacts synthesized from repo dives or subagent findings:
 1. Build a real standalone `.html` file with navigable sections, executive summary, evidence/caveats, and concrete next actions — not just prose dumped into HTML.
-2. Verify the file exists and contains the required sections before previewing.
+2. For meeting briefs, make dense opening pages scannable: use a numbered workflow diagram for process, first-version/later panels for scope, and decision cards with note space for discussion. Avoid turning approved prose into another unbroken column. Scope layout-only changes to the requested pages, preserve source wording, and verify untouched PDF pages by pixel comparison when practical. Karan prefers visual grouping over walls of text in meeting materials.
+3. Verify the file exists and contains the required sections before previewing.
 3. If direct `file://` browser navigation is blocked, serve the containing directory with a temporary local HTTP server and open `http://127.0.0.1:<port>/<file>`.
 4. Run visual QA with a screenshot/browser vision pass for layout, legibility, cards/tables/diagrams, and responsive plausibility.
 5. Check the browser console for JavaScript/render errors.
 6. For high-stakes operational plans, use the iterative source-feedback + adversarial-review loop in `references/iterative-plan-artifact-review-loop.md`: send a compact plan summary back to source notebooks/research systems, patch the artifact, run separate adversarial reviewer lenses, patch again, then re-render/verify.
 7. Stop the temporary preview server before final handoff.
 8. In the final response, give the artifact path plus what was actually verified.
+
+### Engineering-aligned app walkthrough videos
+
+When the user wants a process/app video grounded in a design document, use `references/engineering-aligned-ui-video.md`. It covers canonical-source storyboarding, honest scripted-simulation labeling, measured narration, deterministic HTML/CDP capture, efficient narrated holds, H.264/AAC encoding, chapter-overlay clipping checks, and actual encoded-media verification.
 
 ### p5.js / pretext sketches
 Prefer single-file demos. Include controls only when useful. Verify in-browser rendering and animation behavior.
