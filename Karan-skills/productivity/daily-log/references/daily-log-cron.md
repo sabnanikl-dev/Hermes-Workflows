@@ -21,7 +21,8 @@ The cron runs at 1 AM ET, which means "today" is already the next calendar day. 
 
 ```python
 from datetime import datetime, timedelta
-yesterday = datetime.now() - timedelta(days=1)
+from zoneinfo import ZoneInfo
+yesterday = datetime.now(ZoneInfo("America/New_York")) - timedelta(days=1)
 log_path = f"~/obsidian-vault/hermes-brain/logs/{yesterday.strftime('%Y/%m')}/{yesterday.strftime('%Y-%m-%d')}.md"
 log_path = os.path.expanduser(log_path)
 if os.path.exists(log_path):
@@ -85,7 +86,7 @@ date: "YYYY-MM-DD"
 ### Step 5: Error handling
 If the process fails at any point:
 1. Determine what went wrong
-2. Create a lesson page at `~/obsidian-vault/hermes-brain/shared/lessons/YYYY-MM-DD-daily-log-failure.md`
+2. Create a lesson page at `~/obsidian-vault/hermes-brain/wiki/shared/lessons/YYYY-MM-DD-daily-log-failure.md`
 3. Include:
    - What happened
    - Root cause
@@ -93,8 +94,8 @@ If the process fails at any point:
 
 ## Rules
 1. Max 3,000 chars per daily log file
-2. Skip silently if a log already exists for today
-3. Skip silently if no sessions happened today (don't create empty logs)
+2. Skip silently if a log already exists for the target previous calendar day
+3. Skip silently if no sessions happened on the target previous calendar day (don't create empty logs)
 4. Use wikilinks to lesson pages and project status
 5. Include decisions, discussions, and high-level tasks -- not just fixes
 6. Always use `python3.11` in the hermes-agent venv for any scripting

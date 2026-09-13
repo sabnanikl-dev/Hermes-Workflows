@@ -10,12 +10,6 @@
   "skill_count": 89,
   "skills": [
     {
-      "name": "adversarial-product-prd-tournament",
-      "path": "product-strategy/adversarial-product-prd-tournament",
-      "files": 1,
-      "sha256": "01be93d0cf572f57d6de2cf2037cd4711daff1b8270964e92f8901d104c59f57"
-    },
-    {
       "name": "adversarial-technical-artifact-review",
       "path": "software-development/adversarial-technical-artifact-review",
       "files": 11,
@@ -145,7 +139,7 @@
       "name": "daily-log",
       "path": "productivity/daily-log",
       "files": 9,
-      "sha256": "25d0000df4e694b5a0656d71d2cfd4f1bf0f207b0c3326d1ef1ad330715d8767"
+      "sha256": "2197a6d6f7e10f32eefd69cdfb99d6a1484d79d738b9e174182a378d5bae4866"
     },
     {
       "name": "deterministic-validator-review",
@@ -210,8 +204,8 @@
     {
       "name": "generated-artifact-proofing",
       "path": "software-development/generated-artifact-proofing",
-      "files": 10,
-      "sha256": "ea5c544417bf6a89a48eb3e5a7da88b6fbe6809abe6cae9d5c18753f156b52bb"
+      "files": 11,
+      "sha256": "90f10379aa41dfeaec020146c5ca354fd6f87f2b9f89e5d2b977f41689333a06"
     },
     {
       "name": "github-issue-specs",
@@ -241,7 +235,7 @@
       "name": "google-analytics-ga4",
       "path": "productivity/google-analytics-ga4",
       "files": 8,
-      "sha256": "45abc5e8c990c952aec36c0cb89ecf6c03cdab10617eee33ef1a7f2225b9966e"
+      "sha256": "e1dbb707a132ac2dbb3b30aa06f86d5f3bd0e76231250ef17f2f83c19d39505d"
     },
     {
       "name": "google-business-profile-api-access",
@@ -253,7 +247,7 @@
       "name": "google-search-console",
       "path": "productivity/google-search-console",
       "files": 4,
-      "sha256": "d9f0d144d6b7d8818daf9ebd741eeb4d911cc00ffdbecb1f35cf6fa42722faa0"
+      "sha256": "c7fada67166100cbfbef9db7c26e280a89e11f838f1a85cb225316302cce7670"
     },
     {
       "name": "hardware-compatibility-and-procurement",
@@ -301,7 +295,7 @@
       "name": "linear",
       "path": "productivity/linear",
       "files": 2,
-      "sha256": "5731c167ad543060a07d369a4d399716e3b09a68a747a6447d537d9758f32f36"
+      "sha256": "536c2635c0c702fa594512851e3a690300608337eaf2d4256a1bb819c251298d"
     },
     {
       "name": "linear-issue-specs",
@@ -325,7 +319,7 @@
       "name": "local-seo-visibility-ops",
       "path": "productivity/local-seo-visibility-ops",
       "files": 27,
-      "sha256": "43f01db7b3f12028052bd1dd36779aed92599fd35c1baa1c24cfdb67f0786a5f"
+      "sha256": "002741ca368a29c15e0c4c32f9844fe3b3fc2278a56e21713ce01305d2e61d97"
     },
     {
       "name": "local-web-preview",
@@ -422,6 +416,12 @@
       "path": "devops/profile-isolated-work-execution",
       "files": 7,
       "sha256": "65c51e57b9919ebb7f32eebaa0e86ef298de1855097c1bae292703a6cb023040"
+    },
+    {
+      "name": "project-kickoff",
+      "path": "devops/project-kickoff",
+      "files": 6,
+      "sha256": "519a2b0cdc303f6df8b5a64bb2bccbae6530e054bf1777dcca894d0c5671fbf6"
     },
     {
       "name": "pull-request-review-preflight",

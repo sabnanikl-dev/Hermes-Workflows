@@ -74,6 +74,12 @@ Hash the candidate before running any generator, validator, or helper. Determine
 
 If a review command causes incidental churn in the canonical checkout, restore only review-induced paths without touching pre-existing user changes, reconstruct the exact candidate bytes when necessary, and require the original digest before issuing the verdict. A validator exit `0` is not enough if the command changed the artifact under review. See `references/negative-claim-provenance-and-review-byte-preservation.md` for the claim matrix and recovery sequence.
 
+#### Reorganize artifact workspaces without losing proof
+
+For folder cleanup or first-time repository publication, treat relocation as a preservation migration, not cosmetic housekeeping. Propose the lifecycle split before moving files when requested; keep the workspace appropriate to its authorized phase rather than adding speculative application/harness scaffolding. Freeze a hash inventory and independently verified rollback snapshot; map every original file to its exact new destination or lossless archive member. Preserve curated handoff bundles and historical proof pairs, which may contain unique context or intentionally older revisions. Run original and relocated producers in disposable copies, require expected outputs and byte comparisons—not exit codes alone—and distinguish preserved evidence from newly rendered proof. If publishing is authorized, verify the pushed artifact set from a fresh remote clone, including archive members and resource aliases; remote SHA equality alone does not prove completeness or portability.
+
+See `references/artifact-workspace-relocation-and-cold-archive.md` for the migration schema, dependency audit, cold-restore gates and fresh-clone proof recipe.
+
 ### 2. Run a producer-shaped probe
 
 Extract or reconstruct representative payloads in the producer’s actual shape. Feed them directly to the consumer and verify that required identity, counts, reasons, failures, guards, and timestamps survive.

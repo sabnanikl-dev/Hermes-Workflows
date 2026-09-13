@@ -244,7 +244,7 @@ When a pre-cutover recheck begins returning rows:
 - Missing `webmasters.readonly`: wrong token/grant; re-authorize with GSC scope.
 - `403 accessNotConfigured`: OAuth token may be valid, but Search Console API is disabled or not propagated for the OAuth client project.
 - `sites.list` returns no properties: OAuth works, but account lacks property access.
-- Search Analytics HTTP 200 with zero rows: API works; property has no data for that range.
+- Search Analytics HTTP 200 with zero rows: API works; no recorded rows are available for that request at capture time. This is not proof of zero traffic and must not become a numeric growth denominator.
 
 ## Femme quick facts
 

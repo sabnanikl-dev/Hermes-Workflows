@@ -21,6 +21,8 @@ Use this when Business Profile Performance data will influence a local SEO page 
    - `WEBSITE_CLICKS`
 6. **Create an exact-date comparison window.** If GSC has a shorter populated cohort, recompute GBP totals for those same dates. This supports directional funnel comparison without pretending the units are equivalent.
 7. **Aggregate daily metrics by calendar month.** Inspect first/last returned dates before making year-over-year claims.
+8. **Distinguish omitted zero values from missing data and retired metrics.** In a present `datedValues` row, Google omits `value` when the count is zero ([TimeSeries definition](https://developers.google.com/my-business/reference/performance/rest/v1/TimeSeries)). Normalize that omission to zero only after validating the series and date coverage; missing series/dates remain UNKNOWN. Conversely, a zero-filled `BUSINESS_CONVERSATIONS` response does not establish working chat with zero leads: [Google Help](https://support.google.com/business/answer/14919056?hl=en) says the legacy chat feature and conversations Performance metric were retired. Mark legacy chat performance unavailable; evaluate account-eligible text/WhatsApp separately. Reserve with Google booking zeros are not total business bookings and do not establish integration eligibility.
+9. **Read dated follow-ups before reusing a stale baseline summary.** A May parent artifact can still say unsubmitted/not indexed after a June submission closeout. Reconcile the latest dated evidence and live tracker/provider state, then add an explicit supersession pointer rather than repeating a completed approval request. Preserve historical no-row responses without treating them as proven zero-traffic growth denominators.
 
 ## Unit and surface discipline
 

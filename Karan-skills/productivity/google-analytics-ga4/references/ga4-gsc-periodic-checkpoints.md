@@ -6,7 +6,7 @@ Use this pattern for a read-only weekly or milestone observation after an analyt
 
 1. Read the owning issue and last independently accepted checkpoint before collecting anything.
 2. If the canonical checkout is dirty or contains unrelated work, preserve it untouched and create a clean, named worktree from the accepted checkpoint commit. Record the original head/status outside the worktree; never reset, stash, or clean unknown WIP.
-3. Keep the run read-only: OAuth refresh and report/list/inspection calls are allowed; configuration, sitemap submission, campaign activation, deploys, and public/client sends remain separately gated.
+3. Keep the run read-only: OAuth refresh and report/list/inspection calls are allowed; configuration, sitemap submission, campaign activation, deploys, and public/client sends remain separately gated. If worktree/repository mutation is separately gated, use an isolated local ticket-evidence workspace rather than creating a git worktree. Recover accepted artifacts from their exact commit with `git show <sha>:<path>` when an old temporary worktree is missing/prunable; do not recreate, prune, or repair unrelated worktrees. Label canonical promotion/commit/tracker updates as pending approval.
 4. A checkpoint captured before the issue's minimum evidence date is an observation, not closeout—even when the metrics are healthy.
 
 ## Freshness and comparison windows
@@ -20,7 +20,7 @@ For each provider, derive from its own latest populated date:
 - latest 14 days;
 - post-cutover or post-activation window.
 
-Record requested-through date, latest-populated date, and lag. Never fill a missing provider day with an estimate.
+Record requested-through date, latest-populated date, and lag. Never fill a missing provider day with an estimate. GA4's latest populated day is not automatically finalized; label yesterday's standard-report rows provisional/subject to processing rather than calling the whole window complete. GSC can explicitly request `dataState: final`. When comparing successive checkpoint headlines, disclose overlapping rolling windows; use the current capture's non-overlapping paired windows for week-over-week claims. Count genuine dated monitoring observations separately from start notices, attribution reconciliations, and synthetic activation proofs—elapsed four weeks does not prove four weekly observations.
 
 ## OAuth identity truthfulness
 
