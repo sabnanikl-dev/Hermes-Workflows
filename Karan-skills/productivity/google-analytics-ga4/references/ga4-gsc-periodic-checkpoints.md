@@ -62,6 +62,10 @@ Query and page dimensions may be privacy-thresholded and need not reconcile to p
 
 Do not force `aggregationType: byProperty` on every Search Analytics request. Google rejects `BY_PROPERTY` when the request includes the `page` dimension. For a generic collector, omit `aggregationType` and record the API's returned aggregation type, or choose a documented compatible value per dimension. A successful totals query does not prove the same body is valid for page rows.
 
+## Public redirect probe compatibility
+
+Use non-JavaScript GETs for read-only route checks so monitoring does not create synthetic Analytics traffic. Verify the HTTP client handles both 301 and 308 redirects: the host's older Python `urllib` handler may raise `HTTPError: 308` without following it. That is a collector limitation, not a broken production route. Preserve the actual status and Location, use a compatible redirect handler or curl, and rerun before freezing evidence. A sampled redirect matrix does not prove the full inventory or consent behavior. GSC browser login walls remain explicit UI-only coverage gaps; working API access does not imply an authenticated browser session.
+
 ## Interpretation and artifact closeout
 
 - Segment clicks versus impressions before calling a search regression.

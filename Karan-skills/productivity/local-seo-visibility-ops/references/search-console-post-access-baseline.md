@@ -16,7 +16,7 @@ Use this when Search Console access has just been granted after an earlier OAuth
    - URL Inspection for canonical and obvious alternate homepage URLs (`www` vs non-`www`).
 3. Interpret no-row Search Analytics responses carefully:
    - HTTP 200 with no rows is not an access failure.
-   - Record it as zero/no recorded performance baseline for comparison, with the exact date range.
+   - Record it as no rows available at capture time for the exact date range; never treat it as proof of zero traffic or a numeric growth denominator.
 4. Compare Search Console sitemap state to production reality:
    - Current production sitemap may be live but not submitted/known in Search Console.
    - Legacy HTTP sitemap entries can remain from old sites; document them separately from the current HTTPS sitemap.
@@ -31,7 +31,7 @@ Use this when Search Console access has just been granted after an earlier OAuth
 Prefer:
 
 - “Access resolved; baseline captured.”
-- “Search Analytics returned no rows for DATE_RANGE; use as zero/no recorded performance baseline.”
+- “Search Analytics returned no rows for DATE_RANGE; recorded data was unavailable for this request at capture time, not proof of zero traffic.”
 - “Current HTTPS sitemap is live but not submitted/known in Search Console.”
 - “Sitemap submission remains approval-gated and is tracked separately.”
 

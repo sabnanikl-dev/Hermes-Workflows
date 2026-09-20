@@ -37,6 +37,7 @@ Absorbed subsections:
 Full historical playbooks are preserved in `references/`.
 
 Useful support references:
+- `references/fancy-diamond-sourcing.md` — exact-ratio fancy diamond sourcing, primary report verification, optical-evidence limits, dynamic inventory pitfalls and loose-stone return terms.
 - `references/facebook-marketplace-local-product-research.md` — one-time local Marketplace product sourcing: exact-tier recovery, 30-mile radius verification, dynamic card extraction, direct listing checks, SSD risk checks, and near-miss handling.
 - `references/medium-member-article-research.md` — Medium member-only article workflow: public preview checks, RSS/archive/search workarounds, authorized email-code login, full-body browser extraction, and linked-reference follow-up.
 - `references/pet-friendly-hotel-research.md` — road-trip lodging research workflow using Google Travel/Hotels, Serper, Google Places photos, and portable HTML verification.

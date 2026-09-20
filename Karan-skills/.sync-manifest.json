@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 89,
+  "skill_count": 88,
   "skills": [
     {
       "name": "adversarial-technical-artifact-review",
@@ -43,7 +43,7 @@
       "name": "agentic-pr-review-loop-recovery",
       "path": "software-development/agentic-pr-review-loop-recovery",
       "files": 20,
-      "sha256": "7379136042a65d0f24e815e008b5ecb3d56ea5561fd19c539a19248596b544fe"
+      "sha256": "95be4502294cdbbb1bac16258b2cf8db2e7f92cec78cabfad5a89dfdd9b80cd7"
     },
     {
       "name": "amanda-job-lead-search",
@@ -61,7 +61,7 @@
       "name": "artifact-output-governance",
       "path": "productivity/artifact-output-governance",
       "files": 9,
-      "sha256": "8479e94328a82d4bf094201bb7f273ea49a6251cc84177254ec0ae1b4e5d21b3"
+      "sha256": "5910f6500728740e23357ce3ca20db63498fcaa1f2c0518163f654ce9a99ca4f"
     },
     {
       "name": "autonomous-coding-agents",
@@ -80,12 +80,6 @@
       "path": "creative/baoyu-visual-storytelling",
       "files": 115,
       "sha256": "3f829dbc1aecc2190caf2cc3d7febf0bc62a9e3d6affc4733485e9458bb37f83"
-    },
-    {
-      "name": "brand-website-from-inspiration",
-      "path": "brand-website-from-inspiration",
-      "files": 2,
-      "sha256": "845ad0a11e34e79cf2f6f78b22429568254fb1943e525965df306ab5f4b00283"
     },
     {
       "name": "client-automation-workflow-scaffolding",
@@ -121,7 +115,7 @@
       "name": "creative-html-visual-artifacts",
       "path": "creative/creative-html-visual-artifacts",
       "files": 94,
-      "sha256": "aa9d687544d1ba169942158a80a9fbbc80793cd059942ff7c10f28f77994c846"
+      "sha256": "32bf868eab892e5daa94a2e95d4f76683b05cceb7bee1d4f562b49d44c3e54a2"
     },
     {
       "name": "cross-system-mission-control",
@@ -148,22 +142,10 @@
       "sha256": "ca6464c552768c0125ddf7d1686f4bc156f0b2aa5b97c0c3b5a79155fd5a96cf"
     },
     {
-      "name": "email-action-workflow",
-      "path": "productivity/email-action-workflow",
-      "files": 3,
-      "sha256": "f59a6cefcc6a0f055ef9c46c04b6507e20bc97d04cc89e7439f66a67bdaf5616"
-    },
-    {
       "name": "femme-events-design",
       "path": "branding/femme-events-design",
       "files": 8,
-      "sha256": "d43bb1987e3ebcf02b3409f7404f467f5b939e03db8cfbb6194c1c9eabf89be7"
-    },
-    {
-      "name": "find-nearby",
-      "path": "leisure/find-nearby",
-      "files": 2,
-      "sha256": "fb0cdfa33eba828038e851f51fe44e4ab6d0b9c3d63c496980ce883331c6bd4a"
+      "sha256": "d7e039735c86aba9b90d75f42dcab74c1da0fcff72ab2bcba1229dbbb607ac37"
     },
     {
       "name": "firecrawl",
@@ -214,6 +196,12 @@
       "sha256": "6a1e0261d49e31c6c6456e224b55dcfaa9222bbb9ff533c7e3309994c1f49da2"
     },
     {
+      "name": "github-issue-to-pr",
+      "path": "github/github-issue-to-pr",
+      "files": 1,
+      "sha256": "f9cf8d1757eedce42fc7050d13e5bf250e3615536c2865f40e7e86fc3f358615"
+    },
+    {
       "name": "github-operations",
       "path": "github/github-operations",
       "files": 32,
@@ -235,7 +223,7 @@
       "name": "google-analytics-ga4",
       "path": "productivity/google-analytics-ga4",
       "files": 8,
-      "sha256": "e1dbb707a132ac2dbb3b30aa06f86d5f3bd0e76231250ef17f2f83c19d39505d"
+      "sha256": "f1722107e147d455dcc54c45a9e743742ca55836bf41019e230b1f371ac24398"
     },
     {
       "name": "google-business-profile-api-access",
@@ -247,7 +235,7 @@
       "name": "google-search-console",
       "path": "productivity/google-search-console",
       "files": 4,
-      "sha256": "c7fada67166100cbfbef9db7c26e280a89e11f838f1a85cb225316302cce7670"
+      "sha256": "4567af1f84d53b5f0cdfe4735843b1b5dc7e6a5b8b0571e555b006bd14374de4"
     },
     {
       "name": "hardware-compatibility-and-procurement",
@@ -318,8 +306,8 @@
     {
       "name": "local-seo-visibility-ops",
       "path": "productivity/local-seo-visibility-ops",
-      "files": 27,
-      "sha256": "002741ca368a29c15e0c4c32f9844fe3b3fc2278a56e21713ce01305d2e61d97"
+      "files": 28,
+      "sha256": "d744588a29549f2920e033ffc49a328a93b5319c84462106ec4a1dd79f98cde5"
     },
     {
       "name": "local-web-preview",
@@ -361,7 +349,7 @@
       "name": "native-mcp",
       "path": "mcp/native-mcp",
       "files": 4,
-      "sha256": "e9a54a3394578c111c96d9e6d7f61049ca0e00fb30b42c9ce7756697491da0e6"
+      "sha256": "a44fa33195409816db856b7857f06027463a9c5610955136f0b865653d95990b"
     },
     {
       "name": "negative-space-verification",
@@ -379,7 +367,7 @@
       "name": "notebooklm-to-obsidian-synthesis",
       "path": "note-taking/notebooklm-to-obsidian-synthesis",
       "files": 14,
-      "sha256": "63590493cb57ff42723e4f48ad82c7580987c54c5aa6951378f1750521d268a0"
+      "sha256": "97c7dceeb1d573564f789943dc608ccd28f5788fc1c32d3c91cb26e226376e06"
     },
     {
       "name": "obsidian-wiki-maintenance",
@@ -438,8 +426,8 @@
     {
       "name": "research-workflow",
       "path": "research/research-workflow",
-      "files": 18,
-      "sha256": "b548f27c78a94143385913dc01a957f237c7d7c67746458c35b7359cd85b6c80"
+      "files": 19,
+      "sha256": "e0007d2f9cfb7826c16c2aca011e981a3a37852162357e3036994b19e5aa18cb"
     },
     {
       "name": "review-artifact-relay-and-state-barriers",
@@ -451,7 +439,7 @@
       "name": "risk-proportional-pr-orchestration",
       "path": "software-development/risk-proportional-pr-orchestration",
       "files": 6,
-      "sha256": "40b50203fc41b4a587c2d2ceaf8b246b887d1cb2101e453d288c05321fbe3d77"
+      "sha256": "d4ebcd5ad5b2892035173fc34b7a94960bcb8f1de76d3a6335a73243a29560a4"
     },
     {
       "name": "scheduled-monitoring-workflows",
@@ -462,8 +450,8 @@
     {
       "name": "scoped-child-agent-execution",
       "path": "devops/scoped-child-agent-execution",
-      "files": 3,
-      "sha256": "d1b6c299b305e80f3da75c4e96efdab25bb54899ce6904c51a5a1e4e626b6174"
+      "files": 5,
+      "sha256": "77d0f6ad66131bed2940caa30e44326b67169ff938c2fcd507fe05e1f98b0c1e"
     },
     {
       "name": "session-history-synthesis",
@@ -504,8 +492,8 @@
     {
       "name": "verified-merge-closeout",
       "path": "software-development/verified-merge-closeout",
-      "files": 6,
-      "sha256": "6b82fb4a50afec7754ac5dc934fad9dc941a9047d1132468f316747edcad6544"
+      "files": 7,
+      "sha256": "54e05ea0b60113981b0cf606711a2cf003b66ee58b7872fee1ae5c682e198925"
     },
     {
       "name": "web-application-qa",
@@ -542,6 +530,12 @@
       "path": "software-development/writing-plans",
       "files": 1,
       "sha256": "10f90617ee2ab1a78f157a48b9006d15a82761e2316bf6b360857c14a748a0d5"
+    },
+    {
+      "name": "xitter",
+      "path": "social-media/xitter",
+      "files": 2,
+      "sha256": "b2eaffd242853edc404f0fcbba47b0c9bd2c35db39a4866a07371ae806d232fa"
     }
   ]
 }

@@ -128,6 +128,7 @@ Use the medium that best supports the user and task. Portable/editable formats a
 - Presentations: render slides, inspect overflow/order/visual hierarchy, verify citations.
 - Scripts/CLIs: execute with safe fixtures, test failure paths, verify exit codes and resulting state.
 - Datasets/reports: validate schema, counts, deduplication, provenance, and known edge cases.
+- Generated Markdown: parse/render with the intended Markdown dialect **before freezing for review**. Check table body row counts and key cells against the source dataset; raw text containing the right numbers is insufficient. A blank line between a table separator and its first data row can leave a valid-looking header with no rendered body. Keep this a proportional presentation smoke check, not semantic acceptance. If discovered after dispatch, preserve the frozen candidate and use the presentation-only delta path in `references/immutable-evidence-corrections.md`.
 - External writes: capture object ID and directly read back exact content/state/version.
 
 ### 3.1 Make interactive HTML review state portable
@@ -238,7 +239,7 @@ Linear owns the contract and closeout evidence, not the artifact itself when ano
 - Accepting an output because its creator self-reported success.
 - Verifying only file existence rather than rendering/executing/reading back.
 - Editing an immutable/hash-addressed artifact in place or reusing a review bound to superseded bytes.
-- Editing an exact-hash review candidate after dispatch—even for provenance, formatting, source rendering, or closeout wording—and then treating the in-flight verdict as authoritative. Freeze last; if bytes change, supersede the old packet and re-dispatch against the new hash.
+- Editing an exact-hash review candidate after dispatch—even for provenance, formatting, source rendering, or closeout wording—and then treating the in-flight verdict as authoritative. Freeze last; if bytes change, supersede the old packet and obtain acceptance bound to the new hash. For proven presentation-only changes, use the bounded delta-review path rather than restarting unrelated factual checks.
 - Correcting a claim without explicitly marking the old manifest/review as non-canonical for future decisions.
 - Creating duplicate indexes or knowledge stores.
 - Promoting transient task state into durable memory.

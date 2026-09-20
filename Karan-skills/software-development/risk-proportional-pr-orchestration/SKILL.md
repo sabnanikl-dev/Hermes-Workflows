@@ -74,7 +74,9 @@ Rules:
 
 ## Step 3: Fan out independent review
 
-For Standard and High tiers, run Reviewer A and Reviewer B as **two fresh Codex CLI processes** through the hardened `/Users/creator/.local/bin/codex-reviewer` launcher. Prepare separate detached exact-head worktrees and focused prompt files, then start both launchers concurrently in one parallel tool call using `terminal(background=true, notify_on_complete=true)`. Give both the same repo, PR, base, exact head, governing issue, frozen packet, and verification commands, but different rubrics from `references/reviewer-contracts.md`.
+For Standard and High tiers, run Reviewer A and Reviewer B as **two fresh Codex CLI processes** through the hardened `/Users/creator/.local/bin/codex-reviewer` launcher. Prepare separate detached exact-head worktrees and focused prompt files, then start both launchers concurrently in one parallel tool call using `terminal(background=true, notify=true)`. Give both the same repo, PR, base, exact head, governing issue, frozen packet, and verification commands, but different rubrics from `references/reviewer-contracts.md`.
+
+Before spending the A/B batch, verify Codex auth with one cheap actual pinned-model invocation through the hardened launcher, not only `codex login status`: that status can report logged in while real calls fail with 401 `token_expired` / `refresh_token_reused`. A smoke failure is `needs-Karan` for Codex reauthentication; do not copy tokens between stores, log out, change credentials, or substitute a reviewer without approval. Preserve passing exact-head gate evidence for resumption. After launch, inspect each process's initial runtime/error header once to confirm the pinned model/reasoning and catch immediate auth exits; then rely on completion notifications, not periodic polling.
 
 Do not silently substitute Hermes `delegate_task` subagents for the two Codex reviewer lanes. If the launcher, Codex authentication, pinned model, isolated worktrees, reviewer-owned publication sidecar, or verified reviewer GitHub identity is unavailable, stop as `needs-Karan`; do not let Hermes silently paraphrase or publish the reviewer verdict as a fallback.
 
@@ -177,8 +179,8 @@ Outcome meanings:
 
 Hooks may reduce babysitting, but they are not part of the proof contract:
 
-- For Codex reviewer processes launched with `terminal(background=true)`, use `notify_on_complete=true` and do not poll. Hermes `subagent_start` / `subagent_stop` hooks do not track those external CLI processes.
-- For a mutating builder/fix lane, pair `notify_on_complete=true` with bounded milestone checks of both process state and worktree/PR progress. If a quiet lane remains active for roughly 10–15 minutes, report one factual progress update and schedule one silent one-shot watchdog when useful; do not minute-poll or describe buffered empty stdout as a stall.
+- For Codex reviewer processes launched with `terminal(background=true)`, use `notify=true` and do not poll. Hermes `subagent_start` / `subagent_stop` hooks do not track those external CLI processes.
+- For a mutating builder/fix lane, pair `notify=true` with bounded milestone checks of both process state and worktree/PR progress. If a quiet lane remains active for roughly 10–15 minutes, report one factual progress update and schedule one silent one-shot watchdog when useful; do not minute-poll or describe buffered empty stdout as a stall.
 - Hermes subagent hooks may still mirror lifecycle for other explicitly authorized delegated lanes, but those lanes do not substitute for required Codex Reviewer A/B.
 - Outbound hooks are best-effort, notify-only, and may include tool inputs. Never send PR bodies, diffs, or private tool payloads to an untrusted target.
 - A hook event may update **active/completed** observability, but it never proves reviewer identity, exact head, verdict validity, gate success, or merge-readiness.

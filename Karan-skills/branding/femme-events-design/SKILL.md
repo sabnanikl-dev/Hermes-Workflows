@@ -40,6 +40,7 @@ The old 13-color palette (`#ddadbc`, `#efd5e1`, `#fdf8ea`, `#3f0d2a`, `#bd708c`,
 - Use Amanda's new 5-color tailwind scale for all new design work
 - Dark/light contrast for readability
 - Logo and brand assets: `~/projects/femme-events/brand-assets/`
+- For the search/favicon icon set, Karan selected `public/logo-footer.svg` (issue #150): preserve its existing brown FEMME wordmark and pink bloom, not a retyped wordmark or invented monogram. The source has a 252×144 outer viewBox but its measured artwork is square at `63 9 126 126`; removing empty outer padding is different from cropping artwork. Re-measure if the source changes. At 16px the five-letter wordmark has limited text legibility: show native-size visual proof and disclose this rather than claiming every letter is readable. Keep navigation and Open Graph source choices separate. Karan subsequently approved circular treatment for browser/search favicons: cream disc with transparent corners inside the square PNG/ICO dimensions, preserving the original artwork and framing. Apple/app icons and the JSON-LD 512px logo remain opaque square. Verify corner alpha in every PNG/ICO frame, unchanged square app bytes, native-size light/dark presentation, and new exact-head proof after generator changes; do not assume Google applies a circle automatically.
 - Site: `~/projects/femme-events/website/Femme Events Website Build/Femme-Events-Website/`
 
 ## Fonts Used Across Designs

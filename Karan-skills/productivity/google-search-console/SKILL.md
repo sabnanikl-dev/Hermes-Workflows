@@ -53,6 +53,9 @@ See `references/migration-precutover-baselines.md` for the full sequence and pit
 - Project-local workspaces may expose GSC credentials through ignored symlinks/env files instead of copying secrets; see `references/project-local-gsc-wiring.md`.
 - Standard `gws` Workspace OAuth is not enough unless it explicitly includes `https://www.googleapis.com/auth/webmasters.readonly`.
 - GSC API endpoint family still uses `webmasters/v3` for many calls.
+- URL Inspection returns recorded index/canonical status, not a live test, rendered HTML, or Google's business-entity interpretation. A conflicting user canonical does not establish exclusion; compare Google's selected canonical.
+- `sitemaps.contents[].indexed` is deprecated (Google: "do not use"); a zero does not establish zero indexed pages. Use URL Inspection or the appropriate UI report.
+- API discovery checked 2026-09-16 exposes no Search generative AI inclusion-control endpoint or dedicated generative-AI report type. Effective inclusion and the AI impressions report require the Search Console UI; ordinary Web analytics cannot isolate AI Mode. Recheck discovery when capabilities change. Evidence: Femme visibility `docs/femme-events/gsc-ai-eligibility-2026-09-16.md` and official API/sitemap references.
 - Known Femme property: `sc-domain:femmeevents.com`.
 
 Do **not** replace the general Google Workspace token just to test GSC. Use or recreate a dedicated least-privilege Search Console token.

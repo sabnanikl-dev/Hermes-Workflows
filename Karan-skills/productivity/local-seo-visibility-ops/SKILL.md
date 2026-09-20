@@ -96,6 +96,18 @@ See `references/local-seo-source-of-truth-operationalization.md` for the issue/w
 - Analytics/conversion posture: form submissions, phone/email clicks, CTA clicks.
 - UTM conventions for GBP and directory links where appropriate.
 
+### Search appearance: prove eligibility before blaming refresh lag
+
+When Karan asks whether a missing favicon or stale search appearance is a code defect versus Google delay, perform the live audit and inspect Google's recorded crawl before recommending waiting. A successful deploy, valid image response, or passing repository tests alone does not establish search eligibility.
+
+- Separate three claims: **production implementation**, **Google's recorded crawl/index state**, and **observed search display**. Never collapse them into “Google just hasn't updated.”
+- Check current official requirements, original homepage HTML declarations, decoded image formats/dimensions, response MIME/status, robots/indexability, redirects, and canonical hostname. Label bot-user-agent probes as simulations, not proof of actual Google crawler access.
+- Use read-only Search Console URL Inspection to compare `lastCrawlTime` with the verified deployment time. A pre-deployment recorded crawl supports lag but does not prove favicon acceptance or the absence of later unreported crawls. The API is not a live test or indexing request.
+- Inspect the actual rendered result and save a screenshot. A challenge page proves only blocked inspection. On a later user retry, freshly inspect the page and make one bounded navigation retry rather than inheriting a stale blocked verdict; never claim a challenge was clicked or solved if results simply loaded on retry.
+- Keep the response concrete: verified checks, remaining uncertainty, and one next action. Homepage indexing requests and live configuration changes remain approval-gated. Do not churn stable favicon URLs to chase Google's cache.
+
+See `references/favicon-search-readiness.md` for the evidence checklist, current-doc caveats, and a validated crawl-timing example.
+
 ### Phase 2 — GBP baseline and optimization
 
 Do a lightweight read-only check first; no harness unless multiple evidence-heavy deliverables are needed.

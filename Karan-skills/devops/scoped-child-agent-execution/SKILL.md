@@ -70,6 +70,8 @@ Record:
 
 Use a dedicated worktree, container, or other disposable task workspace. Verify its starting head and clean status before launch. Do not point a broad-permission child at a shared dirty worktree.
 
+When the original checkout contains live credentials or unrelated setup WIP, an independent `git clone --no-hardlinks <local-repo> <task-clone>` is a useful alternative to a linked worktree: it separates Git metadata as well as working files. Verify the intended base explicitly (a local clone is not proof of current remote main), set the intended remote, and prepare the task branch. Preserve the original checkout in place; selectively stage only reviewed nonsecret inputs and record their provenance. Never copy ignored environment/MCP/linkage files wholesale. Keep launcher policy outside worker-writable paths. This is workspace hygiene, not a replacement for the OS sandbox. See `references/dirty-checkout-builder-preflight.md`.
+
 Distinguish hygiene from confinement:
 
 - synthetic `HOME`, environment allowlists, empty MCP configuration, and a narrow tool list reduce accidental discovery;
@@ -88,6 +90,12 @@ A Claude tool allowlist is an authorization layer, not necessarily an OS sandbox
 
 If a trusted child needs `git`, `gh`, `npm`, and `node`, allow those families rather than all shell commands. For an authority-sensitive no-credential repair lane, prefer no child GitHub token/network at all: let the child edit and test, then have Hermes inspect the full diff, rerun checks, perform the already-authorized commit/push, and verify remote readback. Disclose that transport accurately. Do not include merge/deploy, destructive cleanup, credential management, or unrelated account commands.
 
+### Evidence handoff for file-only workers
+
+When a scoped worker has `Read`/`Edit` but no directory-discovery or network tool, give **exact absolute filenames**, not just a packet directory or live URLs. Name each review artifact and its readback (for example, `review-a.md`, `review-a-live.json`, `review-b.md`, `review-b-live.json`) and the specific source files to inspect. A readable directory alone is not a usable evidence pointer. Verify those files exist before launch; do not make the worker guess filenames or widen its permissions merely to discover them.
+
+If live-source access is intentionally unavailable, disclose the frozen-artifact fallback, preserve exact reviewer text and source URLs/IDs, and distinguish parent verification from worker verification. A worker admitting it never opened the signed artifacts has not satisfied the evidence-reading contract, even if its edit looks correct. Independently compare the change against every actual finding before accepting the handoff; do not claim the worker consumed evidence it did not read.
+
 ### 4. Launch non-interactively and supervise
 
 Use realistic timeouts and completion notification. Verify the process actually starts.
@@ -101,6 +109,8 @@ Be exact about supervision semantics:
 - Do not use a live PID as indefinite evidence of healthy progress. If runtime is unexpectedly long and artifacts stop changing, inspect logs/process state and set a concrete checkpoint.
 
 Inspect progress at meaningful intervals rather than killing a healthy worker early. In user updates, separate verified facts (`process running`, `files appeared`) from unverified pending outcomes (`tests green`, `push complete`, `PR opened`).
+
+**Reconcile ambiguous or delayed completion once.** When a restored process handle reports `exited` with no exit code but the expected final artifact is absent, do not immediately relaunch or classify the lane as failed. Cross-check the recorded PID against its command/workdir and bounded log/artifact progress; a PID alone is insufficient because it can be reused. If the original lane is still active, retain it and use one bounded completion watcher rather than repeated status calls. Accept a result only after process completion, exact final-artifact validation, worktree integrity and any required external readback. A later notification for a lane whose result was already validated is duplicate delivery: absorb it silently unless it changes the conclusion, and never republish its review or repeat the approval request. See `references/completion-reconciliation.md`.
 
 ### 5. Verify independently
 

@@ -1,6 +1,6 @@
 # Explicit exceptional-cycle guard and pre-builder refusal recovery
 
-Use when the normal PR Prover cap is exhausted, Karan approves exactly one blocker-scoped exception, and the exception must remain mechanically incapable of opening another repair.
+Use when the normal repair cap is exhausted, Karan approves exactly one blocker-scoped exception, and the exception must remain mechanically incapable of opening another repair. Preserve the already-selected execution mode: Full Prover uses its official adapter/journal; risk-proportional orchestration uses its scoped launcher and parallel reviewer lifecycle. An exception is not a reason to adopt a larger orchestration framework.
 
 ## Bind the exception outside automatic state
 
@@ -8,9 +8,23 @@ Record a local contract outside every repo/worktree with the approving human, ap
 
 Do not patch the tool's normal attempt constant or call a fresh attempt-0 run ordinary authority. The exception is separate, explicit authority.
 
-## Guard the official builder adapter
+## Risk-proportional launcher path
 
-Keep the full run inside `pr-prover`. Configure a small external builder guard that:
+For an existing non-Prover High-tier run, reuse the established scoped Claude launcher rather than manufacturing a Prover journal:
+
+1. Recover the full approval proposal if the reply quote is clipped. Inspect live PR/base/head/commit tail, all review surfaces, local/remote equality, clean task checkout, and real worker processes. Do not launch a duplicate or disturb the original dirty checkout.
+2. Preserve the old terminal checkpoint. Put the new exception contract, launcher settings, and one-build lock outside worker-writable paths. Keep normal cycles consumed and exceptional cycles started in separate fields; distinguish launcher PID from actual Claude PID.
+3. Give a credential-free worker a disclosed frozen-source fallback only when direct GitHub reading is intentionally unavailable. Fetch complete paginated conversation/review/inline surfaces and check thread pagination; save exact final reviewer bodies with immutable IDs/URLs/readbacks and a hash manifest. Name the exact readable filenames in the prompt, not only the packet directory. Freeze inputs separately from mutable process bookkeeping.
+4. Before implementation dispatch, guard repo/branch/base/starting head, PR open/draft state, PR commit tail, remote head, worktree cleanliness, approved blocker set, and packet hashes. Use an exclusive create (`open(..., 'x')` or equivalent) for a one-build lock so a repeated launch refuses. A lock alone does not prove the worker launched or that a repair commit exists; preserve those facts separately.
+5. Run the harmless strict-sandbox probe first. Verify actual tool-result records for authorized read/write and denied private/control access and disallowed egress, not merely the model's final summary. A mixed JSONL stream may include non-JSON diagnostics: retain the raw stream, parse valid JSON records, and require the expected successful tool-result records rather than accepting an empty parse. Probe success is not product proof.
+6. Launch with completion notification, verify the actual child PID and initial model/tool header once, then record ACTIVE accurately. If GitHub transport is within the approved envelope, publish/read back the bounded exception and retain prior blocking verdicts until fresh proof closes them.
+7. After the worker exits, independently inspect the entire changed-path set against the frozen allowance. Verify any commit/push through local, remote, PR head and commit-list readback, then run required native/integration/browser gates. Run fresh Codex A/B in parallel and the dependent integration audit afterward. No additional repair is authorized by an agent's completion marker or by passing tests.
+
+This path was exercised through a guarded sandboxed builder launch and verified authorization publication. It does not establish that the subsequent product repair, gates, or final reviews passed.
+
+## Full Prover: guard the official builder adapter
+
+For an already-selected Full Prover run, keep the full run inside `pr-prover`. Configure a small external builder guard that:
 
 1. accepts only attempt 1 / initial mode;
 2. validates the live repo, PR, branch, base, and head against the approval contract;
@@ -71,4 +85,4 @@ Do not turn broader framework hardening into an endless sequence of exceptional 
 
 ## Terminal rule
 
-After the one substantive builder push, require five-way push agreement, signed fix-comment readback, fresh exact-head gates, and A → B → Integration Auditor. Any remaining or new valid blocker stops for Karan; no further repair is authorized.
+After the one substantive builder push, require remote/PR/commit agreement, the workflow's required fix-artifact publication/readback, fresh exact-head gates, and fresh review in the selected mode: parallel A/B then dependent Integration Auditor for risk-proportional High tier; the official ordered A → B → Integration Auditor lifecycle for Full Prover. Any remaining or new valid blocker stops for Karan; no further repair is authorized. Never describe a verified launcher start as a verified product fix.

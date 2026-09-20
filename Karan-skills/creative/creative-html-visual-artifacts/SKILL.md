@@ -39,7 +39,7 @@ For research/report artifacts synthesized from repo dives or subagent findings:
 3. Verify the file exists and contains the required sections before previewing.
 3. If direct `file://` browser navigation is blocked, serve the containing directory with a temporary local HTTP server and open `http://127.0.0.1:<port>/<file>`.
 4. Run visual QA with a screenshot/browser vision pass for layout, legibility, cards/tables/diagrams, and responsive plausibility.
-5. Check the browser console for JavaScript/render errors.
+5. Check the browser console for JavaScript/render errors. For paginated HTML-to-PDF reports, inspect the actual PDF, not only screen screenshots: screen `min-height` can expand and hide print clipping. Under print media, assert each page's `scrollHeight <= clientHeight` and the last content block ends above its footer; then verify PDF page count and render all pages for a visual pass. Temporarily make sticky navigation static when taking section screenshots so it does not overlay later sections. Check decorative-font digits and punctuation at full size; demo fonts can replace a hyphen with a watermark glyph. Use a system-font span or rephrase the affected heading, then re-render.
 6. For high-stakes operational plans, use the iterative source-feedback + adversarial-review loop in `references/iterative-plan-artifact-review-loop.md`: send a compact plan summary back to source notebooks/research systems, patch the artifact, run separate adversarial reviewer lenses, patch again, then re-render/verify.
 7. Stop the temporary preview server before final handoff.
 8. In the final response, give the artifact path plus what was actually verified.

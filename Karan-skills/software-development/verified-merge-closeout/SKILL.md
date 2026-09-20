@@ -111,7 +111,7 @@ If branch/worktree cleanup is explicitly authorized, perform it only after the m
 5. for a verified squash merge, `git branch -d` will correctly refuse because the reviewed commit is not an ancestor: only after REST merge proof, prior-base parent proof, merge-tree equality, a clean task-owned feature worktree, and remote branch deletion may cleanup use `git branch -D`;
 6. delete the remote feature branch when not already deleted;
 7. fetch with `--prune` and verify all three refs are absent: remote branch via `git ls-remote`, local branch, and stale `refs/remotes/origin/...` tracking ref;
-8. verify each requested worktree path is absent. Require a clean default worktree only when one was actually used; otherwise prove the inactive default ref equals the remote merge commit and the unrelated control worktree's pre-existing status is unchanged.
+8. verify each requested worktree path is absent. Require a clean default worktree only when one was actually used. If an inactive default ref was updated, prove it equals the remote merge commit. If the default branch is checked out in a dirty unrelated worktree, do not reset, stash, fast-forward, or update that checked-out ref merely to finish cleanup: preserve its HEAD and working changes, verify its before/after status, and use the fetched `origin/<base>` plus GitHub base-ref proof instead. Report local default synchronization as intentionally deferred, not completed.
 
 Use explicit `if ...; then exit 1; fi` checks for expected-absent refs in compound shell commands. This keeps the final command status unambiguous while still failing closed.
 
@@ -155,6 +155,10 @@ Report only directly verified facts:
 - tracker final state and verified closeout-comment ID;
 - umbrella issues, branches, deploys, and downstream work intentionally left unchanged.
 
+### Static-asset publication versus downstream display
+
+For a post-merge favicon, manifest, or social-preview check, separate three claims: the exact merge deployed, the public asset bytes match that merge, and the external consumer displays them. Verify deployment SHA/environment/status, then fetch the canonical public assets and compare their body hashes with `git show <merge>:<asset-path>`; require successful responses and correct MIME types, not merely reachable URLs. Inspect the live page's declarations separately. None of those proves Google Search or another consumer has refreshed its display. Do not call a local QA sheet a search-result screenshot or close a downstream acceptance gate from deployment success alone. See `references/static-asset-publication-proof.md` for the proven byte-comparison pattern and evidence boundaries.
+
 ## Pitfalls
 
 - “Merge-ready” is not merge authorization.
@@ -181,7 +185,7 @@ Report only directly verified facts:
 - [ ] Tracker was fetched after merge before any status mutation.
 - [ ] Auto-completed tracker state was not mistaken for completed checkbox/evidence reconciliation.
 - [ ] Final tracker state, semantic body, authorized parent row/state, and closeout comment IDs were read back directly.
-- [ ] When deletion was authorized: the default branch/ref was synchronized without touching unrelated WIP; the branch-holding worktree, local branch, remote branch, and remote-tracking ref were each verified absent; detached review/evidence worktrees were removed only if cleanup/closeout scope included them.
+- [ ] When deletion was authorized: the fetched remote base was verified and the local default was either safely synchronized or explicitly preserved unchanged because its checkout contained unrelated WIP; the branch-holding worktree, local branch, remote branch, and remote-tracking ref were each verified absent; detached review/evidence worktrees were removed only if cleanup/closeout scope included them.
 - [ ] Branch deletion/downstream/deploy authority was not inferred.
 
 ## References

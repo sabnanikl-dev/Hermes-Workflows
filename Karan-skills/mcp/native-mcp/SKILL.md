@@ -303,6 +303,14 @@ Also distinguish **server discovery** from **authenticated tool calls**: `hermes
 - Look at Hermes Agent startup logs for connection messages
 - Tool names are prefixed with `mcp_{server}_{tool}` -- look for that pattern
 
+### Neon CLI project-scoped MCP setup
+
+For an approved Neon setup, inspect `neon mcp --help` before running the dashboard's suggested `neon mcp -y`: Neon CLI 5 defaults to global agent config, all detected apps, an account-wide API key and write tools. For project-only intent, obtain approval to narrow it, then use `neon mcp -y --project --project-id <exact-id> --agent claude-code --agent codex`. This creates a project-scoped key but still permits writes/deletes inside that project. Do not imply it is read-only. It does not configure Hermes itself.
+
+Before installing, inspect existing config without exposing secrets and ignore `.mcp.json` and `.codex/config.toml`; ignore `.env*` and local `.neon` linkage too. The generated MCP server name is `Neon` (capitalized), Claude uses `headers`, Codex uses `http_headers`. Set credential-bearing local files to 0600. Verify project URL and header parity without printing values, then test initialize, tools/list and an exact-project read. A scoped server removes project_id from tool inputs and injects it itself; inspect the returned schema. A read-only SELECT may verify database connectivity. Configured files plus transport checks do not prove an already-running agent has reloaded them.
+
+`neon skills -y` can fail with no detected project agents; explicitly select approved agents. Codex skills use shared `.agents/skills`, not necessarily `.codex/skills`; Claude gets project links. Count/verify installed SKILL.md files against the catalog. `neon link` and `neon deploy` may pull secret env variables automatically; never print env contents. Preserve the user's exact neon.ts when supported, inspect `neon config plan` before apply, and read back exact-project/branch status plus bucket access after deploy. A no-op deploy is valid if remote state already matches. This provisions Neon policy, not frontend hosting, auth integration or business-table persistence. `preview.buckets` remains supported but deprecated in current config packages.
+
 ### CodeGraph MCP connects but cannot answer project questions
 
 If `hermes mcp test codegraph` succeeds but CodeGraph tools report no project loaded or no `.codegraph/` directory, distinguish three layers before declaring the MCP broken:

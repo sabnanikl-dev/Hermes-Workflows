@@ -29,7 +29,11 @@ Load this skill when an autonomous PR builder/reviewer loop has already started 
 - an exception guard refuses before Claude launches, and the operator must prove whether the substantive exception remains unused before replaying it;
 - an opaque-child design still exposes an interceptable first-port handshake, so provider privacy must come from a child-owned fixed grammar rather than assumed port secrecy.
 
-For a normal uninterrupted run, use `autonomous-pr-prover`. This skill is the recovery layer, not a competing prover implementation.
+For a normal uninterrupted existing-PR run, use `risk-proportional-pr-orchestration`; use `autonomous-pr-prover` only when the approved workflow requires Full Prover semantics. This skill is the recovery layer, not a reason to change execution modes. A capped High-tier run remains native gates + parallel Codex A/B + dependent integration audit after an approved exception; do not introduce Prover journals, ACK reconciliation, or serialized A/B merely because its recovery reference discusses them.
+
+### Short approval after a paused run
+
+When Karan replies “Authorized” or “Approved” to a clipped prior message, recover the complete preceding proposal from session history before interpreting scope. Treat it as approval of that bounded proposal, not merge/deploy authority. Use history to recover intent, then live GitHub and local/process checks to establish current truth. Preserve the exhausted normal budget and record any explicitly approved additional allowance separately. Do not ask for the same approval again when its referent is recoverable and unambiguous. See `references/explicit-exception-guard-and-prebuilder-refusal.md` for both Full Prover and risk-proportional launcher paths.
 
 ## Product-first replacement stop rule
 
