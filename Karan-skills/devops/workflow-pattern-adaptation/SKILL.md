@@ -1,6 +1,6 @@
 ---
 name: workflow-pattern-adaptation
-description: Assess external agent/workflow references against the live local stack, separate implemented behavior from roadmap or marketing, and produce a staged adaptation plan without wholesale importing weaker architecture.
+description: "Use when judging external agent workflows/config claims for adoption."
 version: 1.0.0
 author: Hermes Agent
 metadata:
@@ -155,12 +155,15 @@ Track stage lead times, first-pass review rate, fix cycles, human interventions,
 ## References
 
 - `references/agent-loop-factory-comparison.md` — session-derived comparison pattern for a three-skill spec/build/review factory versus a more advanced existing Hermes stack.
+- `references/hermes-config-claim-verification.md` — verifying "paste this into config.yaml" or Hermes-behaviour claims from posts: map keys to code, real-import harness against a temp HERMES_HOME, per-claim PASS/PARTIAL/FAIL, live effective vs proposed with defaults merged, traps in pasted YAML, and the approved live summariser A/B (cost gate from live list prices, identical captured compression prompt, faithfulness grep, timeout/window checks). Harness template: `scripts/verify_compression_claims.py`.
+- `references/external-tool-lists-and-promotion-gates.md` — triaging social-post "N must-use tools" lists (link resolution, overlap check, batched README review, install hazards, wiki write-up, "useful to us?" answer) and the evidence-gated ladder for promoting an experimental component to default.
 
 ## Pitfalls
 
 - Do not summarize a workflow video from its title or description when a transcript is extractable.
 - Do not equate a README roadmap with shipped behavior.
 - Do not install a third-party skill bundle just because its naming or simplicity is attractive.
+- Do not recommend pasting a post's Hermes config wholesale. Compute the current effective value with defaults merged first; explicit `null`s in pasted YAML often remove protective default caps, and the defaults frequently already deliver the claimed benefit.
 - Do not create coding-state mirrors across Linear, GitHub, Kanban, and wiki.
 - Do not recommend autonomous merge before exact-head approval binding and live re-verification exist.
 - Do not add multiple persistent crons before auditing the existing cron inventory.

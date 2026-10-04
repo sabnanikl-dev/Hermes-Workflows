@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 88,
+  "skill_count": 83,
   "skills": [
     {
       "name": "adversarial-technical-artifact-review",
@@ -20,12 +20,6 @@
       "path": "devops/agent-execution-resilience",
       "files": 22,
       "sha256": "347f11f05b2ae95af26e7840022352251b6820f8867be9393d30283157d4656b"
-    },
-    {
-      "name": "agent-workflow-contract-proofing",
-      "path": "software-development/agent-workflow-contract-proofing",
-      "files": 7,
-      "sha256": "aa3895d04abc217a6df42f2928168e6b5c2cd00a576751f114f8af5ce8b47149"
     },
     {
       "name": "agent-workflow-orchestration",
@@ -60,8 +54,8 @@
     {
       "name": "artifact-output-governance",
       "path": "productivity/artifact-output-governance",
-      "files": 9,
-      "sha256": "5910f6500728740e23357ce3ca20db63498fcaa1f2c0518163f654ce9a99ca4f"
+      "files": 10,
+      "sha256": "add7fb0372de938c76161c14e3bb2e2512d96742c48cb42c0739c509b16c41a6"
     },
     {
       "name": "autonomous-coding-agents",
@@ -76,22 +70,10 @@
       "sha256": "3ed7a8c15775851bc22c1d91c12184d3c6569fbc76d4feed786eab6559500594"
     },
     {
-      "name": "baoyu-visual-storytelling",
-      "path": "creative/baoyu-visual-storytelling",
-      "files": 115,
-      "sha256": "3f829dbc1aecc2190caf2cc3d7febf0bc62a9e3d6affc4733485e9458bb37f83"
-    },
-    {
       "name": "client-automation-workflow-scaffolding",
       "path": "devops/client-automation-workflow-scaffolding",
       "files": 4,
       "sha256": "06f1578fddc27dc5c2726b39ab3432aa8ad7ca1ccb074d0198302c717b52c82b"
-    },
-    {
-      "name": "client-ontology-architecture",
-      "path": "software-development/client-ontology-architecture",
-      "files": 10,
-      "sha256": "91abff63f5ea69e700f29ca839c1d50d3284ff40863b4d2b4b8243559e7eeb06"
     },
     {
       "name": "code-review",
@@ -124,34 +106,22 @@
       "sha256": "002093cfd0e3384e6ea671a3a4ef40ccbca7126a269dad18d21d0b8cc851d6f5"
     },
     {
-      "name": "cross-tracker-development-execution",
-      "path": "devops/cross-tracker-development-execution",
-      "files": 12,
-      "sha256": "ed0dd4d031a10bcb7d9d239b402b4d9e6f9afc572932d2198d1aaa881d70cdda"
-    },
-    {
       "name": "daily-log",
       "path": "productivity/daily-log",
       "files": 9,
-      "sha256": "2197a6d6f7e10f32eefd69cdfb99d6a1484d79d738b9e174182a378d5bae4866"
+      "sha256": "5718e8581ab416d1f3fadea2f0e6e94b9cca87a266c29077ba2e876b513c3279"
     },
     {
       "name": "deterministic-validator-review",
       "path": "software-development/deterministic-validator-review",
-      "files": 21,
-      "sha256": "ca6464c552768c0125ddf7d1686f4bc156f0b2aa5b97c0c3b5a79155fd5a96cf"
+      "files": 22,
+      "sha256": "c11817c452d8eb607241081a567725a53db3f245c89c68b2d65a9f349cd66166"
     },
     {
       "name": "femme-events-design",
       "path": "branding/femme-events-design",
       "files": 8,
-      "sha256": "d7e039735c86aba9b90d75f42dcab74c1da0fcff72ab2bcba1229dbbb607ac37"
-    },
-    {
-      "name": "firecrawl",
-      "path": "firecrawl",
-      "files": 3,
-      "sha256": "431dec4fc3118809e74396a00e29df61ad395bd7f77f290268ccb3827a0637e2"
+      "sha256": "21e14cc71648341b45315feb631223a2d0fd2a370f38f4401e1a540af6d448cf"
     },
     {
       "name": "firecrawl-agent",
@@ -187,7 +157,13 @@
       "name": "generated-artifact-proofing",
       "path": "software-development/generated-artifact-proofing",
       "files": 11,
-      "sha256": "90f10379aa41dfeaec020146c5ca354fd6f87f2b9f89e5d2b977f41689333a06"
+      "sha256": "4d3f27bcc3331af353d449ecfc654267e1d9c937bc863aef319b25ed3bb0625a"
+    },
+    {
+      "name": "georgia-public-campaign-finance",
+      "path": "research/georgia-public-campaign-finance",
+      "files": 1,
+      "sha256": "faa2f2680e712185cb35742e0a847b47e7718813bb7395cb934a694d54871ee7"
     },
     {
       "name": "github-issue-specs",
@@ -222,8 +198,8 @@
     {
       "name": "google-analytics-ga4",
       "path": "productivity/google-analytics-ga4",
-      "files": 8,
-      "sha256": "f1722107e147d455dcc54c45a9e743742ca55836bf41019e230b1f371ac24398"
+      "files": 9,
+      "sha256": "83aa8e9de61f4fc263cd6b07fdf61317a39f3b0a6621cfda14bc760eca8c9979"
     },
     {
       "name": "google-business-profile-api-access",
@@ -250,6 +226,12 @@
       "sha256": "37fd478ee9b4f87a7a6c942aa853b06c774d19660524c1cc278fb2ce7b7e4196"
     },
     {
+      "name": "hermes-desktop-operations",
+      "path": "devops/hermes-desktop-operations",
+      "files": 2,
+      "sha256": "782cd28d08a312290a758b09564feac374687005a5691c9d940dc7228442a9ab"
+    },
+    {
       "name": "ideation",
       "path": "creative/creative-ideation",
       "files": 2,
@@ -265,7 +247,13 @@
       "name": "integration-audit-review",
       "path": "software-development/integration-audit-review",
       "files": 2,
-      "sha256": "a103c92aa8a169db61ebe7a563a27ab75b4dac772062d40b35573974911e8916"
+      "sha256": "e24c0a541517b7123bc8ad28027d1ca6bc341bdf7d33460a1bc277ff10328b5b"
+    },
+    {
+      "name": "jev-skill-advisor",
+      "path": "devops/jev-skill-advisor",
+      "files": 2,
+      "sha256": "465f2ca63a7e1fc368268f000fd18088f9aaf261e75e5f11a7b2c53d1636909b"
     },
     {
       "name": "jmd-menswear",
@@ -314,6 +302,12 @@
       "path": "devops/local-web-preview",
       "files": 6,
       "sha256": "3ec0b4878db33d6e0c979df18a69fb7cb841064b4b273ab7523445a21c0e3c3b"
+    },
+    {
+      "name": "mac-storage-cleanup-review",
+      "path": "devops/mac-storage-cleanup-review",
+      "files": 1,
+      "sha256": "a829e0bc2832941744dcc18e4a0ecad8d94af3205cc105e56c954d2e4d77ba12"
     },
     {
       "name": "mcporter",
@@ -388,22 +382,10 @@
       "sha256": "f3e97f2d0838178743998f4e727cc20c667852ad287c30ce911331367285da2f"
     },
     {
-      "name": "preflight-qualification-gates",
-      "path": "devops/preflight-qualification-gates",
-      "files": 3,
-      "sha256": "9e30a081636a69e7efd4087e96ab60615203f5cace6bbf7cae5c5b3ffd8d1ae5"
-    },
-    {
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
       "files": 82,
       "sha256": "5b643b0d3f51e7eaa883f56e535e5fe17deb132e82e29e27f5704217ffca4552"
-    },
-    {
-      "name": "profile-isolated-work-execution",
-      "path": "devops/profile-isolated-work-execution",
-      "files": 7,
-      "sha256": "65c51e57b9919ebb7f32eebaa0e86ef298de1855097c1bae292703a6cb023040"
     },
     {
       "name": "project-kickoff",
@@ -426,8 +408,8 @@
     {
       "name": "research-workflow",
       "path": "research/research-workflow",
-      "files": 19,
-      "sha256": "e0007d2f9cfb7826c16c2aca011e981a3a37852162357e3036994b19e5aa18cb"
+      "files": 21,
+      "sha256": "0c9c8d873fd168fd25aaa1e836fb82987bbf1118dcaf86acd5af4084d2870921"
     },
     {
       "name": "review-artifact-relay-and-state-barriers",
@@ -445,13 +427,13 @@
       "name": "scheduled-monitoring-workflows",
       "path": "devops/scheduled-monitoring-workflows",
       "files": 7,
-      "sha256": "166507c160173fc3346f4a7ff7ac33b0c896ac3d076babe3f672848e37e6a714"
+      "sha256": "d37694468c6b9446a06de7260a103b74cbb1af8b95e20893eb8d22bc19fa99a0"
     },
     {
       "name": "scoped-child-agent-execution",
       "path": "devops/scoped-child-agent-execution",
-      "files": 5,
-      "sha256": "77d0f6ad66131bed2940caa30e44326b67169ff938c2fcd507fe05e1f98b0c1e"
+      "files": 6,
+      "sha256": "c693a54bd0cd4b0fc7b46637481444a39c31c3c175f0f26551d84cc792c2ab71"
     },
     {
       "name": "session-history-synthesis",
@@ -464,12 +446,6 @@
       "path": "software-development/software-development-lifecycle",
       "files": 18,
       "sha256": "a9935ef31b790acaafc729e1c37584e03a732d1c264b409a78735432d694b115"
-    },
-    {
-      "name": "software-vendor-trust-assessment",
-      "path": "research/software-vendor-trust-assessment",
-      "files": 3,
-      "sha256": "d10f8b4025540ee26c1804667df55f7d646916bbc2ad872a61906be51d56d0f5"
     },
     {
       "name": "subagent-driven-development",
@@ -499,7 +475,7 @@
       "name": "web-application-qa",
       "path": "software-development/web-application-qa",
       "files": 14,
-      "sha256": "38ee720fc5a2fc906975d9490939acfe247465a4a4199a46181d494f3540a691"
+      "sha256": "d8ba8ff89a2ed5d71fa450800b796ab86e853e44170465c30138d15de59195d8"
     },
     {
       "name": "wiki-health-check",
@@ -508,16 +484,10 @@
       "sha256": "a71559a27b717a95b96516810c4232312308017ce5b3da87103eb7c95c925810"
     },
     {
-      "name": "workflow-artifact-reconciliation",
-      "path": "devops/workflow-artifact-reconciliation",
-      "files": 2,
-      "sha256": "5a6d046bfbd329edef2af59c48609b89ef84fe7bc5a0823390df648fe362ed0e"
-    },
-    {
       "name": "workflow-pattern-adaptation",
       "path": "devops/workflow-pattern-adaptation",
-      "files": 2,
-      "sha256": "b23a3b95d8ba2d6e683532c45c3eddcf7c01f914d5c19b8ac404465d6f9edc9f"
+      "files": 5,
+      "sha256": "f6ad84ef12024b1ea9fe4c2223df5a87f29b3c72cc33c83b2338eb98c5bcdf7e"
     },
     {
       "name": "writing-humanization-and-voice-editing",

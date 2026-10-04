@@ -102,6 +102,10 @@ For every documented bound `N`, execute `N-1`, `N`, and `N+1` cases (plus empty/
 
 Do not settle for a prompt-round-trip test that merely asserts the prose says “1 to N.” The production parser must reject `N+1`, and artifact/readback paths must preserve the exact accepted record.
 
+### Cross-check normal parsing against oversized-input fallbacks
+
+When input length selects a cheaper fallback parser, test paired inputs that differ only by unrelated padding across the threshold. A governed input must not become `none`/ignored merely because padding switched branches. Cross raw/percent-encoded keys, known exact keys/unknown keys in a governed prefix namespace, and key-length/query-length bounds. An open namespace such as `utm_*` cannot be safely recognized using only the maximum length of known keys. Test downstream state, not just classification: ignored invalid campaign input can preserve stale attribution. See `references/oversized-parser-semantic-parity.md` for the verified diagnostic pattern.
+
 ### 3.0.3 Probe report truth, redaction, and source attribution
 
 When a generator turns workflow/run evidence into owner-safe or operator-facing HTML/JSON/Markdown, test more than curated fixtures. Cross-check declared counts against detail rows, reject success when any failure evidence exists, prove every required issue-contract field survives the real producer→adapter boundary, and never attach a real execution ID to synthetic counts. Redaction needs independent families beyond the builder's examples (assignment-form secrets, Basic/Bearer credentials, opaque IDs at path boundaries, and person-bearing filenames).

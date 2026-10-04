@@ -141,6 +141,14 @@ Treat the returned exported file as the authoritative review state. Freeze check
 
 See `references/portable-interactive-html-review-state.md` for the export contract, mobile handoff, and end-to-end test sequence.
 
+### 3.2 Transfer and publish complete static preview bundles
+
+- Honor attachment supersession: exclude withdrawn files, even when they could fill a missing dependency. Preserve the complete approved asset tree and its relative paths; do not invent missing dependencies.
+- Separate receipt from publication: keep transfers in staging, require publication approval, and prefer one publishing owner for an existing shared site to prevent incomplete deployments from replacing unrelated content.
+- Inspect actual publisher capabilities before claiming an upgrade is necessary. Verify nested resources, comparison iframes, and implemented controls locally and on the deployed target; a top-level HTML response alone is insufficient.
+
+Follow `references/static-preview-bundle-publication.md` for dependency discovery, cross-device transfer decisions, hosting preflight, framing/privacy safeguards, and production verification.
+
 ### 4. Run independent acceptance
 
 A separate reviewer evaluates:

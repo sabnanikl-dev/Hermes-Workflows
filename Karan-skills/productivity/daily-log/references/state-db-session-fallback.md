@@ -10,7 +10,7 @@ Some Hermes sessions are persisted primarily in `~/.hermes/state.db` instead of 
 
 1. Compute the target day's local time window, usually America/New_York for the 1 AM ET daily-log cron.
 2. Open `~/.hermes/state.db` with `sqlite3` from `python3.11`.
-3. Query `sessions` where `started_at >= start_ts and started_at < end_ts`, ordered by `started_at`.
+3. Enumerate sessions through target-day message timestamps (`messages.timestamp >= start_ts and messages.timestamp < end_ts`, joined to `sessions`), not only session start times. A conversation started earlier can contain substantive work on the target day. Limit excerpts to that day's messages.
 4. For each session, query `messages` by `session_id`, ordered by `id`.
 5. Summarize only useful signal:
    - first/combined user prompts
@@ -18,7 +18,7 @@ Some Hermes sessions are persisted primarily in `~/.hermes/state.db` instead of 
    - notable tool names/counts
    - verified writes or created artifacts mentioned in the final response
 6. Exclude empty placeholder sessions and redact secrets.
-7. Roll related subagent sessions into the parent workstream instead of listing every child independently.
+7. Roll related subagent sessions into the parent workstream instead of listing every child independently. Do not exclude every row with `parent_session_id`: compression continuation sessions can carry the only final response or a later user task. Inspect non-subagent continuations and combine their target-day messages with the root lineage.
 
 ## Example probe
 
@@ -36,14 +36,14 @@ end = (datetime.datetime(target.year, target.month, target.day, tzinfo=tz) + dat
 con = sqlite3.connect(DB)
 con.row_factory = sqlite3.Row
 sessions = con.execute(
-    'select * from sessions where started_at>=? and started_at<? order by started_at',
+    'select * from sessions s where exists (select 1 from messages m where m.session_id=s.id and m.timestamp>=? and m.timestamp<?) order by started_at',
     (start, end),
 ).fetchall()
 
 for s in sessions:
     msgs = con.execute(
-        'select id, role, content, tool_name, timestamp from messages where session_id=? order by id',
-        (s['id'],),
+        'select id, role, content, tool_name, timestamp from messages where session_id=? and timestamp>=? and timestamp<? order by timestamp,id',
+        (s['id'], start, end),
     ).fetchall()
     users = [m['content'] for m in msgs if m['role'] == 'user' and m['content']]
     assistants = [m['content'] for m in msgs if m['role'] == 'assistant' and m['content']]

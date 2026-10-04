@@ -136,6 +136,8 @@ When the PR advertises test, fixture, probe, artifact, or row counts, derive the
 
 For UI-affecting PRs, load `web-application-qa` and `local-web-preview`, and require a launch that grants task-scoped `browser` and `vision` toolsets.
 
+For lifecycle/BFCache adjudication, inspect launch defaults before using a negative browser probe to dismiss reachability. Playwright Chromium may disable BFCache by default; remove that flag for the targeted probe, verify actual persisted lifecycle events, and avoid waiting for a new `load` on a cached restore. An ordinary non-keepalive fetch plus timeout alone is not proof that navigation destroys its callback. See the BFCache pitfall in `web-application-qa`; report browser-mechanism proof separately from application-level reproduction.
+
 Verify the affected rendered surface at the exact PR head, including relevant desktop/mobile viewports, console errors, interactions, overflow/geometry, accessibility semantics, and screenshots. A PR-status screenshot is not visual proof. Never mutate CMS, deployment, OAuth/CORS, account, or live data merely to unlock a screenshot.
 
 ### 6. Reconcile GitHub state

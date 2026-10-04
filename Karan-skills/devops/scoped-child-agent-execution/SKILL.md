@@ -90,15 +90,23 @@ A Claude tool allowlist is an authorization layer, not necessarily an OS sandbox
 
 If a trusted child needs `git`, `gh`, `npm`, and `node`, allow those families rather than all shell commands. For an authority-sensitive no-credential repair lane, prefer no child GitHub token/network at all: let the child edit and test, then have Hermes inspect the full diff, rerun checks, perform the already-authorized commit/push, and verify remote readback. Disclose that transport accurately. Do not include merge/deploy, destructive cleanup, credential management, or unrelated account commands.
 
+### Credential-free live evidence for public repositories
+
+When a repair lane needs original live GitHub findings but must receive no GitHub token, verify that the exact repository and PR are publicly readable through an unauthenticated request. If the task permits that egress, provide exact public REST GET endpoints and immutable review/comment IDs through the strict sandbox's API-domain allowance. Keep commit/push/publication parent-owned unless separately authorized. A domain allowlist is not a method/path boundary; use a narrow read broker or frozen evidence when stronger confinement is required.
+
+Verify actual sandboxed tool output for authorized project read/write, denied private read, denied operator-control write, denied unrelated network, and allowed exact live PR read. A model summary or generic CLI permission-mode label is not the probe result. See `references/public-repo-credential-free-repair.md` for the tested preflight and honest partial-live evidence handoff.
+
 ### Evidence handoff for file-only workers
 
-When a scoped worker has `Read`/`Edit` but no directory-discovery or network tool, give **exact absolute filenames**, not just a packet directory or live URLs. Name each review artifact and its readback (for example, `review-a.md`, `review-a-live.json`, `review-b.md`, `review-b-live.json`) and the specific source files to inspect. A readable directory alone is not a usable evidence pointer. Verify those files exist before launch; do not make the worker guess filenames or widen its permissions merely to discover them.
+When a scoped worker has `Read`/`Edit` but no directory-discovery or network tool, give **exact absolute filenames**, not just a packet directory or live URLs. Name each review artifact and its readback (for example, `review-a.md`, `review-a-live.json`, `review-b.md`, `review-b-live.json`) and the specific source files to inspect. A readable directory alone is not a usable evidence pointer. Verify those files exist and validate their content shape before launch: `reviewer-A.txt` may be a launch prompt, not a verdict. Label prompts, exact final-message artifacts and original API readbacks distinctly; preserve original review/comment IDs and head. Do not make the worker guess filenames or widen its permissions merely to discover them.
 
 If live-source access is intentionally unavailable, disclose the frozen-artifact fallback, preserve exact reviewer text and source URLs/IDs, and distinguish parent verification from worker verification. A worker admitting it never opened the signed artifacts has not satisfied the evidence-reading contract, even if its edit looks correct. Independently compare the change against every actual finding before accepting the handoff; do not claim the worker consumed evidence it did not read.
 
 ### 4. Launch non-interactively and supervise
 
 Use realistic timeouts and completion notification. Verify the process actually starts.
+
+Validate launcher control-file schemas during the harmless preflight, not during implementation. For a strict empty Claude MCP configuration, use `{"mcpServers": {}}`, not a bare `{}`. If startup rejects a control file before work begins, correct only that launcher-owned input and rerun the same boundary probes; do not loosen isolation or request redundant workflow approval. Inspect the runtime's reported model, exposed tools, effective permission mode and actual probe tool results rather than assuming requested flags took effect. A hardening layer can override the requested permission mode while explicit tool allowances and the OS sandbox remain active. See `references/claude-code-strict-child-isolation.md` for the verified retry pattern.
 
 Be exact about supervision semantics:
 

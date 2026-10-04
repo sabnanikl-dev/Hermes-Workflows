@@ -144,7 +144,9 @@ Generate the PDF using the target browser engine. Then:
 2. visually inspect representative pages;
 3. extract PDF text;
 4. assert every required SOP/operator section body appears, not only its heading;
-5. verify closed `<details>` or accordion content is exposed in print, or render a dedicated print-safe representation.
+5. verify closed `<details>` or accordion content is exposed in print, or render a dedicated print-safe representation. Test newly added disclosure sections too; an earlier check of policy bodies does not cover later financial/history disclosures. When using `beforeprint` to open details, preserve which were originally closed and restore that state in `afterprint`.
+
+Normalize PDF layout artifacts narrowly during full-body comparison: a line break immediately after a literal hyphen or range dash may split one source token. Remove that layout break while retaining the punctuation; inspect mismatches before changing the normalizer so genuine missing text cannot be hidden.
 
 Keep deterministic DOM/text assertions in the repo when practical, but independently recapture the PDF on the final head.
 

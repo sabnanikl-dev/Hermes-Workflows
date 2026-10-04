@@ -14,7 +14,10 @@ Use this reference when Amanda/Karan provide raw copy notes that are not ready t
    - alternate heading/name options where decisions are still open
    - scope guardrails so the website does not overpromise
    - section-by-section GitHub issue plan for later implementation
-5. Wait for copy approval before creating GitHub issues or changing the live site.
+5. Wait for copy approval before creating new implementation issues or changing the live site. When an implementation issue already exists and Karan authorizes its workflow with an Amanda copy gate, prepare the exact-copy checkpoint first; do not duplicate the issue or ask Karan to authorize the same bounded build twice. Keep merge/deploy authority separate.
+6. For Discord approval, look up Amanda and the intended Femme channel, send one final review request with the exact revision and readable artifact, then read back the exact message, mention, and attachment metadata before reporting delivery. Delivery is not approval. Freeze the delivered copy revision; edits after delivery require a new revision and renewed approval.
+7. Keep the recipient document focused on the actual page prose, search/social text, proposed link labels, and one simple approval instruction. Put branch names, commit hashes, source maps, internal guardrails, and unrelated optional business questions in a separate internal artifact. Do not make Amanda review engineering provenance.
+8. Generate recipient HTML/PDF from one copy source and check actual mobile geometry before sending. Long URLs and table cells can overflow even when the HTML has a viewport tag; wrap them and verify rendered width rather than hiding horizontal overflow. Inspect the exported PDF and confirm it retains all proposed visitor-facing strings.
 
 ## Femme Voice Guardrails From Karan/Amanda Iteration
 

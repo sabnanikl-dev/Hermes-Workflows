@@ -92,7 +92,25 @@ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 claude --print \
   '<prompt>'
 ```
 
-Before expensive work, run a harmless smoke test: an authorized worktree file must be readable, while a private operator path is denied without listing or displaying private contents.
+The launcher-owned `/launcher-owned/empty-mcp.json` must contain the MCP envelope, even with no servers:
+
+```json
+{"mcpServers": {}}
+```
+
+### Schema-correction and effective-runtime preflight
+
+A verified launch recovery corrected a bare `{}` MCP file to the envelope above, then reran the same strict preflight successfully without changing sandbox policy, tool scope, credentials or workflow authority. Treat this as a narrow control-file correction, not grounds to disable strict MCP configuration or isolation. Check current CLI help when reusing a launcher; historical example flags are not a compatibility guarantee.
+
+Before expensive work, run harmless boundary probes and inspect the actual tool-result record, not just the model's final summary:
+
+- authorized project read and task-scratch write succeed;
+- a parent-private nonsecret fixture read is denied;
+- operator-control write is denied, and parent readback confirms unchanged bytes;
+- unrelated-domain egress is denied;
+- when explicitly allowed, anonymous access to the exact public PR returns the expected head.
+
+Also inspect the runtime initialization record. In the verified run, subprocess hardening forced requested `dontAsk` mode to effective `default`; Bash remained the only exposed tool, its explicit allowance worked, and all six boundary probes passed with tool exit status zero. Preserve hardening rather than disabling environment scrubbing to make the requested mode label appear. An effective mode label alone neither proves nor disproves sandbox enforcement. Passing preflight proves those tested launch boundaries only—not implementation completion, test success, or remote mutation.
 
 ## Capability and runtime isolation
 

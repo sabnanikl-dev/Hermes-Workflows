@@ -23,6 +23,7 @@ Absorbed subsections:
 - **Local business research**: verify local vendors/businesses with multiple sources and avoid search-result hallucinations.
 - **Facebook Marketplace local product research**: recover exact product tiers and price bands; treat user-shared monitoring repos as architectural references unless deployment is requested; build deterministic searches; bulk-extract rendered listing cards; verify the live radius label while locally rejecting injected out-of-area results; open only shortlisted candidates; and separate qualifying matches from near-misses. See `references/facebook-marketplace-local-product-research.md`.
 - **Georgia small-business registration research**: separate entity formation, federal/state tax registration, and location-dependent city/county licensing; distinguish mailing, registered-agent, and physical operating addresses; treat entity-name searches as preliminary only. See `references/georgia-small-business-registration.md`.
+- **Georgia state campaign-finance research**: route by filing year, inspect public PeachFile API responses, and distinguish selected disclosed sources from defensible donor rankings. See `references/georgia-campaign-finance-public-records.md`.
 - **Restaurant reservation research**: for date/time/party-size/ambiance constraints, check reservation platforms before generic search.
 - **Resume-to-role research**: extract resume facts first, build search queries from candidate profile, prioritize direct employer pages, and verify role details.
 - **Productized service reports**: combine tools/vendors, competitor analysis, economics, ICPs, GTM, and risks into an HTML business brief.
@@ -31,6 +32,7 @@ Absorbed subsections:
 - **Observed willingness-to-pay evidence sprints**: when a product is blocked on whether the target/comparable buyer actually pays for analogous assets, run a governor-first evidence sprint: candidate table, exact-buyer marketplace proof first, comparable seller proof second, strict rejection of weak sources, exact machine-readable markers only, then re-run the governor and preserve approval gates. See `references/observed-wtp-evidence-sprints.md`.
 - **Local directory niche validation**: test broad local media/directory ideas with a wide niche scan, unfair-advantage scoring, monetization paths, and maintenance-risk checks. See `references/local-directory-niche-validation.md`.
 - **Subagent research reports**: split complex topics into parallel streams, validate sources, and synthesize into a polished deliverable.
+- **Local-election finance research**: verify office/committee identity, discover public local filing endpoints, separate amended reports and money categories, and avoid zero-money or late-filing inferences from portal gaps. See `references/local-election-finance-research.md`.
 - **Notion scraping**: public Notion pages usually need browser navigation because curl returns only the shell.
 - **Ontology research-to-spec**: when research turns into a reusable client ontology standard, switch from article summary mode to the `client-ontology-architecture` skill and ground the spec in wiki/project/GitHub/Linear sources.
 
