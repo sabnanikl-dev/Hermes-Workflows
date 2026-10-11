@@ -84,7 +84,10 @@ When to migrate from Holographic to a knowledge-graph provider:
 5. Keyword search returns irrelevant results (need semantic retrieval)
 
 ## Troubleshooting
-- If `pip install` fails, try `./venv/bin/python3 -m pip install <package>`
-- Always check the provider's GitHub repo for recent commits — integrations may have been dropped or renamed
-- `pip install hindsight` is broken; don't waste time on it
-- Tool changes require `/reset` (new session) to take effect
+- Resolve the launcher's actual interpreter before checking packages. Modern source launchers can re-exec into a PM generation while `venv/bin/python` still points at an obsolete environment. Read the installation's PM `facts.json`; clear inherited `PYTHONPATH`/`PYTHONHOME` for package probes.
+- On PM-managed Hermes, use reviewed `hermes plugins install <provider>` / enable admission for dependencies; do not repair the runtime with ad-hoc pip installs. Review consent and compare installed distributions before/after to catch unrelated changes.
+- If interactive chat freezes at “Initializing agent…” and prints provider requirements, inspect `agent_init → memory_provider_migration.recover_at_startup → dashboard_install_plugin → publish_plugin → _consent_python_deps`. A missing formerly bundled provider can reach plain `input()` on the REPL worker while prompt_toolkit owns stdin. One-shot success does not prove memory is working: its non-TTY branch can skip installation and continue without the provider.
+- Repair a missing configured provider explicitly outside the chat UI, keeping catalog pins, scanning, and dependency consent intact. Do not silently disable memory or auto-answer prompts without reviewing the requested install. See `references/hindsight-memory-setup.md` for local-external configuration.
+- Verify two responses in ONE real interactive PTY, preferably over the reported SSH route, then verify active provider initialization and a real read-only recall. For automated typing, send text, pause at least 0.1 seconds, then send CR: the classic CLI treats Enter within 50ms of pasted text as a newline. `/quit` may print a session summary rather than “Goodbye”.
+- `pip install hindsight` names an unrelated/broken package; don't use it.
+- Launch a fresh CLI after dependency repair. Do not restart gateways or mutate other profiles without authorization.

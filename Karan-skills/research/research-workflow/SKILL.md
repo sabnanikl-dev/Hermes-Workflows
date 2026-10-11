@@ -215,6 +215,8 @@ browser_snapshot()  # Get structured text content
 - **Daily log** → what was researched and key findings
 
 ## Pitfalls
+- **Repurposed hardware evidence:** Resolve the exact SKU/ASIN and hardware model, then trace community compatibility tables back to owner reports. If the underlying report names another SKU, board, or firmware revision, label it model/family evidence—not proof for the linked unit. Keep unknown SoC/RAM unknown; distinguish storage from RAM, USB file transfer from video input, ADB from root, and root from bootloader/native-OS support. Preserve anomalous reported version strings literally with a caveat rather than silently correcting them.
+- **Touchscreen anti-glare sourcing:** Verify the surface of the exact touch SKU, not its non-touch sibling, an accessory film, or generic marketing text. Compare manufacturer specifications with hands-on reports; if an “anti-glare” listing is described as glossy by reviewers, flag the conflict rather than certify it matte. Use full mechanical dimensions, not the thinnest advertised edge, for framed builds; separate documented Linux/Pi support from physical testing.
 - **Rate limits:** Brave API has limits -- batch queries efficiently
 - **Site blocks:** Some vendor sites block automated browsing -- try alternative sources
 - **Stale data:** Always note research date on wiki pages

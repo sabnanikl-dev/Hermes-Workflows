@@ -6,7 +6,21 @@ category: mlops
 description: Guide to setting up Hindsight as a memory provider for Hermes Agent (local mode). Created after discovering package naming confusion and the migration to native Hermes support.
 ---
 
-## Background
+## Current catalog-plugin / PM setup (supersedes historical steps below)
+
+Hindsight moved out of Hermes core into the reviewed catalog. Confirm the live catalog and installed source; do not assume the old native-provider path still exists. A retained `memory.provider: hindsight` with no discoverable plugin can trigger automatic migration during first-turn agent initialization, including a hidden dependency-consent prompt in an interactive CLI.
+
+1. Read the launcher and PM installation facts to identify the actual selected Python generation; the legacy checkout `venv` can still contain an old client unrelated to the live runtime.
+2. Inspect `hermes plugins info hindsight` and the pinned plugin's `pyproject.toml`. Use `hermes plugins install hindsight` outside chat and review its consent prompt. Keep normal catalog security checks and PM admission; never use `--no-deps`, force bypasses, or global pip as a substitute. A configured memory provider already joins dependency admission even when absent from `plugins.enabled`.
+3. Keep an existing separately managed local server intact. Use profile-local `$HERMES_HOME/hindsight/config.json` with `mode: local_external`, the verified `api_url`, existing `bank_id`, and `memory_mode: hybrid`. The catalog plugin reads this file, then `~/.hindsight/config.json`, then env fallbacks. Old `HINDSIGHT_CONNECTION_MODE` and flat `memory.mode` are NOT equivalent to its current keys; `local` is an alias for embedded mode and may launch another server. Preserve a deliberate capture cadence using the current `retain_every_n_turns` key when replacing a legacy cadence configuration.
+4. Compare managed-runtime distributions before/after and retain the old PM generation. Verify the main config and credential files were not unintentionally changed. Installing a selected provider without `--enable` can publish its dependencies while leaving plugin selection unchanged and avoiding explicit gateway activation.
+5. Verify `hermes memory status`, runtime initialization logs (`mode`, URL, bank, client version), a real read-only recall through the plugin, and two successive interactive responses. HTTP `/health` alone is not memory integration proof.
+
+Successful local repair example: plugin 1.2.1 at reviewed pin `d56c4acdf59c41957613d399094cdf8c489b060c` admitted `hindsight-client==0.10.3`, `hindsight-embed==0.10.3`, and `aiohttp-retry==2.9.1` without changing existing distributions. These are evidence, not permanent version recommendations; inspect the current pin each time.
+
+The remaining sections are historical dedicated-server setup notes, NOT instructions to install or uninstall packages in a modern PM-managed Hermes runtime. Server/credential/service changes require separate authorization.
+
+## Historical background
 
 Hindsight (by Vectorize) is a memory provider with:
 - **Knowledge graph** with entity resolution and cross-memory synthesis

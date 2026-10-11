@@ -75,22 +75,23 @@ For a sensitive repair cycle:
 4. Hermes inspects the full diff, reruns checks, commits, pushes the authorized branch, and verifies the remote PR commit list.
 5. Disclose transport accurately; do not attribute Hermes' commit/push to Claude.
 
-Minimal launch shape:
+Minimal launch shape (verify flags against the installed CLI first):
 
 ```bash
 CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 claude --print \
   --model 'claude-opus-5' \
-  --permission-mode auto \
-  --allowedTools Bash \
-  --disallowedTools Read Edit Write Glob Grep WebFetch WebSearch \
+  --safe-mode --no-session-persistence \
+  --permission-mode dontAsk --permission-prompts none \
+  --tools Bash --allowedTools Bash \
   --setting-sources= \
   --settings /launcher-owned/lane-settings.json \
   --strict-mcp-config \
   --mcp-config /launcher-owned/empty-mcp.json \
-  --max-turns <bounded> \
-  --max-budget-usd <bounded> \
-  '<prompt>'
+  --output-format stream-json --verbose \
+  -- '<prompt>'
 ```
+
+Use `--safe-mode` to disable ambient customizations while preserving normal OAuth/keychain authentication; do not substitute `--bare` when relying on that authentication. Keep the explicit strict settings and empty MCP configuration: safe mode is not the sandbox. Use `--tools Bash` to restrict the exposed tool set, not merely an allowlist that leaves other tools available. Place `--` before the prompt because MCP/tool-list flags accept multiple values. Capture stream JSON in a launcher-owned log and inspect initialization plus actual tool-result records. Enforce a wall-clock bound in the supervisor instead of assuming a historical turn-limit flag is supported; a supervisor timeout is an unknown-state handoff, not proof of complete descendant cleanup.
 
 The launcher-owned `/launcher-owned/empty-mcp.json` must contain the MCP envelope, even with no servers:
 
@@ -104,11 +105,13 @@ A verified launch recovery corrected a bare `{}` MCP file to the envelope above,
 
 Before expensive work, run harmless boundary probes and inspect the actual tool-result record, not just the model's final summary:
 
-- authorized project read and task-scratch write succeed;
-- a parent-private nonsecret fixture read is denied;
+- authorized project read and task-scratch write/read/unlink succeed;
+- a parent-created, verified-existing private nonsecret fixture read fails with an enforcement-specific result such as `PermissionError` / `EACCES` / `EPERM`, not `ENOENT` or an arbitrary `OSError`;
 - operator-control write is denied, and parent readback confirms unchanged bytes;
-- unrelated-domain egress is denied;
+- unrelated-domain egress produces an explicit sandbox/proxy denial, such as `X-Proxy-Error: blocked-by-allowlist`; generic timeouts, DNS errors, and origin-site HTTP 403 responses are inconclusive;
 - when explicitly allowed, anonymous access to the exact public PR returns the expected head.
+
+Keep deliberate denial results separate from probe infrastructure errors; do not use `except Exception: pass` as a security assertion. If disposable database/browser tests require `network.allowLocalBinding`, check its platform semantics before enabling it: on macOS it also permits localhost connections. Describe that lane as remote-egress-restricted with loopback access, not network-disabled or confined to one test database.
 
 Also inspect the runtime initialization record. In the verified run, subprocess hardening forced requested `dontAsk` mode to effective `default`; Bash remained the only exposed tool, its explicit allowance worked, and all six boundary probes passed with tool exit status zero. Preserve hardening rather than disabling environment scrubbing to make the requested mode label appear. An effective mode label alone neither proves nor disproves sandbox enforcement. Passing preflight proves those tested launch boundaries only—not implementation completion, test success, or remote mutation.
 
@@ -167,7 +170,9 @@ Do not let generated-policy unit tests validate themselves in a circle. Before a
 5. rerun the full deterministic suite in the trusted parent environment;
 6. after commit/push, obtain fresh detached exact-head independent review.
 
-A strict repair-worker sandbox may intentionally block AF_UNIX bind, localhost, browser startup, OS temp writes, or test-created subprocesses. That makes the worker's test result **unverified**, not automatically a code pass or a code failure. Rerun those tests in the trusted verifier environment and preserve the distinction.
+A strict repair-worker sandbox may intentionally block AF_UNIX bind, localhost, browser startup, OS temp writes, or test-created subprocesses. PostgreSQL's small SysV shared-memory interlock (`shmget`, including under embedded-postgres) can be denied even when loopback binding is allowed. Do not repeatedly tune the database or weaken the sandbox for this; run the real disposable database/browser suites in the trusted parent verifier. That makes the worker's test result **unverified**, not automatically a code pass or a code failure. Rerun those tests in the trusted verifier environment and preserve the distinction.
+
+Keep commit identity explicit inside the sandboxed command when subprocess environment scrubbing removes inherited `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables. Do not infer the worker's identity from prior human-authored commits or disable scrubbing to restore it; use task-scoped git identity arguments and inspect `git show --format=fuller` before transport.
 
 If a worker reaches a turn/time limit, treat its final state as unknown: confirm no process/descendant remains, inspect HEAD/status/diff/changed paths, run the parent suite, and only then decide whether the uncommitted delta is coherent enough for one bounded corrective continuation. Keep commit, push, PR comments, and tracker mutation parent-owned until independent verification is green. A later exit-zero or `DONE` marker is still a handoff signal, never acceptance evidence.
 

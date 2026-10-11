@@ -42,6 +42,10 @@ Use for user-owned Mac storage audits with interactive HTML approvals returned b
 - Escape `<` and script terminators in embedded JSON; render paths/notes as escaped text. Include no deletion code.
 - Test select → download → fresh isolated file reopen → independent parse. Test protected/default decisions, literal HTML notes, filters, counts, tampering, responsive overflow, JS errors and external requests. QA fixture approvals are NON-AUTHORITATIVE and must never be delivered as user decisions. Desktop fallback tests do not establish native mobile sharing support.
 
+## Cold-storage implementation reference
+
+For owner-approved worktree archival to an external volume, see `references/worktree-cold-storage.md`. This implements the existing preservation and verification gates; it grants no additional deletion or drive-management authority.
+
 ## Returned approvals
 
 - Verify direct user provenance. Digests bind integrity, not identity or signatures.

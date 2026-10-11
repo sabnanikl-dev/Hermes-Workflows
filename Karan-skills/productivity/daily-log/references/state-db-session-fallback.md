@@ -58,6 +58,10 @@ for s in sessions:
 
 ## Pitfalls
 
+- If optional Hindsight recall fails to import its client, continue with read-only local transcript enumeration; do not infer that a successful CLI provider repair also repaired the running cron tool environment. Record the recall error separately and leave runtime changes outside the synthesis task.
+- Put file-backed cron fallback scripts in the runtime-provided scratch directory, not system `/tmp`, and remove temporary probes after execution. Do not relax approval policy when a safe file-backed fallback is available.
+
 - Do not use `around_message_id=1` with `session_search` scroll mode unless message id 1 is actually in that session. Scroll mode requires a real message id returned by discovery.
 - Do not create an empty log just because keyword search missed the day. Check recent sessions and state DB first.
+- Recheck the target immediately before the final write. If another writer creates it after the initial absence check, preserve it under skip-if-present semantics; a stale-write refusal is not permission to overwrite after reading. Read back only for verification and disclose any unwritten synthesis when reporting a separate actionable error.
 - Keep the final daily log under 3,000 chars; group subagent/research branches under the parent task.

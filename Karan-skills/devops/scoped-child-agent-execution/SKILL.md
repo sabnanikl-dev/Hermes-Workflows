@@ -104,7 +104,7 @@ If live-source access is intentionally unavailable, disclose the frozen-artifact
 
 ### 4. Launch non-interactively and supervise
 
-Use realistic timeouts and completion notification. Verify the process actually starts.
+Use realistic timeouts and completion notification. Verify the process actually starts. Run the same launcher policy through a harmless preflight before implementation; accept a denied-access probe only when the result identifies enforcement, not merely any exception or nonzero exit. A missing fixture or failed DNS lookup is not evidence that the sandbox blocked access.
 
 Validate launcher control-file schemas during the harmless preflight, not during implementation. For a strict empty Claude MCP configuration, use `{"mcpServers": {}}`, not a bare `{}`. If startup rejects a control file before work begins, correct only that launcher-owned input and rerun the same boundary probes; do not loosen isolation or request redundant workflow approval. Inspect the runtime's reported model, exposed tools, effective permission mode and actual probe tool results rather than assuming requested flags took effect. A hardening layer can override the requested permission mode while explicit tool allowances and the OS sandbox remain active. See `references/claude-code-strict-child-isolation.md` for the verified retry pattern.
 

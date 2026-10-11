@@ -143,6 +143,7 @@ For approved temporary publishing with scheduled removal:
 - An expired source file need not still exist or match its original hash to remove its hosted copy. Validate identity/approval/expiry first; read source bytes only for still-active artifacts.
 - A command named `verify` must not publish, delete, adopt state, or save operational state. Report reconciliation due instead.
 - Cleanup must reject additions, changed active content, and removals not backed by explicit expired entries. Scope historical deletion to recorded deployment IDs; verify old URLs as well as API inventory.
+- Distinguish provider API deletion from actual historical-URL removal. If a deleted deployment serves bytes exactly matching the corresponding currently active approved artifact, record explicit pending housekeeping and recheck quietly; do not claim takedown or clear retry state. Expired artifacts, changed bytes, network failures and unverifiable statuses remain hard failures. Check slash, index.html and slashless routes; regression-test pending-active → expired failure → confirmed removal before changing notification behavior.
 - Test interrupted remote success, missing expired sources, read-only verification, and quiet pre-expiry execution using fixtures. Disclose host-online dependency and that downloaded copies cannot be revoked.
 
 ## Scheduler Pitfalls

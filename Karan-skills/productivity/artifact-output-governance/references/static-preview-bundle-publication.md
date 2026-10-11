@@ -53,3 +53,5 @@ Check how the existing expiration policy applies to nested bundles before carryi
 After publication approval, deploy through the established owner and repeat critical asset, iframe, and interaction checks against the actual hosted URLs. Do not substitute localhost proof or a deploy success message for production verification.
 
 Deliver the comparison landing URL plus useful direct-page links, genuine limitations, and lifecycle information. For another-machine handoff, record the publication source directory, project, deployment command, and verification steps without credentials.
+
+Separate publication success from historical-copy cleanup: Cloudflare may remove a deployment from its API inventory while the deployment-specific URL still serves its old bytes. Verify the current production artifact independently, retain pending-cleanup state, and use the publisher's existing bounded cleanup retry rather than redeploying or editing state to force success. Do not claim takedown until direct historical-URL readback confirms it; disclose a remaining cleanup caveat without implying that a verified new share is unavailable.

@@ -7,19 +7,13 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 83,
+  "skill_count": 79,
   "skills": [
     {
       "name": "adversarial-technical-artifact-review",
       "path": "software-development/adversarial-technical-artifact-review",
       "files": 11,
       "sha256": "051a2a45631d546b8a6e91491bd2ef44ebcd408ef91cee22f18b7a33a60b1112"
-    },
-    {
-      "name": "agent-execution-resilience",
-      "path": "devops/agent-execution-resilience",
-      "files": 22,
-      "sha256": "347f11f05b2ae95af26e7840022352251b6820f8867be9393d30283157d4656b"
     },
     {
       "name": "agent-workflow-orchestration",
@@ -55,7 +49,7 @@
       "name": "artifact-output-governance",
       "path": "productivity/artifact-output-governance",
       "files": 10,
-      "sha256": "add7fb0372de938c76161c14e3bb2e2512d96742c48cb42c0739c509b16c41a6"
+      "sha256": "8062e0ce111ffa77bc86bde70780736e6fa56d07da9da8b6e31f0396ba0f6082"
     },
     {
       "name": "autonomous-coding-agents",
@@ -88,12 +82,6 @@
       "sha256": "dacfd39421ab6e79873eb42ae2e6414171b61892fa8895ed91a1fd49d17255ff"
     },
     {
-      "name": "cpanel-wordpress-domain-triage",
-      "path": "devops/cpanel-wordpress-domain-triage",
-      "files": 3,
-      "sha256": "f88226bfd91f8ee7a59455bcfe1009352985668a151792ee85de20ce2e219784"
-    },
-    {
       "name": "creative-html-visual-artifacts",
       "path": "creative/creative-html-visual-artifacts",
       "files": 94,
@@ -109,7 +97,13 @@
       "name": "daily-log",
       "path": "productivity/daily-log",
       "files": 9,
-      "sha256": "5718e8581ab416d1f3fadea2f0e6e94b9cca87a266c29077ba2e876b513c3279"
+      "sha256": "b40e7befc09668781b5055be3207b44cb66401f40138da7040fdf3d5c7f30961"
+    },
+    {
+      "name": "debugging-hermes-tui-commands",
+      "path": "software-development/debugging-hermes-tui-commands",
+      "files": 1,
+      "sha256": "2ba1e1b975f76ebebafff0e51447566bb0fabcd44852dc2a63161d1cde844567"
     },
     {
       "name": "deterministic-validator-review",
@@ -122,12 +116,6 @@
       "path": "branding/femme-events-design",
       "files": 8,
       "sha256": "21e14cc71648341b45315feb631223a2d0fd2a370f38f4401e1a540af6d448cf"
-    },
-    {
-      "name": "firecrawl-agent",
-      "path": "firecrawl-agent",
-      "files": 1,
-      "sha256": "3f4f17b7917c1337c5237ec3443d7151d73e93d16ed4bd7e041bbaaab3598689"
     },
     {
       "name": "firecrawl-interact",
@@ -212,12 +200,6 @@
       "path": "productivity/google-search-console",
       "files": 4,
       "sha256": "4567af1f84d53b5f0cdfe4735843b1b5dc7e6a5b8b0571e555b006bd14374de4"
-    },
-    {
-      "name": "hardware-compatibility-and-procurement",
-      "path": "research/hardware-compatibility-and-procurement",
-      "files": 7,
-      "sha256": "9c2d8a2cbfe7e87de4c0a99e35f56b340bb1ed9f8b7dccaab6b8e3503db4808d"
     },
     {
       "name": "hermes-brain-wiki",
@@ -306,8 +288,8 @@
     {
       "name": "mac-storage-cleanup-review",
       "path": "devops/mac-storage-cleanup-review",
-      "files": 1,
-      "sha256": "a829e0bc2832941744dcc18e4a0ecad8d94af3205cc105e56c954d2e4d77ba12"
+      "files": 2,
+      "sha256": "1f5f70f2f8228afc0ebba31868eb75f49d134a4b7e22536a9b47d61177d8b0c3"
     },
     {
       "name": "mcporter",
@@ -325,7 +307,7 @@
       "name": "memory-provider-setup",
       "path": "memory-provider-setup",
       "files": 3,
-      "sha256": "777023f04f4205ed8d77d84afee18d961ea356dfe7e1fc8fe846dbcd62d87b01"
+      "sha256": "1f8db05d57d1bc441d01bdeacda01952c3e0e5ece76843772b0275c9727331eb"
     },
     {
       "name": "messaging-platform-operations",
@@ -409,7 +391,7 @@
       "name": "research-workflow",
       "path": "research/research-workflow",
       "files": 21,
-      "sha256": "0c9c8d873fd168fd25aaa1e836fb82987bbf1118dcaf86acd5af4084d2870921"
+      "sha256": "9c21f15117145c8ce57eeae2860ffcbef1f9d6cee1aedd8cce1c7bc306613c3d"
     },
     {
       "name": "review-artifact-relay-and-state-barriers",
@@ -427,19 +409,13 @@
       "name": "scheduled-monitoring-workflows",
       "path": "devops/scheduled-monitoring-workflows",
       "files": 7,
-      "sha256": "d37694468c6b9446a06de7260a103b74cbb1af8b95e20893eb8d22bc19fa99a0"
+      "sha256": "cf18c9a2eef7f1fd81bd986a7ea166878a684bb990dd59e22c7f09a48eb329ea"
     },
     {
       "name": "scoped-child-agent-execution",
       "path": "devops/scoped-child-agent-execution",
       "files": 6,
-      "sha256": "c693a54bd0cd4b0fc7b46637481444a39c31c3c175f0f26551d84cc792c2ab71"
-    },
-    {
-      "name": "session-history-synthesis",
-      "path": "note-taking/session-history-synthesis",
-      "files": 5,
-      "sha256": "f2b32ac04c2fef7f7fa83d32bf2e66167c3561dff59f7947c8c9fac175a960b9"
+      "sha256": "c6ff4e41e391e1dd08b63b5881932d8c8a36dd4d6ce99d54cc2d4fdec357a533"
     },
     {
       "name": "software-development-lifecycle",
