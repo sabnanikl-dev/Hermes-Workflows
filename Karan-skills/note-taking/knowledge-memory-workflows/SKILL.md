@@ -31,7 +31,9 @@ For substantive project, business, research, planning, or personal/portfolio wor
 Automatic Karan OS preflight is limited to `00 Vault Charter.md`, `02 Vault Map.md`, and `03 Working Preferences.md` on relevant owner tasks. Do not pass private Karan OS context to child/specialist agents. The runtime contract is `wiki/shared/infrastructure/Vault Use Runtime Contract.md` in Hermes Brain.
 
 ## Workflow
-1. Apply the mandatory pre-write routing gate before every durable create or substantial update:
+1. Before reasoning through a proposed artifact's destination, default Hermes uses `jev-capture-advisor` to obtain Jev's placement suggestion from a privacy-reviewed generic factual description. Karan explicitly requested Jev-first, not a second opinion after Hermes chooses a route. Privacy checks and explicit no-save/known canonical-owner facts may short-circuit; do not encode an inferred destination into the summary. After Jev responds, validate its advice through the mandatory pre-write routing gate below. On unsafe-to-summarize content or advisor failure, use normal reasoning without forwarding more private data. This is skill-guided capture-time use, not an every-message hook or a grant of write authority.
+
+   Apply the mandatory pre-write routing gate before every durable create or substantial update:
    - active execution state → Linear, GitHub, or the repository-owned tracker;
    - actual deliverable, working asset, code, or evidence → project directory or repository;
    - content primarily helping Karan think, decide, reflect, or manage personal life → Karan OS;

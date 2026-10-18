@@ -64,4 +64,5 @@ for s in sessions:
 - Do not use `around_message_id=1` with `session_search` scroll mode unless message id 1 is actually in that session. Scroll mode requires a real message id returned by discovery.
 - Do not create an empty log just because keyword search missed the day. Check recent sessions and state DB first.
 - Recheck the target immediately before the final write. If another writer creates it after the initial absence check, preserve it under skip-if-present semantics; a stale-write refusal is not permission to overwrite after reading. Read back only for verification and disclose any unwritten synthesis when reporting a separate actionable error.
+- Bound transcript previews before printing: cron user messages can contain entire injected skills and tool documentation. For cron inventory, print session metadata and the last non-empty assistant response without tool calls; omit repeated cron prompts. Cap each excerpt with SQL `substr` or Python slicing, then inspect exact message IDs for evidence. Do not dump all bookends and depend on terminal truncation.
 - Keep the final daily log under 3,000 chars; group subagent/research branches under the parent task.

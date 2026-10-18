@@ -20,6 +20,17 @@ Successful local repair example: plugin 1.2.1 at reviewed pin `d56c4acdf59c41957
 
 The remaining sections are historical dedicated-server setup notes, NOT instructions to install or uninstall packages in a modern PM-managed Hermes runtime. Server/credential/service changes require separate authorization.
 
+## Isolated model benchmarks
+
+- Check the installed `HindsightConfig.get_configurable_fields()` before trusting the bank-config OpenAPI description: some versions advertise LLM overrides but explicitly exclude provider/model selection. Do not patch production config or restart production to work around this; use a separate temporary API process and named `pg0://<benchmark-name>` database.
+- Treat `HINDSIGHT_API_LLM_MAX_RETRIES` as potentially counting total extraction attempts: setting it to zero can skip every call and fail with `Fact extraction failed after 0 attempts`. Use at least one and capture actual requests.
+- For bounded comparisons, use fictional matched fixtures, fresh banks, rotated model order, identical budgets, and retain → recall → reflect checks. Disable observations explicitly if not benchmarking consolidation; disclose that limitation.
+- Capture per-request provider usage/cost rather than shared-key balance deltas. An instrumented localhost OpenAI-compatible proxy can capture usage without exposing credentials, but disclose model-ID substitution and adapter-path differences. A between-call cost threshold is not a hard provider spending cap.
+- Score standalone extracted-fact coverage separately from reflect answers: reflect may retrieve the entire source chunk and recover facts that retention omitted. Perfect answers on a one-chunk fixture do not prove complete extraction. Preserve reflect tool traces and provider finish reasons so source rescue, repeated retrieval, and truncation can be audited; ingestion timestamps are not event chronology.
+- Evaluate pre-routing against always-cheap, always-alternative, and deterministic-rule baselines using paired per-input model outcomes. Freeze route choices before model outcomes, include classifier cost/latency, disclose counterfactual replay rather than four deployed arms, and score critical omissions separately. A semantically sensible risk classification does not prove it predicts which model will preserve more facts; simple preference text can lose distinctions too.
+- Calibrate model cost/quality by operation and representative workload before choosing a default route. Do not assume a model branded mini is cheaper, or transfer an end-to-end retain/reflect ranking to retention alone. Report cache/reasoning differences and unsupported claims alongside completeness; preserve mixed results rather than reducing them to a single winner.
+- Keep raw evidence and semantic ground-truth scoring in the experiment workspace; do not promote synthetic facts into the real memory bank. Verify the isolated process stops and production remains healthy.
+
 ## Historical background
 
 Hindsight (by Vectorize) is a memory provider with:

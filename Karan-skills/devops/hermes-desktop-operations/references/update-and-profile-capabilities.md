@@ -66,7 +66,31 @@ When the GUI state is ambiguous, inspect the target explicitly:
 ```bash
 hermes -p <profile> skills list
 hermes -p <profile> skills config
-hermes -p <profile> profile
+hermes profile show <profile>
 ```
 
 Use the CLI to verify or recover configuration, not to claim the GUI write succeeded without checking the GUI/profile state.
+
+## Connecting a specialist to Telegram
+
+1. Distinguish the existing local Hermes profile from a Telegram bot account: creating one does not create the other. Keep the default bot's token and routing untouched.
+2. Direct the user to **main left sidebar → Messaging** (speech-bubble icon), not the bot's Edit Profile panel. The current Desktop command palette also exposes **Open messaging**; on macOS its default shortcut is **⌘K**. Check the installed version before asserting a missing UI element is present.
+3. On Messaging, choose the target in **Configuring:**, then **Telegram → Create with QR** where supported. This user-interactive flow handles Telegram bot creation, token storage, and user allowlisting without copying a token through chat. If unavailable, use the official BotFather flow and a secure profile-local token entry path.
+4. Have the user open the resulting Telegram bot and tap **Start**. Verify the target bot identity, profile routing, restricted user access, and an actual response before claiming the connection works. QR completion or a saved token alone is not end-to-end verification.
+5. Treat gateway changes as a separate operational step; do not restart the default gateway or create a competing standalone gateway merely because a profile inspection reports stopped.
+
+## Recovering a rejected profile model
+
+1. Read the exact provider, model identifier, HTTP detail, and retryable flag. An explicit model-entitlement rejection means the selected model is unsupported for that account/route; it does not by itself imply expired login, broken Telegram, or a broken picker.
+2. Run `hermes profile list` and `hermes profile show <profile>`, then read that profile's `config.yaml`. Compare the persisted provider/model with the rejected request. Inspect only relevant recent logs, not whole log files.
+3. If the saved setting and Desktop behavior disagree, inspect the affected session rows read-only in the profile's `state.db`: `model`, `source`, and parsed `model_config`. `follow_profile_config: true` is evidence that the conversation follows profile settings; an old row's model is historical evidence, not proof of the live agent's current selection. Check explicit session/composer overrides before changing any stored session state. Ask whether the picker fails to open, rejects the selection, or reverts when the symptom is still ambiguous.
+4. For an authorized recovery, restore a previously verified model on the same provider with `hermes -p <profile> config set model.default '<verified-model-id>'`. Do not silently change provider, billing route, credentials, or unrelated profiles.
+5. Exercise the saved setting without a command-line model override:
+   ```bash
+   hermes -p <profile> chat --oneshot --quiet --toolsets '' \
+     --max-turns 2 --run-budget 90 \
+     -q 'Do not use tools. Reply exactly: MODEL_OK'
+   hermes profile show <profile>
+   ```
+   A real `MODEL_OK` response plus profile readback proves the saved route works. A tool-free test does not prove the specialist's tools or Desktop model picker work.
+6. Separately verify the affected Desktop conversation. If direct observation is unavailable, report the successful CLI recovery and the unverified Desktop behavior explicitly; do not present reopening the chat or a slash command as an already-proven picker repair. Preserve the conversation rather than deleting it or resetting the profile as a first response.

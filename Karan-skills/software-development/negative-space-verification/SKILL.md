@@ -71,6 +71,14 @@ For each safety-bearing field or relationship, include:
 
 Keep probes small and deterministic. Prefer direct execution of committed producer/consumer code over handwritten stand-ins.
 
+#### Natural-language authorization guards
+
+1. Reproduce the exact rejected request and, separately, the complete approval-form question and answer through the real hook sequence: turn initialization → approval tool result → protected tool gate. A parser-only check can miss lost authorization state or a rejected form payload.
+2. Stage changes outside the installed guard, preserve the baseline, and run new positive fixtures against that baseline first; an expected failure proves the test detects the reported false denial.
+3. Pair each newly accepted wording with negative controls: destination versus subject/reference, quoted or fenced examples, reported speech, factual questions, negation before and after the permission clause, and a later reversal. Test explanatory text around approval questions too: a historical rejection is not necessarily a present refusal, but ignoring surrounding prose must not erase a current veto.
+4. Exercise owner/non-owner identity, child sessions, denial, timeout, mismatched question/response payloads, and the next unrelated turn. A valid affirmative answer must not become a persistent or transferable grant.
+5. Run the existing guard suite as well as the new fixtures, then independently review any widened acceptance rule before installation. Report staged tests, installed code, loaded runtime, and successful protected writes as separate evidence states; green candidate tests do not prove the live operation works.
+
 #### Prove test sensitivity with temporary mutations
 
 For a claimed false-success fix, do not stop at a green suite. In a temporary copy outside the repository, restore the former defect with the smallest possible mutation and require the focused regression tests to fail. Independently mutate adjacent load-bearing guarantees—such as persisted evidence comparison, authoritative remote bindings, or state validation—and identify the exact tests that reject each mutation. Positive controls must still pass on the real head.

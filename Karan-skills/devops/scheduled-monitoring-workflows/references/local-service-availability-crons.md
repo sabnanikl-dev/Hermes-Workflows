@@ -16,13 +16,17 @@ The cron is an **availability ensure**, not an execution trigger:
 
 ## Hermes Cron Shape
 
-Prefer an **agent cron with only the terminal toolset** when keeping a process alive requires `terminal(background=true)`. Put the exact working directory, environment-loading step, version pin, health URL, port, and forbidden mutations in the self-contained prompt.
+Prefer an **agent cron with only the terminal toolset** when keeping a process alive requires `terminal(background=true)`. For an explicitly authorized long-running service, require `persist_on_release=true`; otherwise a short cron's session cleanup can invalidate a momentary startup success. Pin a security-reviewed installed runtime and use a reviewed environment-loading launcher rather than repeatedly installing a package through npx. Put the exact working directory, environment-loading step, version pin, health URL, port, and forbidden mutations in the self-contained prompt.
 
 Do not use a script-only cron to daemonize a server with shell `&`, `nohup`, `launchctl submit`, `systemctl`, or a custom respawn loop. Hermes lifecycle guards intentionally reject persistent supervisor patterns that could create SIGTERM/respawn loops. Use Hermes background-process tracking instead.
 
 Use local delivery when routine healthy results should not interrupt the user. If the user wants operational alerts, use a separate quiet script-only health watchdog that emits only on failure; keep that watchdog read-only and do not make it a second process supervisor.
 
 ## Scheduling
+
+Resolve the hosted scheduler's effective expression, timezone, defaults/jitter, and persisted recurrence gate before choosing a preflight or proof time. An interval label does not establish clock alignment. Require native trigger evidence, keep manual catch-up separate, and evaluate missed expected slots with a documented grace period rather than letting manual executions reset the watchdog's freshness.
+
+Re-arm completed one-shot Hermes jobs with the supported `hermes cron resume <id> --at <ISO timestamp>` path before editing their next-run script/prompt; `update` cannot activate a terminal job. Read back enabled state, exact next run, repeat state and delivery. When verifying a repaired final schedule, require both a post-target-slot execution and the final published version so an earlier controlled timer test cannot accidentally pass the future checkpoint.
 
 When the service hosts its own internal schedule, run the availability ensure shortly **before** a known internal trigger rather than at the same minute. Example: ensure at 05:50 for an internal 06:00 reconciliation. This gives startup and health verification time without manually triggering the workflow.
 
@@ -32,6 +36,7 @@ A once-daily ensure only helps while the machine and Hermes scheduler are awake.
 
 After creating the cron:
 
+- With explicit recovery-test authority and no in-flight work, exercise one down→start path through the real availability cron. After that cron finishes, independently confirm the same new PID still serves health and the current workflow version's trigger is activated. A child's STARTED self-report does not establish process survival.
 - Run it manually once while the service is already healthy; this proves the no-op path and avoids mutating downstream data.
 - Recheck the health endpoint, listener, and approved workflow active state.
 - Inspect the latest scheduled/trigger-mode execution, not only the server process. A healthy listener plus `active=true` can coexist with repeated downstream authentication or configuration failures.

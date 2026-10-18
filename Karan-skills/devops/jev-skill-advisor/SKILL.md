@@ -43,4 +43,12 @@ For precision maintenance, use `PRECISION_PLAN.md` and `PRECISION_RESULTS.md` in
 
 Tests: run `python -m unittest discover -s tests -v` with the Hermes Python environment from the project. `--catalog-only` inspects locally available approved summaries without network. Recheck after Hermes upgrades because the availability adapter uses internal metadata/filter helpers.
 
+## Historical capture-destination evaluation
+
+The separately approved Jev-first capture workflow now lives in `jev-capture-advisor` and `CAPTURE_ADVISOR.md`. Load that skill before a capture-placement decision. This skill's opt-in skill-selection workflow is unchanged; the notes below describe the earlier benchmark, not its runtime adapter.
+
+When explicitly asked to evaluate Jev as a knowledge-placement advisor, use the separate synthetic-only harness in `routing_eval/`; its `RESULTS.md` documents the tested scope, exact evidence, and limitations. Run its offline tests with `python -m unittest discover -s routing_eval -p test_benchmark.py -v`. `routing_eval/benchmark.py` makes no network calls without `--allow-network`; an approved live rerun sends frozen fabricated inputs only and incurs new API usage. Do not substitute private notes, conversations, or paths into those fixtures.
+
+Keep placement separate from permission: a model route never grants a vault write. Compare against a local rules baseline, freeze inputs/code before calls, retain returned model/usage/IDs, and distinguish correlated variants from independent cases. Treat ambiguous/mixed/out-of-taxonomy `no_capture` cases as deferred for clarification or splitting, not necessarily discarded knowledge. Price extrapolations cover model inference only, not sanitization or main-agent overhead. A synthetic pass does not establish production accuracy or net savings; no capture hook or runtime router is authorized by this evaluation reference.
+
 Disable by not using the workflow or disabling this skill. No daemon/config migration to undo. Do not delete the project without approval.

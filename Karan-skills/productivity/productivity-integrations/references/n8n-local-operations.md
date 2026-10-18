@@ -17,7 +17,8 @@ Use these notes when the user asks to run or access a local n8n server from Herm
    N8N_HOST=127.0.0.1 N8N_PORT=5678 N8N_SECURE_COOKIE=false npx --yes n8n start
    ```
    Use `background=true` and a readiness watch pattern such as `Editor is now accessible`, `n8n ready`, or `Server is listening`.
-3. Verify readiness independently:
+3. For a user-authorized long-lived server, explicitly set `persist_on_release=true` on the tracked terminal process; a normal background process is session-owned and must not be assumed to survive cleanup. This does not survive host/process restarts or replace an approved OS service. Pin and install a security-reviewed runtime rather than using an unversioned `npx` launcher for unattended recovery. Set `N8N_LISTEN_ADDRESS=127.0.0.1` as well as `N8N_HOST=127.0.0.1`: HOST alone does not establish loopback binding. Verify both UI and task-broker listeners.
+4. Verify readiness independently:
    ```bash
    lsof -nP -iTCP:5678 -sTCP:LISTEN || true
    curl -sS -I http://127.0.0.1:5678/
@@ -47,6 +48,15 @@ Safe controlled-run pattern for a schedule-only production workflow:
 7. Restart n8n, verify `/healthz` and the `Activated workflow ...` log line, then verify the saved execution and downstream data independently.
 
 Never leave a temporary trigger, test folder ID, pin data, inactive schedule, or unverified import behind after the controlled run.
+
+## Upgrade and security verification
+
+- Back up the entire n8n home, including encryption configuration and storage, with a consistent SQLite backup. Keep backups private. Test migrations on an isolated copy with every workflow deactivated; do not start a cloned production scheduler.
+- Check both the exact n8n version in OSV and its resolved dependency tree with npm audit. Aggregate inherited package ratings are not independent exploitable vulnerabilities. Review concrete advisories and relevant module resolutions before accepting risk; do not claim zero risk from a clean direct-package query.
+- Do not run `npm audit fix --force` blindly: suggested fixes can downgrade n8n across major versions. For a reviewed narrow dependency patch, preserve a lockfile, verify `npm ls` exits cleanly, and exercise the actual Code/task-runner and Drive/HTTP paths before production. Exact global overrides can invalidate already-newer nested versions; a patched compatible range plus lockfile can preserve those versions without downgrading them.
+- A production-folder read-only preview must physically remove downstream mutation nodes/edges in an isolated workflow copy. `DRY_RUN` may only choose the test folder or stamp output; do not assume it guards writes. Keep the production workflow untouched during the preview, and execute the exact installed normalization/planning nodes rather than a stale repo implementation.
+- On newer n8n 2.x, check `workflow_publication_trigger_status` for the active version and the schedule node's `activated` status, not only `workflow_entity.active`. A stale publication outbox entry can fail while a later reconcile entry successfully activates the current version; distinguish them before retrying publication.
+- Keep first scheduled-run verification separate from a successful CLI catch-up. A freshness monitor may count an explicitly approved production CLI catch-up, but retain/report its actual `mode` and require `dryRun=false`, zero file failures, and a bounded freshness window.
 
 ## Password / account handling
 

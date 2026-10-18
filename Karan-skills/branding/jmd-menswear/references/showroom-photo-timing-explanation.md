@@ -75,6 +75,25 @@ Mention the fail-closed safety posture when explaining to Karan/client:
 - too many archive candidates abort;
 - v1 archives/restore-patches only — no Drive deletion and no Sanity hard-delete.
 
+## Offline server and misleading watchdog status
+
+- Diagnose read-only before restarting: check `/healthz`, the port 5678 listener, the exact workflow in `~/.n8n/database.sqlite` using SQLite `mode=ro`, and its latest trigger execution. An active workflow flag does not mean the n8n process is running.
+- Inspect each n8n Google Drive search node's `returnAll`/`limit` settings. Omitted settings can default to `returnAll=false`, `limit=50`; compare the native execution's source count with a fully paginated independent listing. Do not silently broaden the source set during recovery: doing so can import older backlog photos and change archive/restore decisions. Preview and review that as a separate graph repair when the immediate new-upload catch-up can safely preserve the original graph.
+- Compare paginated Drive root + one-level collection listings against Sanity `sourceDriveFileId`. Use `mainImage.asset->url` (not `image.asset->url`) when comparing published Sanity photos to the live `/api/on-the-floor` feed. Separate recent missing uploads from old policy-excluded source files.
+- Inspect the daily server-ensure cron's actual saved response under `~/.hermes/cron/output/<job-id>/`, not merely `last_status: ok`: a completed agent run can report an operational failure in prose while scheduler status remains successful. Check delivery routing; local-only failure output does not alert Karan.
+- When startup is blocked by package-security policy, preserve the block and request an approved security review/upgrade path. Do not invoke a cached executable or alternate launcher to evade it. Historical scanner match counts are not independently verified vulnerability counts or proof of exploitation.
+- Repeated successful startup probes without any later trigger executions establish a runtime durability problem, not its exact cause. Inspect process cleanup/exit evidence before attributing it to session teardown. Recovery must verify a real production trigger and downstream content, not only a momentary HTTP 200.
+- Before resuming after a long outage, preview current import/archive policy effects: reconciliation may archive aged existing photos in addition to importing the new batch. Startup, live reconciliation, package upgrades, and watchdog/service changes need appropriately scoped approval.
+
+## Schedule recovery pitfalls
+
+- Resolve the installed Schedule Trigger's actual cron expression before promising exact times. An omitted `triggerAtMinute` can become deterministic jitter; `hoursInterval:6` alone does not prove top-of-hour execution. Use explicit custom cron `0 0 */6 * * *` with workflow timezone `America/New_York` for JMD's approved midnight/06:00/noon/18:00 contract, and verify the published graph, not only the draft.
+- Inspect schedule static data after long outages. A recurrence gate storing only the last hour can suppress a same-hour occurrence on another date. Reproduce the installed checker with a controlled clock; explicit custom cron avoids that interval gate without changing processing nodes.
+- Prove an authorized recovery with an actual native timer occurrence and downstream production summary, not a manual CLI run. A temporary near-term cron rule may test the timer path; remove it, verify the final published schedule, and distinguish that controlled proof from the next regular-slot proof.
+- Keep steady-state watchdogs trigger-only. Check successful production mode, zero file failures and the latest expected wall-clock slot after a defined grace period; otherwise fresh manual catch-up can mask a broken timer.
+- Use `execution_entity.workflowVersionId` and the native deduplication key when proving an exact published version/time. Serialized `execution_data.workflowData` may omit `versionId`.
+- Back up before offline CLI maintenance and compare draft/published nodes, connections and settings after import/publish. n8n import can replace the supplied version UUID; derive the actual version from readback and verify its content rather than assuming the input UUID survives.
+
 ## Verification checklist before client-facing claims
 
 Before saying “this runs every X hours” or “this is live now,” verify current state:

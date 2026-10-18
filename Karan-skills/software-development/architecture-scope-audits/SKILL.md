@@ -40,6 +40,10 @@ Record repository, PR/change identifier, base SHA, exact head SHA, branch, and c
 
 ### 2. Reconstruct the contract hierarchy
 
+For a usefulness or first-principles review, reconstruct the user's desired outcome before accepting their proposed mechanism. Separate the job into detection, decision/routing, authorized execution, and verified user benefit; identify which stages the implementation actually performs. Compare it with the existing skill, reminder, or closeout workflow before crediting it with incremental value. A suggestion or status notice is not proof that useful knowledge was saved or later retrieved.
+
+When Karan requests a presentation pass followed by a usefulness review, finish and exercise the bounded presentation change first, then give an independent reviewer the original user goal and observed outputs. Permit a keep, simplify, replace, or stop recommendation; neither green safety tests nor work already invested establish usefulness. Require one minimal next step and a finite success criterion rather than another framework. Keep activation separate from review approval.
+
 Read the governing parent mission and each implementation child relevant to the diff. Extract:
 
 - required mechanisms;

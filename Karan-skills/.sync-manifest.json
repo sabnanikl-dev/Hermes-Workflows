@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 79,
+  "skill_count": 76,
   "skills": [
     {
       "name": "adversarial-technical-artifact-review",
@@ -43,7 +43,7 @@
       "name": "architecture-scope-audits",
       "path": "software-development/architecture-scope-audits",
       "files": 7,
-      "sha256": "13ca3fbd225410903f5e3c0153513fd187e8479cd18e35ab01f9b3d135dd3505"
+      "sha256": "570189628ff8978b295d8e6b06ad739eac252a66c82587e48bc1658117035ea5"
     },
     {
       "name": "artifact-output-governance",
@@ -97,7 +97,7 @@
       "name": "daily-log",
       "path": "productivity/daily-log",
       "files": 9,
-      "sha256": "b40e7befc09668781b5055be3207b44cb66401f40138da7040fdf3d5c7f30961"
+      "sha256": "719b33b812ee7dcc53f5fc3e9142470d53e02e816f7385c1e47695f6bbb19a4b"
     },
     {
       "name": "debugging-hermes-tui-commands",
@@ -116,12 +116,6 @@
       "path": "branding/femme-events-design",
       "files": 8,
       "sha256": "21e14cc71648341b45315feb631223a2d0fd2a370f38f4401e1a540af6d448cf"
-    },
-    {
-      "name": "firecrawl-interact",
-      "path": "firecrawl-interact",
-      "files": 1,
-      "sha256": "4ae6137e9407124143100e8740e5a3d90034945213e5838ca3a5c4bc7fe71306"
     },
     {
       "name": "firecrawl-scrape",
@@ -190,12 +184,6 @@
       "sha256": "83aa8e9de61f4fc263cd6b07fdf61317a39f3b0a6621cfda14bc760eca8c9979"
     },
     {
-      "name": "google-business-profile-api-access",
-      "path": "productivity/google-business-profile-api-access",
-      "files": 3,
-      "sha256": "02d2e3f193475acc76ea54be825f0cb6345debf79380995e84c028792a657111"
-    },
-    {
       "name": "google-search-console",
       "path": "productivity/google-search-console",
       "files": 4,
@@ -211,7 +199,7 @@
       "name": "hermes-desktop-operations",
       "path": "devops/hermes-desktop-operations",
       "files": 2,
-      "sha256": "782cd28d08a312290a758b09564feac374687005a5691c9d940dc7228442a9ab"
+      "sha256": "e7c697e667e7536a64e4d8b958ab3aadf101603e8686d1080c979c7a9b49484d"
     },
     {
       "name": "ideation",
@@ -232,22 +220,28 @@
       "sha256": "e24c0a541517b7123bc8ad28027d1ca6bc341bdf7d33460a1bc277ff10328b5b"
     },
     {
+      "name": "jev-capture-advisor",
+      "path": "devops/jev-capture-advisor",
+      "files": 2,
+      "sha256": "db341bae98044e78fc627169e3399d0dc52b2f498e8646887a097fc9ef932870"
+    },
+    {
       "name": "jev-skill-advisor",
       "path": "devops/jev-skill-advisor",
       "files": 2,
-      "sha256": "465f2ca63a7e1fc368268f000fd18088f9aaf261e75e5f11a7b2c53d1636909b"
+      "sha256": "21821926af2d663519f1e48ffced3ca811387efa0a64d7c290ed29912ef9cc0f"
     },
     {
       "name": "jmd-menswear",
       "path": "branding/jmd-menswear",
       "files": 20,
-      "sha256": "c5747fa2b7e6f26294b4f4451cf680ae84d8053ba59a1dbb9728c40b034a7a18"
+      "sha256": "0c8c7689ab2d7562ff943f67bf3b32a1c75446b4854762b207a603fe3797d1c4"
     },
     {
       "name": "knowledge-memory-workflows",
       "path": "note-taking/knowledge-memory-workflows",
       "files": 9,
-      "sha256": "5def69846f340c3d6e9af6b68e2bc39839db6f96b9de6c08d0b42941fbc31936"
+      "sha256": "e9ae44e8a2a1125927f8703ee0c23d3737445db3e7a3fc52797477be297aab9b"
     },
     {
       "name": "linear",
@@ -266,12 +260,6 @@
       "path": "productivity/linear-work-order",
       "files": 3,
       "sha256": "9c69003a351fd6e2682ee03d4907761f4d06e2b16778819987432991126e8f9e"
-    },
-    {
-      "name": "linear-worker-execution",
-      "path": "devops/linear-worker-execution",
-      "files": 1,
-      "sha256": "00c59758be26402ac5a946b507cda4b57c2629f2507eac52c1898a1fee15482b"
     },
     {
       "name": "local-seo-visibility-ops",
@@ -307,7 +295,7 @@
       "name": "memory-provider-setup",
       "path": "memory-provider-setup",
       "files": 3,
-      "sha256": "1f8db05d57d1bc441d01bdeacda01952c3e0e5ece76843772b0275c9727331eb"
+      "sha256": "05f09a6dcde4119711b24eceb9899acdb797f9ca44065b14fc7b648d95483ef9"
     },
     {
       "name": "messaging-platform-operations",
@@ -331,7 +319,7 @@
       "name": "negative-space-verification",
       "path": "software-development/negative-space-verification",
       "files": 4,
-      "sha256": "a38dcbb59bc3693aa65c0cff8944cb1077c98e6d9a0efb644bc45de07a34f729"
+      "sha256": "b42cbb12be4263d782012dd89dced6058d75359291b458a33c617e9362db2f56"
     },
     {
       "name": "notebooklm-to-github-issues",
@@ -358,16 +346,16 @@
       "sha256": "6e47a70b4363ebeef254bf5ed8ab7efd2c67c303d306c5bf6f53da1dbd923a9d"
     },
     {
-      "name": "ops-execution-harness",
-      "path": "productivity/ops-execution-harness",
-      "files": 4,
-      "sha256": "f3e97f2d0838178743998f4e727cc20c667852ad287c30ce911331367285da2f"
+      "name": "product-ui-copy-passes",
+      "path": "software-development/product-ui-copy-passes",
+      "files": 1,
+      "sha256": "9f6d26b2cdc82b52001a7d977dbdd5f39aca0826e8dfba4d5ff7ee4a9906e695"
     },
     {
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
       "files": 82,
-      "sha256": "5b643b0d3f51e7eaa883f56e535e5fe17deb132e82e29e27f5704217ffca4552"
+      "sha256": "2c6dc37cbc06042971489537734f45725efe6b2bebff0331b073b969eb7f1a59"
     },
     {
       "name": "project-kickoff",
@@ -409,7 +397,7 @@
       "name": "scheduled-monitoring-workflows",
       "path": "devops/scheduled-monitoring-workflows",
       "files": 7,
-      "sha256": "cf18c9a2eef7f1fd81bd986a7ea166878a684bb990dd59e22c7f09a48eb329ea"
+      "sha256": "1b4da8cb4b4339d26ad8f90d40f5fed16aa93c33715dc77a9c425c710e055a64"
     },
     {
       "name": "scoped-child-agent-execution",
@@ -434,12 +422,6 @@
       "path": "productivity/tracker-artifact-closeout",
       "files": 8,
       "sha256": "3ee8445b25401588dfb75edb39a641f1563ef9abc20ad1235b0259b1d8087757"
-    },
-    {
-      "name": "treg",
-      "path": "mcp/treg",
-      "files": 1,
-      "sha256": "8a901c796cc9df18e638e75dcbc5f20dc312492ac9caeb16ccd2482bf54320b2"
     },
     {
       "name": "verified-merge-closeout",
