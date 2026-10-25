@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 76,
+  "skill_count": 75,
   "skills": [
     {
       "name": "adversarial-technical-artifact-review",
@@ -26,12 +26,6 @@
       "path": "software-development/agentic-pr-lifecycle",
       "files": 1,
       "sha256": "8a74a4b6d4152b3467166aa50b88b14d3909dd01c3545b3d248968fb3a907fd1"
-    },
-    {
-      "name": "agentic-pr-review-loop-recovery",
-      "path": "software-development/agentic-pr-review-loop-recovery",
-      "files": 20,
-      "sha256": "95be4502294cdbbb1bac16258b2cf8db2e7f92cec78cabfad5a89dfdd9b80cd7"
     },
     {
       "name": "amanda-job-lead-search",
@@ -163,13 +157,7 @@
       "name": "github-operations",
       "path": "github/github-operations",
       "files": 32,
-      "sha256": "b61cb9fa97c6b9f237ca61101fe5ce2dd2009307ca5068d09dadd7db67984f6e"
-    },
-    {
-      "name": "github-pr-evidence-integrity",
-      "path": "github/github-pr-evidence-integrity",
-      "files": 2,
-      "sha256": "ccd0938267507719932153341239749f35b78f84900f4680fdd845b1162471a5"
+      "sha256": "472a837153eec5af7c18a3c6fe4882a39152cc05576c899de84d5cff0da3f8e9"
     },
     {
       "name": "godmode-harness-creation",
@@ -217,7 +205,7 @@
       "name": "integration-audit-review",
       "path": "software-development/integration-audit-review",
       "files": 2,
-      "sha256": "e24c0a541517b7123bc8ad28027d1ca6bc341bdf7d33460a1bc277ff10328b5b"
+      "sha256": "e38ba3514b7a47f4c8b00a8a5bd2067fb0bb8a9ab197b8971791f5c2f2f6e559"
     },
     {
       "name": "jev-capture-advisor",
@@ -235,13 +223,13 @@
       "name": "jmd-menswear",
       "path": "branding/jmd-menswear",
       "files": 20,
-      "sha256": "0c8c7689ab2d7562ff943f67bf3b32a1c75446b4854762b207a603fe3797d1c4"
+      "sha256": "d378b9536428b6d95acc9e9e7a1ba3f0267f3f709902dd30aad69585dc60a45e"
     },
     {
       "name": "knowledge-memory-workflows",
       "path": "note-taking/knowledge-memory-workflows",
       "files": 9,
-      "sha256": "e9ae44e8a2a1125927f8703ee0c23d3737445db3e7a3fc52797477be297aab9b"
+      "sha256": "46ff5776569b551b00a6825122e83ac01ea5f47457491fa61d3313df6bb598a2"
     },
     {
       "name": "linear",
@@ -295,7 +283,7 @@
       "name": "memory-provider-setup",
       "path": "memory-provider-setup",
       "files": 3,
-      "sha256": "05f09a6dcde4119711b24eceb9899acdb797f9ca44065b14fc7b648d95483ef9"
+      "sha256": "c6297a5892e7108746d61d85706ccefd5c3cf2df215c7812a5dec27f71852f17"
     },
     {
       "name": "messaging-platform-operations",
@@ -307,7 +295,7 @@
       "name": "multi-agent-dev-workflow",
       "path": "multi-agent-dev-workflow",
       "files": 59,
-      "sha256": "d83b39f42f5b056d792ca9fed5faaf07700f258ec383ad3f388f723ff9b4c886"
+      "sha256": "bc4f41c00682836f6652b005d5f5fa9aa5658b37b4a69e76193b676b185c9180"
     },
     {
       "name": "native-mcp",
@@ -355,7 +343,7 @@
       "name": "productivity-integrations",
       "path": "productivity/productivity-integrations",
       "files": 82,
-      "sha256": "2c6dc37cbc06042971489537734f45725efe6b2bebff0331b073b969eb7f1a59"
+      "sha256": "29a9f59893671b0699f5d99c92ab3f5b09091087f1e41d5e5a4e5ff1b9bbb172"
     },
     {
       "name": "project-kickoff",
@@ -390,8 +378,8 @@
     {
       "name": "risk-proportional-pr-orchestration",
       "path": "software-development/risk-proportional-pr-orchestration",
-      "files": 6,
-      "sha256": "d4ebcd5ad5b2892035173fc34b7a94960bcb8f1de76d3a6335a73243a29560a4"
+      "files": 7,
+      "sha256": "a4c0798ccbab71cb3e21262c4c934a6910c786ff9dcf0c72c8005e91f6f0aa56"
     },
     {
       "name": "scheduled-monitoring-workflows",
@@ -424,10 +412,16 @@
       "sha256": "3ee8445b25401588dfb75edb39a641f1563ef9abc20ad1235b0259b1d8087757"
     },
     {
+      "name": "treg",
+      "path": "mcp/treg",
+      "files": 1,
+      "sha256": "e6b024761651dc25f6567cacd5e54f89d1852194eaffdcf4e25c4a0324905c01"
+    },
+    {
       "name": "verified-merge-closeout",
       "path": "software-development/verified-merge-closeout",
       "files": 7,
-      "sha256": "54e05ea0b60113981b0cf606711a2cf003b66ee58b7872fee1ae5c682e198925"
+      "sha256": "49f75246f8217ae409a98fcd551056eadb5e97040a8e03ec661b73c87f683a3d"
     },
     {
       "name": "web-application-qa",
@@ -451,7 +445,7 @@
       "name": "writing-humanization-and-voice-editing",
       "path": "creative/writing-humanization-and-voice-editing",
       "files": 3,
-      "sha256": "00c6475d93a7a17cb62f8739fc60fd5647b074c494f1bb5d308d59e4c2d7b01d"
+      "sha256": "3f23e3053eab96783d9f8c097db7d870727bba75a653f06f54fc08abb50617c8"
     },
     {
       "name": "writing-plans",

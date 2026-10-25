@@ -48,6 +48,17 @@ For a Google Sheets link, prefer the authenticated `gws sheets` API before gener
 ### Google Search Console API checks
 When asked whether Google Search Console API access works, verify the dedicated Search Console OAuth token and call the live API rather than relying on broad Google Workspace auth. `gws auth status` can prove the Google Workspace identity, but its OAuth grant may omit `webmasters.readonly` and the CLI may not expose Search Console resources. Use `references/google-search-console-api-checks.md` for the token paths, direct `webmasters/v3/sites` probe, Search Analytics smoke test, and common error interpretation.
 
+### Calendar imports from schedule PDFs
+
+- Name Amanda's Primrose Cottage work-shift events exactly `Primrose` rather than `Amanda — Work` or `Amanda — Work (Lyric)`, per Karan's naming preference. Preserve Lyric/source details in the description; do not apply this title to unrelated employers' shifts.
+
+- Karan's preference: Amanda's work-schedule events on `sabnani.kl@gmail.com` use pink (Google Calendar event `colorId: "4"`, Flamingo). Apply this explicitly on future imports, including Lyric shifts; do not recolor the entire personal calendar. Use `visibility: "default"` for Amanda's work events, inheriting the personal calendar's sharing settings rather than forcing private visibility, per Karan's correction. This is an agent import convention, not a Google Calendar title-based automatic rule.
+
+- Visually render calendar-grid PDFs before mapping dates: linear text/table extraction can associate a shift with the preceding column. Use the rendered date-cell boundaries as the mapping authority.
+- Preserve explicit shift times and ask about missing end times; do not infer them from neighboring shifts. Use `America/New_York` or the source's named timezone so daylight-saving transitions are handled correctly.
+- Read the destination calendar and full covered event range before inserting, deduplicate overlapping files, and read back every inserted event. Set privacy, reminders, availability, and notification behavior explicitly; distinguish another person's informational shifts from the calendar owner's busy time.
+- For idempotent Google Calendar imports, custom event IDs must use base32hex characters (`0-9`, `a-v`); arbitrary prefixes containing `w`–`z` fail with `Invalid resource id value`. A hexadecimal SHA-256 digest with a valid prefix is safe.
+
 ### Gmail triage
 Use the absorbed Google Workspace helper scripts for read-only checks:
 - `references/absorbed/google-workspace/scripts/setup.py` for auth validation

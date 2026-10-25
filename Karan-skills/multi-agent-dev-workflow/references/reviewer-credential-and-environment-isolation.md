@@ -45,7 +45,7 @@ The launcher:
 
 - builds a clean `env -i` allowlist;
 - supplies no `GH_TOKEN`, Linear key, messaging token, deployment credential, or unrelated secret;
-- pins `gpt-5.6-sol`, medium reasoning, and ephemeral context;
+- pins `gpt-6.1-sol`, medium reasoning, and ephemeral context;
 - rejects model/config/dangerous-sandbox overrides;
 - defaults to Codex's read-only sandbox.
 
@@ -63,7 +63,7 @@ reviewer \
 
 Add `--ui` only for UI-affecting PRs. The launcher:
 
-- starts only profile `reviewer` on `gpt-5.6-sol`/medium;
+- starts only profile `reviewer` on `gpt-6.1-sol`/medium;
 - pins base toolsets, adding only browser/vision for `--ui`;
 - rejects `--yolo`, profile/model/provider/toolset/skill overrides;
 - launches from a clean environment;
@@ -108,7 +108,7 @@ For Reviewer A's formal review state, use the corresponding `gh pr review` comma
 
 - [ ] Child environment lacks `GH_TOKEN` and unrelated secret-variable names.
 - [ ] Child `HOME`/XDG paths are reviewer-scoped where applicable.
-- [ ] Exact runtime is `gpt-5.6-sol` with medium reasoning.
+- [ ] Exact runtime is `gpt-6.1-sol` with medium reasoning.
 - [ ] Fresh profile snapshot contains only role-native skills.
 - [ ] Removed skills cannot load.
 - [ ] File-tool writes outside `/tmp` are blocked.

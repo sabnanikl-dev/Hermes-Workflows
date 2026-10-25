@@ -20,7 +20,7 @@ If Hermes has already implemented directly and the user rejects that path:
 When Claude Code repeatedly stalls behind a long-lived CodeGraph MCP child process, do not bypass Claude as builder. Relaunch Claude with MCP disabled but normal OAuth/keychain auth preserved:
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-5' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5-5' --print \
   --safe-mode \
   --strict-mcp-config \
   --mcp-config '{"mcpServers":{}}' \

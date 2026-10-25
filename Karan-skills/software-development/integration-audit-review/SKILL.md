@@ -132,6 +132,10 @@ For safety-sensitive registries, validators, or policy DSLs, audit the **complet
 
 When the PR advertises test, fixture, probe, artifact, or row counts, derive them from executable machine output. Assert the total and meaningful split programmatically, then compare them with the live PR body, fix comments, docs, and immutable packet. Builder prose and manual arithmetic are not verification evidence.
 
+### Migration validation and concurrent writers
+
+When a migration validates existing rows and then installs a new constraint or trigger, verify that validation, replacement, and commit are serialized against application writers. A migration-runner advisory lock usually serializes only other migration runners; an uncommitted old-guard write can remain invisible to the initial count and commit after installation. Require real two-session regressions for writer-first and migration-first ordering, an agreeing-data control, and refusal/rollback with pre-existing invalid data. Use the existing transaction and appropriate table-lock mechanism rather than adding a new framework; preserve already-applied migration bytes. Distinguish source-traced findings from executed PostgreSQL reproductions, and run database tests in the trusted verifier when the worker sandbox cannot start PostgreSQL.
+
 ### 5. Visual/browser QA when applicable
 
 For UI-affecting PRs, load `web-application-qa` and `local-web-preview`, and require a launch that grants task-scoped `browser` and `vision` toolsets.

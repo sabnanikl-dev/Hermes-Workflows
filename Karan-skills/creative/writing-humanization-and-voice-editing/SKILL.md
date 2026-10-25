@@ -101,6 +101,10 @@ Generate HTML and PDF from the same edited source when practical. Archive prior 
 
 When asked for a Stop Slop score, report each of its five dimensions (directness, rhythm, trust, authenticity, density) and calculate the total with a tool. Label the score an editorial judgment, not an automated measurement. Do not inflate it to reach a requested threshold or strip necessary factual/authority qualifiers for points. Keep scorecards outside the stakeholder document and bind any independent score to the exact edited source; preserve approved visual layouts during the prose pass.
 
+## Career positioning and AI-assisted portfolios
+
+For Karan’s LinkedIn/resume copy, lead with business strategy and hands-on AI implementation rather than an engineer-first identity. His stated positioning is a business strategy person with technical ability to do agentic engineering work. Establish problem framing, requirements, product decisions and delivery ownership before framework names. Agent-produced code is evidence of AI-assisted delivery, not proof of sole handwritten authorship or senior software/ML-engineering depth. Distinguish implemented work, operational evidence and experiments; use technical detail that he can explain in an interview. Keep project-specific evidence and draft copy in the career/project artifact, not in this skill.
+
 ## Output shape
 
 For short rewrites, return the final text directly. For larger or sensitive rewrites, use:

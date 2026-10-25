@@ -1,6 +1,6 @@
 ---
 name: multi-agent-dev-workflow
-description: "Multi-agent GitHub development workflow — Claude builder, gpt-5.6-sol medium Reviewer A/B plus Hermes Integration Auditor, exact-head fix loops, and human merge approval."
+description: "Multi-agent GitHub development workflow — Claude Opus 5.5 builder, gpt-6.1-sol medium Reviewer A/B plus Hermes Integration Auditor, exact-head fix loops, and human merge approval."
 version: 2.3.0
 author: Hermes Agent
 ---
@@ -105,9 +105,9 @@ When the work is **consulting-operations or client-delivery oriented** — intak
 | **Karan** | Vision + taste. Chooses/specs/delegates work, approves final output, and may merge to main himself. | Telegram or dashboard |
 | **Default Hermes** | Head/operator and final integrator. Reads issues, starts/supervises runs, verifies live state, adjudicates findings, keeps Karan informed, and escalates risky/ambiguous decisions. | Hermes + dashboard pane |
 | **Claude Code** | Lead builder. Implements from the issue + project harness, opens PRs, fixes blockers, and comments on PRs. | CLI subprocess / live pane |
-| **Codex Reviewer A** | Evaluator for correctness, tests, security, regressions, and edge cases. | `gpt-5.6-sol`, medium reasoning, fresh CLI process |
-| **Codex Reviewer B** | Evaluator for architecture, maintainability, docs/spec drift, harness compliance, and scope. | `gpt-5.6-sol`, medium reasoning, fresh CLI process |
-| **Hermes Integration Auditor** | Isolated `reviewer` profile for AC/claim coverage, cross-surface contract parity, CI/review reconciliation, PR metadata, generated artifacts, engine assumptions, and exact-head visual evidence. | `gpt-5.6-sol`, medium reasoning, hardened `reviewer` wrapper |
+| **Codex Reviewer A** | Evaluator for correctness, tests, security, regressions, and edge cases. | `gpt-6.1-sol`, medium reasoning, fresh CLI process |
+| **Codex Reviewer B** | Evaluator for architecture, maintainability, docs/spec drift, harness compliance, and scope. | `gpt-6.1-sol`, medium reasoning, fresh CLI process |
+| **Hermes Integration Auditor** | Isolated `reviewer` profile for AC/claim coverage, cross-surface contract parity, CI/review reconciliation, PR metadata, generated artifacts, engine assumptions, and exact-head visual evidence. | `gpt-6.1-sol`, medium reasoning, hardened `reviewer` wrapper |
 
 Key principle: Generation and evaluation are separate. Claude Code builds. Reviewer A/B critique focused surfaces. The Hermes Integration Auditor checks seams. Default Hermes verifies and synthesizes. Karan decides.
 
@@ -238,7 +238,7 @@ Hermes/GodMode owns the run state machine and local ledger; GitHub Issues/PRs/re
 ### Foreground (default)
 
 ```bash
-terminal(command="claude --model 'claude-opus-5' --print ...", timeout=300)
+terminal(command="claude --model 'claude-opus-5-5' --print ...", timeout=300)
 ```
 
 Hermes waits. When the process exits, Hermes reads stdout. Good for quick tasks.
@@ -246,7 +246,7 @@ Hermes waits. When the process exits, Hermes reads stdout. Good for quick tasks.
 ### Background + notify
 
 ```bash
-terminal(command="claude --model 'claude-opus-5' --print ...", background=true, notify_on_complete=true)
+terminal(command="claude --model 'claude-opus-5-5' --print ...", background=true, notify_on_complete=true)
 ```
 
 Hermes gets notified when the process finishes. Good for builds that take 5–15 minutes.
@@ -254,7 +254,7 @@ Hermes gets notified when the process finishes. Good for builds that take 5–15
 ### Background + polling (long builds)
 
 ```bash
-session = terminal(command="claude --model 'claude-opus-5' --print ...", background=true)
+session = terminal(command="claude --model 'claude-opus-5-5' --print ...", background=true)
 # Poll every 2 minutes, send Karan "still building..." updates
 ```
 
@@ -280,22 +280,22 @@ DONE: STATUS=pass|fail BLOCKING=<count>
 
 ### 5.1 Claude Code Build Session
 
-#### Claude builder model pin: Opus 5
+#### Claude builder model pin: Opus 5.5
 
 For `multi-agent-dev-workflow` runs, every Claude Code builder and fix lane MUST be launched with the explicit model flag:
 
 ```bash
---model 'claude-opus-5'
+--model 'claude-opus-5-5'
 ```
 
-Do not rely on Claude Code's default model or the generic `opus` alias for these runs. Quote the model value because `[1m]` is shell-glob syntax. If the exact Opus 5 model is unavailable, stop and report the model/auth blocker before falling back to another builder lane; do not silently use Sonnet/default Claude for the Claude builder.
+Do not rely on Claude Code's default model or the generic `opus` alias for these runs. Quote the model value because `[1m]` is shell-glob syntax. If the exact Opus 5.5 model is unavailable, stop and report the model/auth blocker before falling back to another builder lane; do not silently use Sonnet/default Claude for the Claude builder.
 
 #### Builder CLI readiness and fallback ladder
 
 Before launching a build or fix lane, smoke-test the intended builder instead of assuming the CLI is on the Hermes process `PATH`:
 
 1. Check `command -v claude` and `claude --version`.
-2. If `claude` is missing, check common install locations, especially `~/.local/bin/claude`. In Hermes desktop/TUI sessions the terminal `PATH` may omit `~/.local/bin` even when Claude Code is installed. If a valid Claude Code binary exists there, repair the current Hermes execution path by either exporting `PATH="$HOME/.local/bin:$PATH"` for the builder command or creating a stable symlink into an already-present Hermes path entry, e.g. `ln -sf "$HOME/.local/bin/claude" "$HOME/.hermes/node/bin/claude"`. Then verify with `command -v claude`, `claude --version`, and a real pinned-model smoke: `env -u GH_TOKEN claude --model 'claude-opus-5' --print 'Smoke test only. Reply exactly: CLAUDE_OK'`.
+2. If `claude` is missing, check common install locations, especially `~/.local/bin/claude`. In Hermes desktop/TUI sessions the terminal `PATH` may omit `~/.local/bin` even when Claude Code is installed. If a valid Claude Code binary exists there, repair the current Hermes execution path by either exporting `PATH="$HOME/.local/bin:$PATH"` for the builder command or creating a stable symlink into an already-present Hermes path entry, e.g. `ln -sf "$HOME/.local/bin/claude" "$HOME/.hermes/node/bin/claude"`. Then verify with `command -v claude`, `claude --version`, and a real pinned-model smoke: `env -u GH_TOKEN claude --model 'claude-opus-5-5' --print 'Smoke test only. Reply exactly: CLAUDE_OK'`.
 3. If Claude Code is present but auth/model calls fail, follow the Claude auth references in this skill (`claude-code-oauth-refresh.md`, `claude-code-setup-token-auth.md`) and verify with a real `claude --print` call; do not trust `auth status` alone.
 4. If Claude Code remains unavailable, do **not** let default Hermes silently become the builder. First try the role-native Hermes builder profile as the degraded substitute builder lane: `hermes -p builder chat -q 'Builder profile smoke test only. Reply exactly: BUILDER_OK' --toolsets '' --quiet`. If that passes, launch `hermes -p builder chat -q "$(cat /tmp/builder-prompt.md)" --quiet` from the isolated repo/worktree with the same issue/harness prompt, completion marker, verification requirements, and PR-bus rules. Sign the PR/comment as `Built by: Hermes builder profile via Hermes orchestration`, and report it as a **degraded builder-profile fallback**, not a clean Claude Code pass.
 5. Only if both Claude Code and the builder Hermes profile are unavailable should default Hermes implement directly, and only with explicit human approval or a documented emergency workaround. That direct fallback must be disclosed in the PR body and final report.
@@ -305,7 +305,7 @@ Before launching a build or fix lane, smoke-test the intended builder instead of
 If Karan explicitly says to use `multi-agent-dev-workflow` after Hermes has already inspected the issue or made a small local draft, do **not** simply continue as a Hermes-built PR. Pivot into the workflow and preserve agent-role integrity:
 
 1. Load this skill immediately and switch the task plan to builder/reviewer lanes.
-2. Smoke-test Claude Code with a tiny pinned-model call (`claude --model 'claude-opus-5' --print ...`) before launching the build lane.
+2. Smoke-test Claude Code with a tiny pinned-model call (`claude --model 'claude-opus-5-5' --print ...`) before launching the build lane.
 3. Prompt Claude Code as the **builder owner** and disclose that a Hermes draft diff may exist; instruct Claude to inspect it as input only, adjust/revert as needed, run verification, and commit the final builder-owned result.
 4. Hermes may still create/push the PR after the builder commit, but the PR body must honestly state the builder lane and verification evidence.
 5. Run Codex Reviewer A, Codex Reviewer B, and the Hermes Integration Auditor against the opened PR/current head before saying mergeable.
@@ -315,7 +315,7 @@ If Karan explicitly says to use `multi-agent-dev-workflow` after Hermes has alre
 # Hermes runs this via terminal(command="...", pty=true)
 # Keep OAuth/keychain auth, but disable user/project MCP for Hermes-managed builder runs.
 printf '{"mcpServers":{}}' > /tmp/claude-empty-mcp.json
-env -u GH_TOKEN claude --model 'claude-opus-5' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5-5' --print \
   --no-session-persistence \
   --permission-mode dontAsk \
   --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
@@ -348,13 +348,13 @@ Once the PR is open, load `risk-proportional-pr-orchestration`. Use the detailed
 
 ### Reviewer runtime and packet gate
 
-Every reviewer process MUST use `gpt-5.6-sol` with `medium` reasoning. Do not rely on user/global defaults and do not silently substitute another model.
+Every reviewer process MUST use `gpt-6.1-sol` with `medium` reasoning. Do not rely on user/global defaults and do not silently substitute another model.
 
 | Reviewer | Focus | Runtime | Prepared artifact |
 |---|---|---|---|
-| Codex Reviewer A | Correctness, tests, security, edge cases, regression risk | `gpt-5.6-sol`, medium | Formal review body |
-| Codex Reviewer B | Architecture, maintainability, docs/spec drift, harness compliance, scope | `gpt-5.6-sol`, medium | Signed PR conversation-comment body |
-| Hermes Integration Auditor | AC/claim coverage, code/schema/spec/docs/CI parity, review-state reconciliation, generated artifacts, cross-engine assumptions, PR metadata, exact-head visual evidence | hardened `reviewer` wrapper, `gpt-5.6-sol`, medium | Signed PR conversation-comment body |
+| Codex Reviewer A | Correctness, tests, security, edge cases, regression risk | `gpt-6.1-sol`, medium | Formal review body |
+| Codex Reviewer B | Architecture, maintainability, docs/spec drift, harness compliance, scope | `gpt-6.1-sol`, medium | Signed PR conversation-comment body |
+| Hermes Integration Auditor | AC/claim coverage, code/schema/spec/docs/CI parity, review-state reconciliation, generated artifacts, cross-engine assumptions, PR metadata, exact-head visual evidence | hardened `reviewer` wrapper, `gpt-6.1-sol`, medium | Signed PR conversation-comment body |
 
 Default Hermes first prepares an immutable, credential-free review packet containing the repository/PR identity, packet timestamp, exact `headRefOid`, issue/PR contract, reviews/comments/threads/checks, baseline output, and visual-evidence manifest when applicable. Every lane required by the selected tier inspects that packet and a disposable exact-head worktree. Reviewer children receive no GitHub token and perform no external write.
 
@@ -372,7 +372,7 @@ codex-reviewer \
   --read-only
 ```
 
-Use `--workspace-write` only when default Hermes explicitly decides an isolated disposable worktree needs test-generated files. The launcher still supplies no remote credential, rejects model/config/dangerous-sandbox overrides, and pins ephemeral `gpt-5.6-sol`/medium.
+Use `--workspace-write` only when default Hermes explicitly decides an isolated disposable worktree needs test-generated files. The launcher still supplies no remote credential, rejects model/config/dangerous-sandbox overrides, and pins ephemeral `gpt-6.1-sol`/medium.
 
 Each prompt names the packet path, exact expected full head SHA, role focus, read-only/no-credential boundary, intended artifact type, signature, and marker:
 
@@ -381,6 +381,8 @@ DONE: REVIEWER=<A|B> STATUS=pass|fail BLOCKING=<count> HEAD=<sha> ARTIFACT=relay
 ```
 
 ### Hermes Integration Auditor launch
+
+Verify the auditor launcher and `hermes profile show reviewer` during initial workflow preflight, before promising a third lane. Persistent specialist profiles may have been deliberately retired; an installed skill is not proof that its launcher/profile exists. If either is absent, do not recreate it or silently substitute default Hermes/a Codex lane. Ask Karan for task-scoped approval of a credential-free Codex integration audit, or report the audit unavailable while preserving completed A/B evidence. A replacement approved for another PR is not blanket standing authority.
 
 Load `integration-audit-review`, verify `hermes profile show reviewer`, then launch the hardened wrapper from the same worktree:
 
@@ -420,7 +422,7 @@ See `references/reviewer-credential-and-environment-isolation.md` for packet con
 Hermes may include only identifiers and task boundaries (PR number, branch, issue number, cycle limit, verification requirements). Do not courier blocker prose unless the builder cannot access GitHub; if that fallback is necessary, label it explicitly as fallback data and treat the run as degraded.
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-5' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5-5' --print \
   --permission-mode dontAsk \
   --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
   --system-prompt-file AGENTS.md \
@@ -515,7 +517,7 @@ PR: #<N> | Issue: #<N>
 |--------|----------|---------|
 | **Claude Code opens a PR** | Bottom of PR description | `Built by: Claude Code via Hermes orchestration` |
 | **Claude Code pushes fixes** | New comment on PR | `Fixed by: Claude Code via Hermes orchestration` |
-| **Codex Reviewer A** | Formal review when possible | `Reviewed by: Codex Reviewer A via Hermes orchestration` + `Model: gpt-5.6-sol | Reasoning: medium` |
+| **Codex Reviewer A** | Formal review when possible | `Reviewed by: Codex Reviewer A via Hermes orchestration` + `Model: gpt-6.1-sol | Reasoning: medium` |
 | **Codex Reviewer B** | Signed PR conversation comment | `Reviewed by: Codex Reviewer B via Hermes orchestration` + runtime line |
 | **Hermes Integration Auditor** | Signed PR conversation comment | `Reviewed by: Hermes Integration Auditor profile` + runtime line |
 | **Default Hermes merges** | Merge/closeout comment when requested | `Merged by: Hermes on behalf of Karan` |
@@ -640,11 +642,11 @@ For GitHub-first coding workflows, treat the PR itself as the shared coordinatio
 | Merge conflict on PR | **Auto-resolve trivial conflicts** (lockfiles, generated code). **For semantic conflicts**, escalate to Karan with a summary of what each branch changed and a recommended action. |
 | Visual regression detected | Block merge, ask Claude Code to fix |
 | Agent hangs or crashes | Kill process, restart fresh session |
-| Claude Code CLI missing from `PATH` | Check common install locations (`~/.local/bin/claude` first), repair the Hermes execution path or per-command `PATH`, then verify `claude --version` and a real pinned Opus 5 smoke (`claude --model 'claude-opus-5' --print ...`) before falling back. |
+| Claude Code CLI missing from `PATH` | Check common install locations (`~/.local/bin/claude` first), repair the Hermes execution path or per-command `PATH`, then verify `claude --version` and a real pinned Opus 5.5 smoke (`claude --model 'claude-opus-5-5' --print ...`) before falling back. |
 | Claude Code installed but auth/model call fails | Follow the Claude auth refresh/setup references and verify with real `claude --print`; do not trust `auth status` alone. |
 | Claude Code remains unavailable | Use the `builder` Hermes profile as the degraded builder lane if its smoke test passes; otherwise stop and ask/escale before default Hermes implements directly. |
-| Codex CLI unavailable | First verify the binary path, not just `command -v`: Homebrew cask symlinks can go stale. Repair the installed CLI if needed, then smoke-test through the hardened `codex-reviewer` launcher with a credential-free prompt file and read-only sandbox. The startup banner must show `model: gpt-5.6-sol` and `reasoning effort: medium`. If the wrapper/auth/model pin still fails, stop and report the lane unavailable; do not run direct unsandboxed Codex or substitute another model silently. |
-| Hermes reviewer profile unavailable | Verify `hermes profile show reviewer`, the four-skill allowlist, `.no-bundled-skills`, `model.default: gpt-5.6-sol`, `agent.reasoning_effort: medium`, `terminal.home_mode: profile`, and the hardened `reviewer` launcher; then run a real wrapper model/skill smoke. If it still fails, stop and report the Integration Auditor lane unavailable unless Karan explicitly authorizes a reduced review set. |
+| Codex CLI unavailable | First verify the binary path, not just `command -v`: Homebrew cask symlinks can go stale. Repair the installed CLI if needed, then smoke-test through the hardened `codex-reviewer` launcher with a credential-free prompt file and read-only sandbox. The startup banner must show `model: gpt-6.1-sol` and `reasoning effort: medium`. If the wrapper/auth/model pin still fails, stop and report the lane unavailable; do not run direct unsandboxed Codex or substitute another model silently. |
+| Hermes reviewer profile unavailable | Verify `hermes profile show reviewer`, the four-skill allowlist, `.no-bundled-skills`, `model.default: gpt-6.1-sol`, `agent.reasoning_effort: medium`, `terminal.home_mode: profile`, and the hardened `reviewer` launcher; then run a real wrapper model/skill smoke. If it still fails, stop and report the Integration Auditor lane unavailable unless Karan explicitly authorizes a reduced review set. |
 | Terminal backend timeout | Retry once with increased timeout, then escalate |
 
 ## Merge Conflict Resolution Policy

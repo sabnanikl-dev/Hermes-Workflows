@@ -52,7 +52,11 @@ Do not use an old continuation, repair-cycle, or generic workflow approval as me
 
 ### 1. Freeze the live pre-merge state
 
-Query the PR and verify:
+Read the live PR body and governing review contract alongside the status/check fields before any ready-marking or merge. A direct merge request does not by itself waive an outstanding independent-review gate: green CI and `CLEAN` establish mechanical readiness, not review completion. If required reviewer artifacts are absent or the PR explicitly records an incomplete review gate, hold the merge and identify the missing lanes; route an authorized review loop through `risk-proportional-pr-orchestration` instead of marking the draft ready.
+
+If Karan interrupts a merge request with “review first,” suspend both merge and branch-deletion authority. A subsequent instruction to run the review loop authorizes that bounded review/fix workflow, not automatic execution of the earlier merge request; return the verified review outcome for a fresh merge decision.
+
+Then verify:
 
 - `state == OPEN`;
 - `headRefOid` and final PR commit equal the exact reviewed head;

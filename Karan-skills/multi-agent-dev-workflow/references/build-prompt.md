@@ -4,7 +4,7 @@
 > Fresh session every time. No `--continue`.
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-5' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5-5' --print \
   --no-session-persistence \
   --permission-mode dontAsk \
   --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \

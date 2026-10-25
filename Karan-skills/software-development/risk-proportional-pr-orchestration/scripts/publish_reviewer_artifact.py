@@ -71,7 +71,22 @@ def validate_artifact(path: Path, *, role: str, head: str) -> str:
         raise RuntimeError("artifact must contain exactly one canonical role and exact-head declaration")
     if len(status_lines) != 1 or len(blocker_lines) != 1:
         raise RuntimeError("artifact must contain exactly one status and blocker-count declaration")
+    review_event(body)  # Fail before credential lookup even during dry-run preflight.
     return body
+
+
+def review_event(body: str) -> str:
+    """A decision/evidence hold is a COMMENT, never an implicit approval."""
+    declarations = [line.strip() for line in body.splitlines()
+                    if line.startswith("STATUS:") or line.startswith("STATUS=")]
+    if len(declarations) != 1:
+        raise RuntimeError("artifact needs exactly one status declaration")
+    status = re.split(r"[:=]", declarations[0], maxsplit=1)[1].strip().lower()
+    events = {"pass": "APPROVE", "block": "REQUEST_CHANGES", "fail": "REQUEST_CHANGES",
+              "needs-karan": "COMMENT", "needs-human": "COMMENT"}
+    if status not in events:
+        raise RuntimeError(f"unsupported reviewer status: {status!r}")
+    return events[status]
 
 
 def main() -> None:
@@ -121,9 +136,7 @@ def main() -> None:
     payload: Path | None = None
     try:
         if args.role == "A":
-            status = next(line for line in body.splitlines() if line.startswith("STATUS:") or line.startswith("STATUS="))
-            blocked = "block" in status.lower() or "fail" in status.lower()
-            event = "REQUEST_CHANGES" if blocked else "APPROVE"
+            event = review_event(body)
             payload = temporary_payload({"body": body, "event": event, "commit_id": args.head})
             created = gh(["--method", "POST", f"repos/{args.repo}/pulls/{args.pr}/reviews"], env=reviewer_env, payload=payload)
             artifact_id = created.get("id") if isinstance(created, dict) else None

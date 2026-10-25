@@ -64,7 +64,7 @@ The harness template is repo-agnostic. Populate `docs/spec.md` with project-spec
 ### Build Session
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-5' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5-5' --print \
   --no-session-persistence \
   --permission-mode dontAsk \
   --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \
@@ -95,7 +95,7 @@ codex --yolo exec "Review PR #N.
 ### Fix Session (if needed)
 
 ```bash
-env -u GH_TOKEN claude --model 'claude-opus-5' --print \
+env -u GH_TOKEN claude --model 'claude-opus-5-5' --print \
   --no-session-persistence \
   --permission-mode dontAsk \
   --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(shasum *)' \

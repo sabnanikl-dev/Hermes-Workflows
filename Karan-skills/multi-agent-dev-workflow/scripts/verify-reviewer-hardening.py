@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default="reviewer")
     parser.add_argument("--hermes-root", type=Path, default=home / ".hermes")
-    parser.add_argument("--model", default="gpt-5.6-sol")
+    parser.add_argument("--model", default="gpt-6.1-sol")
     parser.add_argument("--provider", default="openai-codex")
     parser.add_argument("--reasoning", default="medium")
     parser.add_argument(
@@ -119,7 +119,7 @@ def main() -> int:
     if args.codex_launcher.is_file():
         text = args.codex_launcher.read_text()
         check("--sandbox \"$sandbox\"" in text, "Codex launcher lacks sandbox pin")
-        check("gpt-5.6-sol" in text and "medium" in text, "Codex launcher lacks runtime pin")
+        check("gpt-6.1-sol" in text and "medium" in text, "Codex launcher lacks runtime pin")
 
     snapshot = profile / ".skills_prompt_snapshot.json"
     if snapshot.is_file():
