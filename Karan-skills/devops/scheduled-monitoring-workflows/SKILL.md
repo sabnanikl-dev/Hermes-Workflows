@@ -65,6 +65,8 @@ For website DNS flips that must preserve mail and need independent HTTPS vantage
 
 ## Human-response reminders
 
+For OpenRig queue replies delivered through a dedicated Telegram inbox, use `references/openrig-reply-notifications.md`: transport-attributed substantive responses, hard expiry, at-most-once emission, native delivery receipts and inbox-session continuity.
+
 1. Bind each reminder to the original request, recipient, channel/thread and exact artifact revision. Link back to the existing request rather than resending the approval packet each day.
 2. Define the local-time slot, first eligible date and stop condition before scheduling. Distinguish the scheduler's next check from the first actual reminder when a start-date guard suppresses an earlier tick.
 3. Use deterministic script-only execution for fixed nudges and reply checks. Enforce every stop/date/deduplication gate in executable code, not merely the job prompt, because no-agent execution does not interpret prompt instructions.

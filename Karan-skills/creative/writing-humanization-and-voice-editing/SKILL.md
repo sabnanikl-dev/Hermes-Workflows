@@ -105,6 +105,8 @@ When asked for a Stop Slop score, report each of its five dimensions (directness
 
 For Karan’s LinkedIn/resume copy, lead with business strategy and hands-on AI implementation rather than an engineer-first identity. His stated positioning is a business strategy person with technical ability to do agentic engineering work. Establish problem framing, requirements, product decisions and delivery ownership before framework names. Agent-produced code is evidence of AI-assisted delivery, not proof of sole handwritten authorship or senior software/ML-engineering depth. Distinguish implemented work, operational evidence and experiments; use technical detail that he can explain in an interview. Keep project-specific evidence and draft copy in the career/project artifact, not in this skill.
 
+For Karan’s LinkedIn posts and post-series work, load `linkedin-post-workflow` for the complete editorial, media, approval and publication process. For AI-focused posts, combine actual projects with useful tooling tips and opinions an AI novice can understand; avoid turning the post into a portfolio inventory or résumé. Use concrete workflows and plain-language explanations. When he provides a creator reference such as Alex Finn, inspect the reference and adapt broad traits (energy, accessible explanations, practical demonstrations) while preserving Karan’s own voice and evidence boundaries. Do not import hype, unverified results, or the creator’s personal experiences.
+
 ## Output shape
 
 For short rewrites, return the final text directly. For larger or sensitive rewrites, use:

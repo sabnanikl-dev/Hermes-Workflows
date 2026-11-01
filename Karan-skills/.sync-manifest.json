@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 75,
+  "skill_count": 72,
   "skills": [
     {
       "name": "adversarial-technical-artifact-review",
@@ -56,6 +56,12 @@
       "path": "software-development/autonomous-pr-prover",
       "files": 16,
       "sha256": "3ed7a8c15775851bc22c1d91c12184d3c6569fbc76d4feed786eab6559500594"
+    },
+    {
+      "name": "baoyu-visual-storytelling",
+      "path": "creative/baoyu-visual-storytelling",
+      "files": 115,
+      "sha256": "3f829dbc1aecc2190caf2cc3d7febf0bc62a9e3d6affc4733485e9458bb37f83"
     },
     {
       "name": "client-automation-workflow-scaffolding",
@@ -112,22 +118,10 @@
       "sha256": "21e14cc71648341b45315feb631223a2d0fd2a370f38f4401e1a540af6d448cf"
     },
     {
-      "name": "firecrawl-scrape",
-      "path": "firecrawl-scrape",
-      "files": 1,
-      "sha256": "a4e4537bf5301c35f0448499959c3bb57d0080576221d181e1093c9931bf4658"
-    },
-    {
       "name": "firecrawl-search",
       "path": "firecrawl-search",
       "files": 1,
       "sha256": "137e42ec992894541b22884d41d000bdf6f695e160695256a36b854c624bfa3d"
-    },
-    {
-      "name": "gateway-troubleshooting",
-      "path": "devops/gateway-troubleshooting",
-      "files": 5,
-      "sha256": "9c4daaf32f8e9806f7d47db746be2ae03e39b246e4630dcbf207440e0a38f160"
     },
     {
       "name": "generated-artifact-proofing",
@@ -250,6 +244,12 @@
       "sha256": "9c69003a351fd6e2682ee03d4907761f4d06e2b16778819987432991126e8f9e"
     },
     {
+      "name": "linkedin-post-workflow",
+      "path": "social-media/linkedin-post-workflow",
+      "files": 3,
+      "sha256": "932095837b6929b8acc49fefa05962b076d894a90c945ccaf3e920b35cabd3fe"
+    },
+    {
       "name": "local-seo-visibility-ops",
       "path": "productivity/local-seo-visibility-ops",
       "files": 28,
@@ -259,7 +259,7 @@
       "name": "local-web-preview",
       "path": "devops/local-web-preview",
       "files": 6,
-      "sha256": "3ec0b4878db33d6e0c979df18a69fb7cb841064b4b273ab7523445a21c0e3c3b"
+      "sha256": "912229ada9a1b85c2d97a04c13ca7cc1baa6c5e1f4a6ff07a5b66977c1e1f477"
     },
     {
       "name": "mac-storage-cleanup-review",
@@ -324,14 +324,8 @@
     {
       "name": "obsidian-wiki-maintenance",
       "path": "obsidian-wiki-maintenance",
-      "files": 3,
-      "sha256": "15f433ecf7753729505879ec01b26c0493237a69915be8c7457a07d340d43129"
-    },
-    {
-      "name": "openrouter-image-analysis",
-      "path": "media/openrouter-image-analysis",
-      "files": 1,
-      "sha256": "6e47a70b4363ebeef254bf5ed8ab7efd2c67c303d306c5bf6f53da1dbd923a9d"
+      "files": 2,
+      "sha256": "58f176dfc2a53bc00445a19547640e78ed79e0d336e69ab08bb765577a80f5e0"
     },
     {
       "name": "product-ui-copy-passes",
@@ -358,12 +352,6 @@
       "sha256": "cdae8b86a3624f7507221f2e0fc0e9909ac8dc292d82aa45bff184340b0e8b00"
     },
     {
-      "name": "research-intelligence-workflows",
-      "path": "research/research-intelligence-workflows",
-      "files": 64,
-      "sha256": "f0924c8cf8c6a15795c83903fed25abc7f073d8691f59bb8ba446c493fa489f7"
-    },
-    {
       "name": "research-workflow",
       "path": "research/research-workflow",
       "files": 21,
@@ -384,14 +372,20 @@
     {
       "name": "scheduled-monitoring-workflows",
       "path": "devops/scheduled-monitoring-workflows",
-      "files": 7,
-      "sha256": "1b4da8cb4b4339d26ad8f90d40f5fed16aa93c33715dc77a9c425c710e055a64"
+      "files": 8,
+      "sha256": "b34cbe54b1b038cfef48f5d181e5b5139901cdf4e747a8749a6c65122a2d68ae"
     },
     {
       "name": "scoped-child-agent-execution",
       "path": "devops/scoped-child-agent-execution",
       "files": 6,
       "sha256": "c6ff4e41e391e1dd08b63b5881932d8c8a36dd4d6ce99d54cc2d4fdec357a533"
+    },
+    {
+      "name": "session-librarian",
+      "path": "productivity/session-librarian",
+      "files": 1,
+      "sha256": "149043c438958a93377d16e101144875ce8263f9184899659b8276884b6307b3"
     },
     {
       "name": "software-development-lifecycle",
@@ -406,16 +400,10 @@
       "sha256": "94f298aea3533b9102f904f066aadca199d39bed49ef3e3459a83498e4fa3e0b"
     },
     {
-      "name": "tracker-artifact-closeout",
-      "path": "productivity/tracker-artifact-closeout",
-      "files": 8,
-      "sha256": "3ee8445b25401588dfb75edb39a641f1563ef9abc20ad1235b0259b1d8087757"
-    },
-    {
       "name": "treg",
       "path": "mcp/treg",
       "files": 1,
-      "sha256": "e6b024761651dc25f6567cacd5e54f89d1852194eaffdcf4e25c4a0324905c01"
+      "sha256": "2ad4c97b5c224a731336098b0ec983517678ad867e4e013cf9fedfe6bee9c8dc"
     },
     {
       "name": "verified-merge-closeout",
@@ -430,12 +418,6 @@
       "sha256": "d8ba8ff89a2ed5d71fa450800b796ab86e853e44170465c30138d15de59195d8"
     },
     {
-      "name": "wiki-health-check",
-      "path": "obsidian-wiki-maintenance/wiki-health-check",
-      "files": 1,
-      "sha256": "a71559a27b717a95b96516810c4232312308017ce5b3da87103eb7c95c925810"
-    },
-    {
       "name": "workflow-pattern-adaptation",
       "path": "devops/workflow-pattern-adaptation",
       "files": 5,
@@ -445,7 +427,7 @@
       "name": "writing-humanization-and-voice-editing",
       "path": "creative/writing-humanization-and-voice-editing",
       "files": 3,
-      "sha256": "3f23e3053eab96783d9f8c097db7d870727bba75a653f06f54fc08abb50617c8"
+      "sha256": "3fece8260778ae1406d13a39dab7d19a47823547674da32d5bc9f99ce02b0b9a"
     },
     {
       "name": "writing-plans",

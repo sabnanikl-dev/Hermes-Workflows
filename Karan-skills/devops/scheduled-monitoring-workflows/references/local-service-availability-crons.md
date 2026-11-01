@@ -11,7 +11,7 @@ The cron is an **availability ensure**, not an execution trigger:
 3. If healthy, make no changes.
 4. If the expected port is occupied but health fails, fail closed; do not kill or replace the unknown listener.
 5. If down, the port is free, prerequisites exist, and the approved workflow is active, start the server as a Hermes-tracked background process. If configuration lives in a dotenv-style file whose assignments are not prefixed with `export`, use `set -a; source <env-file>; set +a` (or an equivalent verified env loader) so the child process actually inherits the variables. A plain `source <env-file>` only creates shell variables and can silently launch the service with fallback/test configuration.
-6. Recheck HTTP health and the listener before reporting success. Also verify one non-secret configuration sentinel from the child process or the next read-only execution record (for example, production-vs-test mode/project identity); process health alone cannot prove the intended runtime configuration was inherited.
+6. Recheck HTTP health and the listener before reporting success. Also verify one non-secret configuration sentinel from the child process or the next read-only execution record (for example, production-vs-test mode/project identity); process health alone cannot prove the intended runtime configuration was inherited. Treat native trigger activation as asynchronous: allow bounded foreground retries (up to 60 seconds), compare database timestamps as UTC against the actual process-start receipt, and require current-version activation after that start or equivalent current-process log evidence. An old activation row is inconclusive, not proof activation failed.
 7. Never manually execute, import, publish, activate, deactivate, or edit the dependent workflow unless separately authorized.
 
 ## Hermes Cron Shape
@@ -31,6 +31,8 @@ Re-arm completed one-shot Hermes jobs with the supported `hermes cron resume <id
 When the service hosts its own internal schedule, run the availability ensure shortly **before** a known internal trigger rather than at the same minute. Example: ensure at 05:50 for an internal 06:00 reconciliation. This gives startup and health verification time without manually triggering the workflow.
 
 A once-daily ensure only helps while the machine and Hermes scheduler are awake. State that boundary explicitly; do not imply cloud-grade uptime for a local Mac-hosted process.
+
+After a reboot or long offline period, inspect host boot time and cron dispatch lateness before blaming the workflow. Starting after a fixed wall-clock slot does not itself replay that missed slot. Report verified service restoration separately from pending sync recovery; do not convert a successful availability start into a failed-start claim solely because historical sync is stale. Keep missed-sync alerts active in the separate watchdog. An immediate catch-up still needs explicit recovery authority; if testing a native timer with a temporary occurrence, back up the current graph in a new recovery directory, restore the original schedule afterward, and distinguish controlled-trigger proof from the next regular-slot proof.
 
 ## Verification
 

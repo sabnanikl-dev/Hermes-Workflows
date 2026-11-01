@@ -69,6 +69,24 @@ Catalog calls can spend team credit, so the same approval rule applies before `t
 
 Do not infer profile-editing authority or capability from a successful social OAuth connection. Inspect the platform catalog including management endpoints (`treg catalog linkedin --all --limit 100`) and exact endpoint metadata. LinkedIn `GET /v2/userinfo` proves the connected member identity/lite-profile retrieval; it does not read or edit headline, About, experience or skills. Post creation/media-upload operations are not profile-edit substitutes. If no supported edit operation is exposed, report that limitation and propose manual or separately authorized browser editing. Never probe live mutation endpoints merely to test permission, or substitute undocumented APIs. Keep content approval distinct from tool capability and current-field readback.
 
+## LinkedIn draft-versus-publish boundary
+
+For a request to draft a LinkedIn post, inspect the official Posts API schema before making a write. Although `DRAFT` can appear in returned lifecycle states, the documented create operation accepts only `PUBLISHED`; the catalog's `linkedin.linkedin.user.post.create` is not a draft-saving tool. Do not test `DRAFT` on a live mutation endpoint or substitute publication/dark posts. Prepare local copy and media, disclose that no native LinkedIn draft was created, and obtain explicit publication approval before upload/create. Source: https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/post-api-schema . Recheck the contract if capabilities change.
+
+## LinkedIn video publication and verification
+
+After explicit publication approval, initialize video upload using the exact file size and owner. Follow the returned inclusive byte ranges rather than hardcoding a chunk size; PUT each part to its signed LinkedIn upload URL, collect ETags in order, finalize with the returned uploadToken, then read `/rest/videos/{encodedURN}` until `AVAILABLE` before post creation. Set visibility, distribution, media ID, lifecycleState and reshare setting explicitly.
+
+Preserve response headers on post creation: HTTP 201 may have an empty body and the post URN only in `x-restli-id`. The CLI's normal display discards headers; an inspected installed `treg.cli._client(_load_config())` can execute the same `/call/linkedin/...` proxy route while retaining them, without printing or copying credentials. Record a create-attempt marker before sending and never blindly retry after a lost response.
+
+A connected member can have write access but lack `r_member_social`; GET `/rest/posts/{URN}` may return 403 after successful creation. Do not republish. Verify the exact post URL in a public browser instead: compare the complete description/body to approved text, author, and the rendered video source's asset ID to the uploaded video URN. Preserve canonical URL and verification evidence. Distinguish API-readback failure from public-browser verification success. Use supported current LinkedIn-Version and X-Restli-Protocol-Version headers; signed media URLs are not durable post permalinks.
+
+## LinkedIn image publication
+
+After approval, use `linkedin.linkedin.image.upload.init` (`POST /rest/images?action=initializeUpload`) with the verified member owner, then PUT the approved PNG bytes to the returned signed LinkedIn URL with `Content-Type: image/png`. Keep the signed URL transient. Record the image URN and content hashes; check `/rest/images/{encodedURN}` for `AVAILABLE` and the correct owner when read permission permits. Create the post once with `content.media.id`, explicit audience/distribution/lifecycle/reshare fields, and preserve `x-restli-id` as for video.
+
+For public-browser verification, compare the full description and JSON-LD articleBody with the approved caption, verify the JSON-LD author and uploaded asset ID in the image URL, and scroll the post image into view before checking `complete`/`naturalWidth`. LinkedIn lazy-loads the image: a full-page screenshot alone can leave it blank. Save the canonical `og:url` and verification evidence. A 403 from the Posts API is a read-permission limit, not reason to retry creation.
+
 ## Security
 
 - Never print, paste, or persist the treg token outside the approved secret store.
