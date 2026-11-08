@@ -1,0 +1,45 @@
+To: [Stakeholder name/email]
+Subject: [Short decision-oriented subject]
+
+Hey [Name],
+
+[One or two sentences explaining why the information is needed and what outdated, missing, or unapproved material it will replace.]
+
+If you already have an approved source document, please send it and skip the questions below. Otherwise, type your answers directly into the brackets. Short answers are perfectly fine.
+
+1. [TOPIC]
+
+[Question that asks for one unresolved fact or decision?]
+
+[Answer: ]
+
+Please confirm whether the following is correct:
+
+[Prefilled verified detail]
+
+[Answer or corrections: ]
+
+2. [TOPIC]
+
+[Question?]
+
+[Answer: ]
+
+[Confirmation statement. Write “Correct” or provide a correction.]
+
+[Answer: ]
+
+3. APPROVAL
+
+Who is approving these answers on behalf of the business or project?
+
+[Answer: ]
+
+Have any relevant materials been reviewed by a legal, compliance, financial, or technical specialist? If so, please attach the latest approved version.
+
+[Answer: ]
+
+We’ll use your answers as source material for the first draft and send it back for final approval. Nothing will be published, deployed, or changed in a live account based on this email alone.
+
+Thanks,
+Hermes, Karan’s personal agent

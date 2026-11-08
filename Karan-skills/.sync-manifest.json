@@ -7,7 +7,7 @@
     "skills attached to cron jobs whose last_run_at falls within the usage window"
   ],
   "source": "~/.hermes/skills",
-  "skill_count": 72,
+  "skill_count": 74,
   "skills": [
     {
       "name": "adversarial-technical-artifact-review",
@@ -64,10 +64,10 @@
       "sha256": "3f829dbc1aecc2190caf2cc3d7febf0bc62a9e3d6affc4733485e9458bb37f83"
     },
     {
-      "name": "client-automation-workflow-scaffolding",
-      "path": "devops/client-automation-workflow-scaffolding",
-      "files": 4,
-      "sha256": "06f1578fddc27dc5c2726b39ab3432aa8ad7ca1ccb074d0198302c717b52c82b"
+      "name": "brand-website-from-inspiration",
+      "path": "brand-website-from-inspiration",
+      "files": 2,
+      "sha256": "845ad0a11e34e79cf2f6f78b22429568254fb1943e525965df306ab5f4b00283"
     },
     {
       "name": "code-review",
@@ -85,7 +85,7 @@
       "name": "creative-html-visual-artifacts",
       "path": "creative/creative-html-visual-artifacts",
       "files": 94,
-      "sha256": "32bf868eab892e5daa94a2e95d4f76683b05cceb7bee1d4f562b49d44c3e54a2"
+      "sha256": "16c03cc83435aa7c88c6023e82062e0754e914aeebfa6637d351d5f4e1fd7e0a"
     },
     {
       "name": "cross-system-mission-control",
@@ -106,16 +106,34 @@
       "sha256": "2ba1e1b975f76ebebafff0e51447566bb0fabcd44852dc2a63161d1cde844567"
     },
     {
+      "name": "design-mode-toolkit",
+      "path": "devops/design-mode-toolkit",
+      "files": 2,
+      "sha256": "50efe15769752094b7d10721add5898e02fc25d16a2bdad9a38e125104e1d3e8"
+    },
+    {
       "name": "deterministic-validator-review",
       "path": "software-development/deterministic-validator-review",
       "files": 22,
       "sha256": "c11817c452d8eb607241081a567725a53db3f245c89c68b2d65a9f349cd66166"
     },
     {
+      "name": "email-action-workflow",
+      "path": "productivity/email-action-workflow",
+      "files": 3,
+      "sha256": "f59a6cefcc6a0f055ef9c46c04b6507e20bc97d04cc89e7439f66a67bdaf5616"
+    },
+    {
       "name": "femme-events-design",
       "path": "branding/femme-events-design",
       "files": 8,
       "sha256": "21e14cc71648341b45315feb631223a2d0fd2a370f38f4401e1a540af6d448cf"
+    },
+    {
+      "name": "firecrawl-interact",
+      "path": "firecrawl-interact",
+      "files": 1,
+      "sha256": "4ae6137e9407124143100e8740e5a3d90034945213e5838ca3a5c4bc7fe71306"
     },
     {
       "name": "firecrawl-search",
@@ -154,12 +172,6 @@
       "sha256": "472a837153eec5af7c18a3c6fe4882a39152cc05576c899de84d5cff0da3f8e9"
     },
     {
-      "name": "godmode-harness-creation",
-      "path": "devops/godmode-harness-creation",
-      "files": 6,
-      "sha256": "ebe8e785c8b2a9080e94ee1ea14fd09b7c334f81d65536c10cbfc74faf85cfd2"
-    },
-    {
       "name": "google-analytics-ga4",
       "path": "productivity/google-analytics-ga4",
       "files": 9,
@@ -184,10 +196,16 @@
       "sha256": "e7c697e667e7536a64e4d8b958ab3aadf101603e8686d1080c979c7a9b49484d"
     },
     {
+      "name": "hermes-desktop-plugins",
+      "path": "hermes-desktop-plugins",
+      "files": 2,
+      "sha256": "dedb8ba0491e73bf3d931c1c4d2294261ff6e1ad168002f3cc8c73bcc203ff87"
+    },
+    {
       "name": "ideation",
       "path": "creative/creative-ideation",
       "files": 2,
-      "sha256": "ac853cd491c8624f5a7db234822240707785e2f1f8b4d1c03070bd45681edd79"
+      "sha256": "032972dd9434dc3067c92b54ac7a1aba6fd9f4c2c53eb3e1f83dc76e067fd02d"
     },
     {
       "name": "inquiry-form-formspree",
@@ -247,7 +265,7 @@
       "name": "linkedin-post-workflow",
       "path": "social-media/linkedin-post-workflow",
       "files": 3,
-      "sha256": "932095837b6929b8acc49fefa05962b076d894a90c945ccaf3e920b35cabd3fe"
+      "sha256": "ac8d21904ebed4bc226f8da0be89bc131c87924f90fb3172cd188148cfb59b48"
     },
     {
       "name": "local-seo-visibility-ops",
@@ -310,12 +328,6 @@
       "sha256": "b42cbb12be4263d782012dd89dced6058d75359291b458a33c617e9362db2f56"
     },
     {
-      "name": "notebooklm-to-github-issues",
-      "path": "github/notebooklm-to-github-issues",
-      "files": 27,
-      "sha256": "d05941630599ca9ff2177e6a05280e25dcb5cade13a5c9487af7b36c2ad163dc"
-    },
-    {
       "name": "notebooklm-to-obsidian-synthesis",
       "path": "note-taking/notebooklm-to-obsidian-synthesis",
       "files": 14,
@@ -326,6 +338,12 @@
       "path": "obsidian-wiki-maintenance",
       "files": 2,
       "sha256": "58f176dfc2a53bc00445a19547640e78ed79e0d336e69ab08bb765577a80f5e0"
+    },
+    {
+      "name": "openrouter-image-analysis",
+      "path": "media/openrouter-image-analysis",
+      "files": 1,
+      "sha256": "6e47a70b4363ebeef254bf5ed8ab7efd2c67c303d306c5bf6f53da1dbd923a9d"
     },
     {
       "name": "product-ui-copy-passes",
@@ -373,7 +391,7 @@
       "name": "scheduled-monitoring-workflows",
       "path": "devops/scheduled-monitoring-workflows",
       "files": 8,
-      "sha256": "b34cbe54b1b038cfef48f5d181e5b5139901cdf4e747a8749a6c65122a2d68ae"
+      "sha256": "59366263fabac2686608092d247322c3e2d8dbbc565ed0bcdce567249d699cc5"
     },
     {
       "name": "scoped-child-agent-execution",
@@ -402,8 +420,8 @@
     {
       "name": "treg",
       "path": "mcp/treg",
-      "files": 1,
-      "sha256": "2ad4c97b5c224a731336098b0ec983517678ad867e4e013cf9fedfe6bee9c8dc"
+      "files": 2,
+      "sha256": "c28aa65153d7d2c2b24b30b866972fd1b40b444936079dbd68fbb6582872d243"
     },
     {
       "name": "verified-merge-closeout",
@@ -428,12 +446,6 @@
       "path": "creative/writing-humanization-and-voice-editing",
       "files": 3,
       "sha256": "3fece8260778ae1406d13a39dab7d19a47823547674da32d5bc9f99ce02b0b9a"
-    },
-    {
-      "name": "writing-plans",
-      "path": "software-development/writing-plans",
-      "files": 1,
-      "sha256": "10f90617ee2ab1a78f157a48b9006d15a82761e2316bf6b360857c14a748a0d5"
     },
     {
       "name": "xitter",

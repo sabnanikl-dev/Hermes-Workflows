@@ -57,6 +57,8 @@ treg tool ls
 
 Catalog calls can spend team credit, so the same approval rule applies before `treg call`.
 
+Python helpers that import `treg.cli` (e.g. `_client(_load_config())` for header-preserving proxy calls) must run under the treg CLI's interpreter — the uv-tool python named in `treg`'s shebang; system pythons lack treg and httpx.
+
 ### Authentication recovery
 
 - Check `treg login --help`, the configured base URL, and `treg balance` before a paid request. Catalog metadata can work without valid authentication; it is not proof that paid calls will work.
@@ -85,7 +87,7 @@ A connected member can have write access but lack `r_member_social`; GET `/rest/
 
 After approval, use `linkedin.linkedin.image.upload.init` (`POST /rest/images?action=initializeUpload`) with the verified member owner, then PUT the approved PNG bytes to the returned signed LinkedIn URL with `Content-Type: image/png`. Keep the signed URL transient. Record the image URN and content hashes; check `/rest/images/{encodedURN}` for `AVAILABLE` and the correct owner when read permission permits. Create the post once with `content.media.id`, explicit audience/distribution/lifecycle/reshare fields, and preserve `x-restli-id` as for video.
 
-For public-browser verification, compare the full description and JSON-LD articleBody with the approved caption, verify the JSON-LD author and uploaded asset ID in the image URL, and scroll the post image into view before checking `complete`/`naturalWidth`. LinkedIn lazy-loads the image: a full-page screenshot alone can leave it blank. Save the canonical `og:url` and verification evidence. A 403 from the Posts API is a read-permission limit, not reason to retry creation.
+For public-browser verification, compare the full description and JSON-LD articleBody with the approved caption, verify the JSON-LD author and uploaded asset ID in the image URL, and scroll the post image into view before checking `complete`/`naturalWidth`. LinkedIn lazy-loads the image: a full-page screenshot alone can leave it blank. A logged-out post page may show an authwall modal over an otherwise fully rendered post; the media element is underneath — remove the modal nodes from the DOM, scroll the image into view, then confirm the uploaded asset ID in the loaded `src` plus `naturalWidth` before screenshotting. Compare the caption programmatically (JSON-LD `articleBody` equality against the approved caption file), not by eye. Save the canonical `og:url` and verification evidence. A 403 from the Posts API is a read-permission limit, not reason to retry creation. A proven parameterized upload/publish/verify script skeleton is in `templates/linkedin-image-publish.py`; copy it into the post's project folder and set the constants.
 
 ## Security
 

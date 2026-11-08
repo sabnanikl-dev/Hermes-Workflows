@@ -19,6 +19,11 @@ Develop with project context, reusable instructions, review standards and approv
 
 A saved procedure is context for future work, not model retraining or guaranteed perfect memory.
 
+**Purpose-based distinction**
+> A project repository holds the work. The second brain connects the knowledge around that work.
+
+When differentiating two of Karan's own systems (e.g. project repository vs. second brain), distinguish by purpose — deliver this project vs. carry learning forward — and acknowledge honest overlap rather than claiming a technology-exclusive boundary.
+
 **Honest tradeoff**
 > Running the agent on my computer also doesn’t mean everything stays local: cloud models still receive the context sent to them.
 
@@ -37,6 +42,8 @@ Joins personalization, privacy and control in language a novice understands.
 - **Manufactured proof:** a realistic-looking fake Telegram exchange remains illustrative. Prefer actual media and label mockups. Never infer achieved metrics from a simulated exchange.
 - **Confusing intent with results:** a clip ending with “I’ll merge it” shows intent after approval, not a verified merge. Limit the description to what footage establishes unless additional evidence exists.
 - **Revision drift:** do not let a requested security paragraph erase the customization thesis Karan liked. Preserve accepted parts and edit the targeted portion.
+- **Agent without a home:** describing a specialist agent (e.g. Karan's DevOps engineer) through its permissions alone left readers unclear on what it is, and centering the tool (OpenRig) instead was also rejected. Karan wants the storyline to be the real project being built (e.g. "how I'm using OpenRig to build Lead Distro"): the project and its delivery flow lead, the tool is the how, and individual agents appear as members of that flow. Ground in the repo's conventions/PR history. One storyline per post; cut side agents that dilute it. Confirm client permission before naming a client-owned product. For OpenRig/team posts, Karan wants the team itself (seat locations, jobs, communication channels, task flow, approvals) — not the product's slice plan or build progress. Ground in `~/.openrig/specs/*/CULTURE.md`, rig specs and hosts.yaml.
+- **Example crowding the takeaway:** when the concrete example needs more explanation than the lesson it proves, compress it to its supporting role (what was researched, tried, learned) and let the central benefit lead. A post that spends more words explaining the example than the takeaway becomes a post about the example.
 
 ## Series angles to adapt
 

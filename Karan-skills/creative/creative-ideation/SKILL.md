@@ -87,6 +87,10 @@ Remember an old project. Do it again from scratch. No looking at the original. S
 
 See `references/full-prompt-library.md` for 30+ additional constraints across communication, scale, philosophy, transformation, and more.
 
+## Hackathon proposals
+
+For Karan's plugin-hackathon ideation, pair practical utility with a visibly impressive interaction. Lead with the concrete on-screen transformation a judge can understand in seconds; internal verification, audit logs, and process correctness are supporting features, not the headline. Check existing catalog overlap and distinguish the native plugin interaction/state from what a prompt or skill already does. Keep the demo-sized scope credible rather than promising a universal product.
+
 ## Matching Constraints to Users
 
 | User says | Pick from |

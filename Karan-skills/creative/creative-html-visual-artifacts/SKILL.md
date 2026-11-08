@@ -28,6 +28,12 @@ This umbrella covers browser-rendered creative artifacts and design prototypes. 
 ### Diagrams and Excalidraw
 Start from the message's architecture/flow, choose the representation (SVG/HTML vs Excalidraw JSON), and verify the artifact renders locally.
 
+For HTML/SVG node-and-edge diagrams (flows, knowledge graphs):
+- Derive edge endpoints and label positions from live card geometry, not hand-guessed coordinates — read each node and label box with `getBoundingClientRect()` via JS, start/end lines a few pixels outside the measured card edges, and place edge labels in verified empty gaps between cards. Guessed coordinates drift from rendered positions, producing arrows that stop short of cards and labels overlapping card text.
+- Run an independent vision QA pass over the rendered screenshot with concrete checklist questions (headline clipping, card containment and overlap, arrow-to-card contact, label placement, footer visibility), fix, and re-capture until clean. If the built-in vision tool errors out (e.g. routed to a non-multimodal model), fall back to the `openrouter-image-analysis` skill's OpenRouter vision call — write the QA script to a file and run it via terminal so base64 image payloads don't hit stdout caps.
+- Export at 2x `deviceScaleFactor` for crisp feed-size images, hash-verify the saved copy against the capture, and keep the editable source next to the final asset so later edits don't rebuild from scratch.
+- When badges/chips straddle a window's border (e.g. layer labels on a mock app window), attach them to a positioned wrapper around the window — `overflow:hidden` on the window clips anything placed inside it at negative offsets. Before screenshotting a fixed-size canvas, assert `scrollHeight == clientHeight` so added sections don't silently push content out of frame.
+
 ### HTML mockups and reports
 Make complete standalone files with inline CSS/JS unless the user asks for a framework. Use `local-web-preview` for realistic rendering and screenshot verification.
 
